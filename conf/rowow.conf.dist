@@ -1,0 +1,117 @@
+[worldserver]
+
+###################################################################################################
+#
+# 	ROWOW.Enabled
+#		Enable/Disables the mod as a whole, overriding any other property or setting
+#	Default: True (enabled)
+#
+###################################################################################################
+
+ROWOW.Enabled = True
+
+###################################################################################################
+#
+# 	ROWOW.Creature.MoveStepDistance
+#		Length (in yards) of each ground-snapped step in a Ragnarok Online creature's movement
+#       path.  Shorter steps follow the terrain more closely, and cost more height checks
+#	Default: 1.0
+#
+# 	ROWOW.Creature.MoveMaxRisePerStep
+#		Steepest slope (height change per yard) a creature path may climb or drop.  A steeper
+#       step is treated as a wall or cliff, and the path ends before it
+#	Default: 1.2
+#
+# 	ROWOW.Creature.MoveFloorSearchHeight
+#		How far above a creature (in yards) the search for the ground under it starts, when snapping
+#       it to the ground and when starting a path.  Path steps search from a step's allowed climb
+#       (MoveMaxRisePerStep) above the step before
+#	Default: 3.0
+#
+# 	ROWOW.Creature.MoveFloorSearchDistance
+#		How far down (in yards) the ground search looks
+#	Default: 30.0
+#
+###################################################################################################
+
+ROWOW.Creature.MoveStepDistance = 1.0
+ROWOW.Creature.MoveMaxRisePerStep = 1.2
+ROWOW.Creature.MoveFloorSearchHeight = 3.0
+ROWOW.Creature.MoveFloorSearchDistance = 30.0
+
+###################################################################################################
+#
+# 	ROWOW.Creature.RandomWalkMaxDistance
+#		Farthest (in yards, per axis) a creature walks in one random walk.  RO uses 7 cells, 7.35 yards at the converter's 1.05 yards per cell
+#	Default: 7.35
+#
+# 	ROWOW.Creature.RandomWalkMinDelayInMS
+# 	ROWOW.Creature.RandomWalkMaxDelayInMS
+#		Pause between random walks, after the walk itself is done.  RO uses 4 to 5 seconds
+#	Default: 4000, 5000
+#
+###################################################################################################
+
+ROWOW.Creature.RandomWalkMaxDistance = 7.35
+ROWOW.Creature.RandomWalkMinDelayInMS = 4000
+ROWOW.Creature.RandomWalkMaxDelayInMS = 5000
+
+###################################################################################################
+#
+# 	ROWOW.Creature.ChaseRepathIntervalInMS
+#		How often a chasing creature checks whether its target has moved
+#	Default: 250
+#
+# 	ROWOW.Creature.ChaseRepathTargetMoveDistance
+#		How far (in yards) the target must move from where a chasing creature is heading before
+#       a new path is built
+#	Default: 1.0
+#
+###################################################################################################
+
+ROWOW.Creature.ChaseRepathIntervalInMS = 250
+ROWOW.Creature.ChaseRepathTargetMoveDistance = 1.0
+
+###################################################################################################
+#
+# 	ROWOW.Creature.GroundSnapCheckIntervalInMS
+#		How often a standing creature is checked for being off the ground
+#	Default: 1000
+#
+# 	ROWOW.Creature.GroundSnapTolerance
+#		How far (in yards) off the ground a standing creature can be before it is put back on it
+#	Default: 0.15
+#
+###################################################################################################
+
+ROWOW.Creature.GroundSnapCheckIntervalInMS = 1000
+ROWOW.Creature.GroundSnapTolerance = 0.15
+
+###################################################################################################
+#
+# 	ROWOW.Creature.UnreachableAfterTimeInMS
+#		How long a chasing creature's path has to keep failing (the target up on a ledge, behind a
+#       wall) before the target counts as unreachable, which hands it to the core's handling
+#       (the creature evades after a while)
+#	Default: 2000
+#
+# 	ROWOW.Creature.OutOfReachGiveUpTimeInMS
+#		How long a creature that never moves (RO plants and the like) keeps a target that stays out
+#       of its reach (and doesn't hurt it) before giving up on it.  At least 1000
+#	Default: 8000
+#
+###################################################################################################
+
+ROWOW.Creature.UnreachableAfterTimeInMS = 2000
+ROWOW.Creature.OutOfReachGiveUpTimeInMS = 8000
+
+###################################################################################################
+#
+# 	ROWOW.Creature.RangedAttackApproachFraction
+#		How far into its attack range a ranged attacker (an RO archer) comes before it stops and
+#       attacks, as a fraction of the range (1.0 stops right at the edge).  From 0.1 to 1.0
+#	Default: 0.8
+#
+###################################################################################################
+
+ROWOW.Creature.RangedAttackApproachFraction = 0.8
