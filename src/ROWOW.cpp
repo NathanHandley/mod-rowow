@@ -63,6 +63,7 @@ void ROWOWMod::LoadConfigurationFile()
         ConfigRangedAttackApproachFraction = 0.1f;
     if (ConfigRangedAttackApproachFraction > 1.0f)
         ConfigRangedAttackApproachFraction = 1.0f;
+    ConfigCellPathing = sConfigMgr->GetOption<bool>("ROWOW.Creature.CellPathing", true);
 
     // Event intervals of zero would make the AI's event loop run the same event over and over in one update
     if (ConfigRandomWalkMinDelayInMS < 100)
@@ -102,6 +103,171 @@ void ROWOWMod::LoadCreatureTemplateData()
         CreatureTemplatesByEntry[fields[0].Get<uint32>()] = creatureTemplate;
     } while (result->NextRow());
     LOG_INFO("module.ROWOW", "ROWOWMod::LoadCreatureTemplateData loaded {} creature templates", CreatureTemplatesByEntry.size());
+}
+
+void ROWOWMod::LoadSkillEffectData()
+{
+    SkillEffectsBySpellID.clear();
+    if (IsEnabled == false)
+        return;
+
+    // The converter creates the table, so it may not exist yet on a server that hasn't had the ROWOW SQL applied
+    QueryResult tableResult = WorldDatabase.Query("SELECT 1 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'mod_rowow_skill_effect'");
+    if (!tableResult)
+    {
+        LOG_INFO("module.ROWOW", "ROWOWMod::LoadSkillEffectData found no mod_rowow_skill_effect table, so RO skills have no scripted parts");
+        return;
+    }
+    QueryResult result = WorldDatabase.Query("SELECT `SpellID`, `EffectType`, `TriggerSpellID`, `Chance`, `ChancePerCasterLevel`, `IsChanceByLevelDifference`, `ValueA`, `ValueB` FROM `mod_rowow_skill_effect` ORDER BY `SpellID`, `EffectIndex`");
+    if (!result)
+        return;
+    uint32 effectCount = 0;
+    do
+    {
+        Field* fields = result->Fetch();
+        ROWOWSkillEffect skillEffect;
+        skillEffect.EffectType = fields[1].Get<uint8>();
+        skillEffect.TriggerSpellID = fields[2].Get<uint32>();
+        skillEffect.Chance = fields[3].Get<float>();
+        skillEffect.ChancePerCasterLevel = fields[4].Get<float>();
+        skillEffect.IsChanceByLevelDifference = fields[5].Get<uint8>() != 0;
+        skillEffect.ValueA = fields[6].Get<int32>();
+        skillEffect.ValueB = fields[7].Get<int32>();
+        SkillEffectsBySpellID[fields[0].Get<uint32>()].push_back(skillEffect);
+        effectCount++;
+    } while (result->NextRow());
+    LOG_INFO("module.ROWOW", "ROWOWMod::LoadSkillEffectData loaded {} skill script parts for {} spells", effectCount, SkillEffectsBySpellID.size());
+}
+
+void ROWOWMod::LoadSkillCellData()
+{
+    SkillCellLayoutsBySpellID.clear();
+    if (IsEnabled == false)
+        return;
+
+    // The converter creates the table, so it may not exist yet on a server that hasn't had the ROWOW SQL applied
+    QueryResult tableResult = WorldDatabase.Query("SELECT 1 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'mod_rowow_skill_cell'");
+    if (!tableResult)
+    {
+        LOG_INFO("module.ROWOW", "ROWOWMod::LoadSkillCellData found no mod_rowow_skill_cell table, so RO ground skills have no cell layouts");
+        return;
+    }
+    QueryResult result = WorldDatabase.Query("SELECT `SpellID`, `Direction`, `OffsetX`, `OffsetY` FROM `mod_rowow_skill_cell` ORDER BY `SpellID`, `Direction`, `CellIndex`");
+    if (!result)
+        return;
+    uint32 cellCount = 0;
+    do
+    {
+        Field* fields = result->Fetch();
+        uint8 direction = fields[1].Get<uint8>();
+        ROWOWSkillCellLayout& cellLayout = SkillCellLayoutsBySpellID[fields[0].Get<uint32>()];
+        if (direction == ROWOW_RO_DIRECTION_ANY)
+            direction = 0;
+        else if (direction < ROWOW_RO_DIRECTION_COUNT)
+            cellLayout.IsDirectional = true;
+        else
+        {
+            LOG_ERROR("module.ROWOW", "ROWOWMod::LoadSkillCellData has a cell with direction {} for spell {}, which isn't a direction", direction, fields[0].Get<uint32>());
+            continue;
+        }
+        cellLayout.CellsByDirection[direction].emplace_back(fields[2].Get<int16>(), fields[3].Get<int16>());
+        cellCount++;
+    } while (result->NextRow());
+    LOG_INFO("module.ROWOW", "ROWOWMod::LoadSkillCellData loaded {} skill cells for {} spells", cellCount, SkillCellLayoutsBySpellID.size());
+}
+
+void ROWOWMod::LoadMapGridData()
+{
+    MapGridsByMapID.clear();
+    if (IsEnabled == false)
+        return;
+
+    // The converter creates the table, so it may not exist yet on a server that hasn't had the ROWOW SQL applied
+    QueryResult tableResult = WorldDatabase.Query("SELECT 1 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'mod_rowow_map_grid'");
+    if (!tableResult)
+    {
+        LOG_INFO("module.ROWOW", "ROWOWMod::LoadMapGridData found no mod_rowow_map_grid table, so no map has an RO cell grid");
+        return;
+    }
+    QueryResult result = WorldDatabase.Query("SELECT `MapID`, `OriginX`, `OriginY`, `CellSize` FROM `mod_rowow_map_grid`");
+    if (!result)
+        return;
+    do
+    {
+        Field* fields = result->Fetch();
+        ROWOWMapGrid mapGrid;
+        mapGrid.OriginX = fields[1].Get<float>();
+        mapGrid.OriginY = fields[2].Get<float>();
+        mapGrid.CellSize = fields[3].Get<float>();
+        if (mapGrid.CellSize < 0.1f)
+        {
+            LOG_ERROR("module.ROWOW", "ROWOWMod::LoadMapGridData has a cell size of {} for map {}, so it's skipped", mapGrid.CellSize, fields[0].Get<uint32>());
+            continue;
+        }
+        CellSize = mapGrid.CellSize;
+        MapGridsByMapID[fields[0].Get<uint32>()] = mapGrid;
+    } while (result->NextRow());
+    LOG_INFO("module.ROWOW", "ROWOWMod::LoadMapGridData loaded the cell grids of {} maps", MapGridsByMapID.size());
+}
+
+ROWOWMapGrid const* ROWOWMod::GetMapGrid(uint32 mapID) const
+{
+    auto mapGridIter = MapGridsByMapID.find(mapID);
+    if (mapGridIter == MapGridsByMapID.end())
+        return nullptr;
+    return &mapGridIter->second;
+}
+
+ROWOWSkillCellLayout const* ROWOWMod::GetSkillCellLayout(uint32 spellID) const
+{
+    auto cellLayoutIter = SkillCellLayoutsBySpellID.find(spellID);
+    if (cellLayoutIter == SkillCellLayoutsBySpellID.end())
+        return nullptr;
+    return &cellLayoutIter->second;
+}
+
+uint8 ROWOWMod::GetRODirection(float deltaX, float deltaY)
+{
+    // RO's directions: 0 north, 1 north-west, 2 west, 3 south-west, 4 south, 5 south-east, 6 east, 7 north-east (x east, y north)
+    if (deltaX == 0 && deltaY == 0)
+        return ROWOW_RO_DIRECTION_EAST;
+    if (deltaX >= 0 && deltaY >= 0)
+    {
+        if (deltaX >= deltaY * 3)
+            return 6;
+        if (deltaX * 3 < deltaY)
+            return 0;
+        return 7;
+    }
+    if (deltaX >= 0 && deltaY <= 0)
+    {
+        if (deltaX >= -deltaY * 3)
+            return 6;
+        if (deltaX * 3 < -deltaY)
+            return 4;
+        return 5;
+    }
+    if (deltaX <= 0 && deltaY <= 0)
+    {
+        if (deltaX * 3 >= deltaY)
+            return 4;
+        if (deltaX < deltaY * 3)
+            return 2;
+        return 3;
+    }
+    if (-deltaX * 3 <= deltaY)
+        return 0;
+    if (-deltaX > deltaY * 3)
+        return 2;
+    return 1;
+}
+
+std::vector<ROWOWSkillEffect> const* ROWOWMod::GetSkillEffects(uint32 spellID) const
+{
+    auto skillEffectsIter = SkillEffectsBySpellID.find(spellID);
+    if (skillEffectsIter == SkillEffectsBySpellID.end())
+        return nullptr;
+    return &skillEffectsIter->second;
 }
 
 void ROWOWMod::LoadIllusionData()
@@ -377,9 +543,15 @@ bool ROWOWMod::BuildGroundContouredPath(Creature* creature, float targetX, float
 {
     pathNodesOut.clear();
 
+    if (ConfigCellPathing == true)
+    {
+        ROWOWMapGrid const* mapGrid = GetMapGrid(creature->GetMapId());
+        if (mapGrid != nullptr)
+            return BuildCellPath(creature, *mapGrid, targetX, targetY, stopShortDistance, pathNodesOut);
+    }
+
     float startX = creature->GetPositionX();
     float startY = creature->GetPositionY();
-    float startZ = creature->GetPositionZ();
     float deltaX = targetX - startX;
     float deltaY = targetY - startY;
     float distance = std::sqrt(deltaX * deltaX + deltaY * deltaY);
@@ -394,21 +566,8 @@ bool ROWOWMod::BuildGroundContouredPath(Creature* creature, float targetX, float
     if (stepCount > ROWOW_MOVE_MAX_PATH_NODES)
         stepCount = ROWOW_MOVE_MAX_PATH_NODES;
     float stepDistance = travelDistance / float(stepCount);
-    Map* map = creature->GetMap();
-    pathNodesOut.emplace_back(startX, startY, startZ);
-
-    // Steps are compared against the ground under the creature, not its own height, since other movement (a fear, a knockback)
-    // can leave it a little off the ground.  Ground far above it is an overhang (a deck, a table), not what it stands on
-    float startGroundZ = startZ;
-    if (GetGroundZ(creature, startX, startY, startZ, startGroundZ) == true)
-    {
-        if (startGroundZ > startZ + ConfigMoveMaxRisePerStep)
-        {
-            if (GetGroundZ(creature, startX, startY, startZ, 0.5f, startGroundZ) == false)
-                startGroundZ = startZ;
-        }
-        startZ = startGroundZ;
-    }
+    float startZ = GetPathStartGroundZ(creature);
+    pathNodesOut.emplace_back(startX, startY, creature->GetPositionZ());
     float priorX = startX;
     float priorY = startY;
     float priorZ = startZ;
@@ -416,20 +575,9 @@ bool ROWOWMod::BuildGroundContouredPath(Creature* creature, float targetX, float
     {
         float stepX = startX + directionX * stepDistance * float(stepIndex);
         float stepY = startY + directionY * stepDistance * float(stepIndex);
-        // Search from a step's climb above the prior step, so a low arch or deck overhead isn't taken for the ground
         float stepZ = 0;
-        if (GetGroundZ(creature, stepX, stepY, priorZ, ConfigMoveMaxRisePerStep * stepDistance + 0.5f, stepZ) == false)
+        if (CanStepTo(creature, priorX, priorY, priorZ, stepX, stepY, stepDistance, stepZ) == false)
             break;
-
-        // Too steep up or down is a wall or a cliff, which RO wouldn't let a monster walk over
-        if (std::fabs(stepZ - priorZ) > ConfigMoveMaxRisePerStep * stepDistance)
-            break;
-
-        // Something solid in the way (a building or a fence)
-        if (map->isInLineOfSight(priorX, priorY, priorZ + ROWOW_MOVE_LINE_OF_SIGHT_HEIGHT, stepX, stepY, stepZ + ROWOW_MOVE_LINE_OF_SIGHT_HEIGHT,
-            creature->GetPhaseMask(), LINEOFSIGHT_CHECK_VMAP, VMAP::ModelIgnoreFlags::Nothing) == false)
-            break;
-
         pathNodesOut.emplace_back(stepX, stepY, stepZ);
         priorX = stepX;
         priorY = stepY;
@@ -442,4 +590,141 @@ bool ROWOWMod::BuildGroundContouredPath(Creature* creature, float targetX, float
         return false;
     }
     return true;
+}
+
+bool ROWOWMod::BuildCellPath(Creature* creature, ROWOWMapGrid const& mapGrid, float targetX, float targetY, float stopShortDistance, Movement::PointsArray& pathNodesOut)
+{
+    float startX = creature->GetPositionX();
+    float startY = creature->GetPositionY();
+    int32 cellX = mapGrid.GetCellX(startY);
+    int32 cellY = mapGrid.GetCellY(startX);
+    int32 targetCellX = mapGrid.GetCellX(targetY);
+    int32 targetCellY = mapGrid.GetCellY(targetX);
+    float startZ = GetPathStartGroundZ(creature);
+    pathNodesOut.emplace_back(startX, startY, creature->GetPositionZ());
+
+    // Already in the target's cell: a creature off the cell's center (after a knockback or a fear) steps onto it
+    float priorX = startX;
+    float priorY = startY;
+    float priorZ = startZ;
+    if (cellX == targetCellX && cellY == targetCellY)
+    {
+        float cellCenterX = mapGrid.GetCellCenterWorldX(cellY);
+        float cellCenterY = mapGrid.GetCellCenterWorldY(cellX);
+        float centerDistance = std::sqrt((cellCenterX - startX) * (cellCenterX - startX) + (cellCenterY - startY) * (cellCenterY - startY));
+        float centerZ = 0;
+        if (centerDistance > 0.1f && CanStepTo(creature, priorX, priorY, priorZ, cellCenterX, cellCenterY, centerDistance, centerZ) == true)
+            pathNodesOut.emplace_back(cellCenterX, cellCenterY, centerZ);
+    }
+
+    // Diagonal steps while the target's cell is off in both directions, then straight.  A blocked step tries the steps to either side of
+    // it (still toward the target), never going back onto a cell already stepped on
+    std::vector<std::pair<int32, int32>> visitedCells;
+    visitedCells.emplace_back(cellX, cellY);
+    while (pathNodesOut.size() < ROWOW_MOVE_MAX_PATH_NODES)
+    {
+        if (cellX == targetCellX && cellY == targetCellY)
+            break;
+        float nodeDeltaX = targetX - priorX;
+        float nodeDeltaY = targetY - priorY;
+        if (stopShortDistance > 0 && pathNodesOut.size() > 1 && std::sqrt(nodeDeltaX * nodeDeltaX + nodeDeltaY * nodeDeltaY) <= stopShortDistance)
+            break;
+        int32 stepCellX = targetCellX > cellX ? 1 : (targetCellX < cellX ? -1 : 0);
+        int32 stepCellY = targetCellY > cellY ? 1 : (targetCellY < cellY ? -1 : 0);
+        std::pair<int32, int32> candidateSteps[3];
+        candidateSteps[0] = std::make_pair(stepCellX, stepCellY);
+        if (stepCellX != 0 && stepCellY != 0)
+        {
+            candidateSteps[1] = std::make_pair(stepCellX, 0);
+            candidateSteps[2] = std::make_pair(0, stepCellY);
+        }
+        else if (stepCellX != 0)
+        {
+            candidateSteps[1] = std::make_pair(stepCellX, 1);
+            candidateSteps[2] = std::make_pair(stepCellX, -1);
+        }
+        else
+        {
+            candidateSteps[1] = std::make_pair(1, stepCellY);
+            candidateSteps[2] = std::make_pair(-1, stepCellY);
+        }
+        bool hasStepped = false;
+        for (uint8 candidateIndex = 0; candidateIndex < 3; ++candidateIndex)
+        {
+            int32 nextCellX = cellX + candidateSteps[candidateIndex].first;
+            int32 nextCellY = cellY + candidateSteps[candidateIndex].second;
+            bool isVisited = false;
+            for (std::pair<int32, int32> const& visitedCell : visitedCells)
+            {
+                if (visitedCell.first == nextCellX && visitedCell.second == nextCellY)
+                {
+                    isVisited = true;
+                    break;
+                }
+            }
+            if (isVisited == true)
+                continue;
+            float stepX = mapGrid.GetCellCenterWorldX(nextCellY);
+            float stepY = mapGrid.GetCellCenterWorldY(nextCellX);
+            float stepDistance = std::sqrt((stepX - priorX) * (stepX - priorX) + (stepY - priorY) * (stepY - priorY));
+            float stepZ = 0;
+            if (CanStepTo(creature, priorX, priorY, priorZ, stepX, stepY, stepDistance, stepZ) == false)
+                continue;
+            pathNodesOut.emplace_back(stepX, stepY, stepZ);
+            visitedCells.emplace_back(nextCellX, nextCellY);
+            cellX = nextCellX;
+            cellY = nextCellY;
+            priorX = stepX;
+            priorY = stepY;
+            priorZ = stepZ;
+            hasStepped = true;
+            break;
+        }
+        if (hasStepped == false)
+            break;
+    }
+
+    if (pathNodesOut.size() < 2)
+    {
+        pathNodesOut.clear();
+        return false;
+    }
+    return true;
+}
+
+bool ROWOWMod::CanStepTo(Creature* creature, float priorX, float priorY, float priorZ, float stepX, float stepY, float stepDistance, float& stepZOut)
+{
+    // Search from a step's climb above the prior step, so a low arch or deck overhead isn't taken for the ground
+    float stepZ = 0;
+    if (GetGroundZ(creature, stepX, stepY, priorZ, ConfigMoveMaxRisePerStep * stepDistance + 0.5f, stepZ) == false)
+        return false;
+
+    // Too steep up or down is a wall or a cliff, which RO wouldn't let a monster walk over
+    if (std::fabs(stepZ - priorZ) > ConfigMoveMaxRisePerStep * stepDistance)
+        return false;
+
+    // Something solid in the way (a building or a fence)
+    if (creature->GetMap()->isInLineOfSight(priorX, priorY, priorZ + ROWOW_MOVE_LINE_OF_SIGHT_HEIGHT, stepX, stepY, stepZ + ROWOW_MOVE_LINE_OF_SIGHT_HEIGHT,
+        creature->GetPhaseMask(), LINEOFSIGHT_CHECK_VMAP, VMAP::ModelIgnoreFlags::Nothing) == false)
+        return false;
+    stepZOut = stepZ;
+    return true;
+}
+
+float ROWOWMod::GetPathStartGroundZ(Creature* creature)
+{
+    // Steps are compared against the ground under the creature, not its own height, since other movement (a fear, a knockback)
+    // can leave it a little off the ground.  Ground far above it is an overhang (a deck, a table), not what it stands on
+    float startX = creature->GetPositionX();
+    float startY = creature->GetPositionY();
+    float startZ = creature->GetPositionZ();
+    float startGroundZ = startZ;
+    if (GetGroundZ(creature, startX, startY, startZ, startGroundZ) == false)
+        return startZ;
+    if (startGroundZ > startZ + ConfigMoveMaxRisePerStep)
+    {
+        if (GetGroundZ(creature, startX, startY, startZ, 0.5f, startGroundZ) == false)
+            return startZ;
+    }
+    return startGroundZ;
 }

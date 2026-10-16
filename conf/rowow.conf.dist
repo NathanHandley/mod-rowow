@@ -115,3 +115,15 @@ ROWOW.Creature.OutOfReachGiveUpTimeInMS = 8000
 ###################################################################################################
 
 ROWOW.Creature.RangedAttackApproachFraction = 0.8
+
+###################################################################################################
+#
+# 	ROWOW.Creature.CellPathing
+#		On the RO maps, creatures walk from cell center to cell center of the map's RO cell grid
+#       (diagonally until in line with where they're going, then straight) as RO monsters do.
+#       Off the RO maps, or when this is off, they walk straight ground-snapped lines
+#	Default: True (enabled)
+#
+###################################################################################################
+
+ROWOW.Creature.CellPathing = True

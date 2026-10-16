@@ -43,6 +43,9 @@ public:
         // Before the maps start updating, so the creature AIs only ever read it
         ROWOW->LoadCreatureTemplateData();
         ROWOW->LoadIllusionData();
+        ROWOW->LoadSkillEffectData();
+        ROWOW->LoadSkillCellData();
+        ROWOW->LoadMapGridData();
     }
 };
 

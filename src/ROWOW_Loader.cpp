@@ -17,10 +17,12 @@
 void AddROWOWWorldScripts();
 void AddROWOWCreatureScripts();
 void AddROWOWPlayerScripts();
+void AddROWOWSkillSpellScripts();
 
 void Addmod_rowowScripts()
 {
     AddROWOWWorldScripts();
     AddROWOWCreatureScripts();
     AddROWOWPlayerScripts();
+    AddROWOWSkillSpellScripts();
 }
