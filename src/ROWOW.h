@@ -88,6 +88,8 @@ struct ROWOWItemVisual
 #define ROWOW_SKILL_EFFECT_STEAL                    3
 #define ROWOW_SKILL_EFFECT_TELEPORT_RANDOM          4
 #define ROWOW_SKILL_EFFECT_CELL_LAYOUT              5
+#define ROWOW_SKILL_EFFECT_STEAL_ZENY               6
+#define ROWOW_SKILL_EFFECT_TRAP                     7
 struct ROWOWSkillEffect
 {
     uint8 EffectType = 0;
@@ -129,6 +131,7 @@ struct ROWOWMapGrid
 struct ROWOWStealState : public DataMap::Base
 {
     bool IsStolenFrom = false;
+    bool IsZenyStolenFrom = false;
 };
 
 #define ROWOW_MOVE_MAX_PATH_NODES                   256     // Longest contoured path (in steps) built for one move

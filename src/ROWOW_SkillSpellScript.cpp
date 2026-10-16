@@ -16,6 +16,7 @@
 
 #include "Chat.h"
 #include "Creature.h"
+#include "DynamicObject.h"
 #include "LootMgr.h"
 #include "Map.h"
 #include "ModelIgnoreFlags.h"
@@ -172,7 +173,32 @@ class ROWOW_SkillSpellScript : public SpellScript
             }
             else if (skillEffect.EffectType == ROWOW_SKILL_EFFECT_STEAL)
                 TrySteal(caster, target, skillEffect.Chance);
+            else if (skillEffect.EffectType == ROWOW_SKILL_EFFECT_STEAL_ZENY)
+                TryStealZeny(caster, target, skillEffect.Chance, skillEffect.ValueA);
         }
+    }
+
+    // RO's Steal Coin: one success per monster, taking money by the monster's level (a little either way)
+    void TryStealZeny(Unit* caster, Unit* target, float chance, int32 copperPerLevel)
+    {
+        Player* player = caster->ToPlayer();
+        Creature* creature = target->ToCreature();
+        if (player == nullptr || creature == nullptr)
+            return;
+        if (creature->isWorldBoss() == true || creature->IsDungeonBoss() == true || creature->IsSummon() == true)
+        {
+            ChatHandler(player->GetSession()).SendNotification("You can't steal from that.");
+            return;
+        }
+        ROWOWStealState* stealState = creature->CustomData.GetDefault<ROWOWStealState>("ROWOWStealState");
+        if (stealState->IsZenyStolenFrom == true || roll_chance_f(chance) == false)
+        {
+            ChatHandler(player->GetSession()).SendNotification("Steal failed.");
+            return;
+        }
+        stealState->IsZenyStolenFrom = true;
+        uint32 levelCopper = uint32(creature->GetLevel()) * uint32(std::max(1, copperPerLevel));
+        player->ModifyMoney(int32(urand(levelCopper * 8 / 10, levelCopper * 12 / 10 + 1)));
     }
 
     // RO's Steal: one success per monster, taking an item it would drop (a normal roll of its loot)
@@ -235,7 +261,47 @@ class ROWOW_SkillSpellScript : public SpellScript
     }
 };
 
+// An RO trap lying on the ground (a dynamic object with a dummy aura on the enemies in it).  The first enemy the aura reaches springs the
+// trap: the trap's spring spell (from mod_rowow_skill_effect) goes off on it, and the trap is gone at its next update.  Runs in the map
+// thread, and only reads the skill data loaded at startup
+class ROWOW_TrapAuraScript : public AuraScript
+{
+    PrepareAuraScript(ROWOW_TrapAuraScript);
+
+    void HandleApply(AuraEffect const* /*auraEffect*/, AuraEffectHandleModes /*mode*/)
+    {
+        if (ROWOW->IsEnabled == false || GetAura()->GetType() != DYNOBJ_AURA_TYPE)
+            return;
+        DynamicObject* trapObject = GetAura()->GetDynobjOwner();
+        Unit* caster = GetCaster();
+        Unit* target = GetTarget();
+        if (trapObject == nullptr || caster == nullptr || target == nullptr || target->IsAlive() == false)
+            return;
+
+        // Already sprung (by another enemy in the same update), and only waiting to go
+        if (trapObject->GetDuration() <= 0)
+            return;
+        vector<ROWOWSkillEffect> const* skillEffects = ROWOW->GetSkillEffects(GetId());
+        if (skillEffects == nullptr)
+            return;
+        for (ROWOWSkillEffect const& skillEffect : *skillEffects)
+        {
+            if (skillEffect.EffectType != ROWOW_SKILL_EFFECT_TRAP || skillEffect.TriggerSpellID == 0)
+                continue;
+            trapObject->SetDuration(0);
+            caster->CastSpell(target, skillEffect.TriggerSpellID, true);
+            return;
+        }
+    }
+
+    void Register() override
+    {
+        OnEffectApply += AuraEffectApplyFn(ROWOW_TrapAuraScript::HandleApply, EFFECT_0, SPELL_AURA_DUMMY, AURA_EFFECT_HANDLE_REAL);
+    }
+};
+
 void AddROWOWSkillSpellScripts()
 {
     RegisterSpellScript(ROWOW_SkillSpellScript);
+    RegisterSpellScript(ROWOW_TrapAuraScript);
 }
