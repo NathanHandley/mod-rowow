@@ -54,6 +54,14 @@ public:
             return;
         ROWOW->RefreshIllusionDisplay(unit->ToPlayer());
     }
+
+    void OnUnitDeath(Unit* unit, Unit* /*killer*/) override
+    {
+        // A creature's RO steals are for one life (its respawn can be the same creature).  Runs in the creature's map thread
+        if (unit == nullptr || unit->IsCreature() == false)
+            return;
+        unit->ToCreature()->CustomData.Erase("ROWOWStealState");
+    }
 };
 
 void AddROWOWPlayerScripts()

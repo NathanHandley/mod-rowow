@@ -670,6 +670,21 @@ bool ROWOWMod::BuildCellPath(Creature* creature, ROWOWMapGrid const& mapGrid, fl
             float stepZ = 0;
             if (CanStepTo(creature, priorX, priorY, priorZ, stepX, stepY, stepDistance, stepZ) == false)
                 continue;
+
+            // As in RO, a diagonal step needs both cells beside it open, so it can't squeeze between two blocked corners
+            if (candidateSteps[candidateIndex].first != 0 && candidateSteps[candidateIndex].second != 0)
+            {
+                float sideAX = mapGrid.GetCellCenterWorldX(cellY);
+                float sideAY = mapGrid.GetCellCenterWorldY(nextCellX);
+                float sideBX = mapGrid.GetCellCenterWorldX(nextCellY);
+                float sideBY = mapGrid.GetCellCenterWorldY(cellX);
+                float sideDistanceA = std::sqrt((sideAX - priorX) * (sideAX - priorX) + (sideAY - priorY) * (sideAY - priorY));
+                float sideDistanceB = std::sqrt((sideBX - priorX) * (sideBX - priorX) + (sideBY - priorY) * (sideBY - priorY));
+                float sideZ = 0;
+                if (CanStepTo(creature, priorX, priorY, priorZ, sideAX, sideAY, sideDistanceA, sideZ) == false
+                    || CanStepTo(creature, priorX, priorY, priorZ, sideBX, sideBY, sideDistanceB, sideZ) == false)
+                    continue;
+            }
             pathNodesOut.emplace_back(stepX, stepY, stepZ);
             visitedCells.emplace_back(nextCellX, nextCellY);
             cellX = nextCellX;

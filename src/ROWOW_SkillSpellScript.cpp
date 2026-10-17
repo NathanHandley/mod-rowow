@@ -23,6 +23,7 @@
 #include "Player.h"
 #include "ScriptMgr.h"
 #include "SpellInfo.h"
+#include "SpellMgr.h"
 #include "SpellScript.h"
 #include "Unit.h"
 #include "WorldSession.h"
@@ -56,15 +57,14 @@ class ROWOW_SkillSpellScript : public SpellScript
         Player* player = GetCaster() != nullptr ? GetCaster()->ToPlayer() : nullptr;
         if (player == nullptr)
             return SPELL_CAST_OK;
+        uint32 totalCost = 0;
         for (ROWOWSkillEffect const& skillEffect : *skillEffects)
+            if (skillEffect.EffectType == ROWOW_SKILL_EFFECT_ZENY_COST && skillEffect.ValueA > 0)
+                totalCost += uint32(skillEffect.ValueA);
+        if (totalCost > 0 && player->HasEnoughMoney(totalCost) == false)
         {
-            if (skillEffect.EffectType != ROWOW_SKILL_EFFECT_ZENY_COST || skillEffect.ValueA <= 0)
-                continue;
-            if (player->HasEnoughMoney(uint32(skillEffect.ValueA)) == false)
-            {
-                ChatHandler(player->GetSession()).SendNotification("You don't have enough zeny.");
-                return SPELL_FAILED_DONT_REPORT;
-            }
+            ChatHandler(player->GetSession()).SendNotification("You don't have enough zeny.");
+            return SPELL_FAILED_DONT_REPORT;
         }
         return SPELL_CAST_OK;
     }
@@ -168,7 +168,9 @@ class ROWOW_SkillSpellScript : public SpellScript
                 float chance = skillEffect.Chance + skillEffect.ChancePerCasterLevel * float(caster->GetLevel());
                 if (skillEffect.IsChanceByLevelDifference == true)
                     chance += float(int32(caster->GetLevel()) - int32(target->GetLevel()));
-                if (chance > 0.0f && roll_chance_f(chance) == true)
+                if (chance <= 0.0f || IsKillOnBoss(skillEffect.TriggerSpellID, target) == true)
+                    continue;
+                if (roll_chance_f(chance) == true)
                     caster->CastSpell(target, skillEffect.TriggerSpellID, true);
             }
             else if (skillEffect.EffectType == ROWOW_SKILL_EFFECT_STEAL)
@@ -176,6 +178,22 @@ class ROWOW_SkillSpellScript : public SpellScript
             else if (skillEffect.EffectType == ROWOW_SKILL_EFFECT_STEAL_ZENY)
                 TryStealZeny(caster, target, skillEffect.Chance, skillEffect.ValueA);
         }
+    }
+
+    // An instant kill (Turn Undead's) never works on bosses, as in RO
+    bool IsKillOnBoss(uint32 spellID, Unit* target)
+    {
+        Creature* creature = target->ToCreature();
+        if (creature == nullptr || (creature->isWorldBoss() == false && creature->IsDungeonBoss() == false))
+            return false;
+        SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(spellID);
+        return spellInfo != nullptr && spellInfo->HasEffect(SPELL_EFFECT_INSTAKILL) == true;
+    }
+
+    // What's been stolen from a creature since it last spawned (cleared when it dies, as a respawn can reuse the creature)
+    ROWOWStealState* GetStealState(Creature* creature)
+    {
+        return creature->CustomData.GetDefault<ROWOWStealState>("ROWOWStealState");
     }
 
     // RO's Steal Coin: one success per monster, taking money by the monster's level (a little either way)
@@ -190,7 +208,7 @@ class ROWOW_SkillSpellScript : public SpellScript
             ChatHandler(player->GetSession()).SendNotification("You can't steal from that.");
             return;
         }
-        ROWOWStealState* stealState = creature->CustomData.GetDefault<ROWOWStealState>("ROWOWStealState");
+        ROWOWStealState* stealState = GetStealState(creature);
         if (stealState->IsZenyStolenFrom == true || roll_chance_f(chance) == false)
         {
             ChatHandler(player->GetSession()).SendNotification("Steal failed.");
@@ -213,7 +231,7 @@ class ROWOW_SkillSpellScript : public SpellScript
             ChatHandler(player->GetSession()).SendNotification("You can't steal from that.");
             return;
         }
-        ROWOWStealState* stealState = creature->CustomData.GetDefault<ROWOWStealState>("ROWOWStealState");
+        ROWOWStealState* stealState = GetStealState(creature);
         if (stealState->IsStolenFrom == true || roll_chance_f(chance) == false)
         {
             ChatHandler(player->GetSession()).SendNotification("Steal failed.");
@@ -278,8 +296,8 @@ class ROWOW_TrapAuraScript : public AuraScript
         if (trapObject == nullptr || caster == nullptr || target == nullptr || target->IsAlive() == false)
             return;
 
-        // Already sprung (by another enemy in the same update), and only waiting to go
-        if (trapObject->GetDuration() <= 0)
+        // Already sprung (by another enemy in the same update), and only waiting to go (a trap that never runs out has -1)
+        if (trapObject->GetDuration() == 0)
             return;
         vector<ROWOWSkillEffect> const* skillEffects = ROWOW->GetSkillEffects(GetId());
         if (skillEffects == nullptr)
@@ -288,8 +306,8 @@ class ROWOW_TrapAuraScript : public AuraScript
         {
             if (skillEffect.EffectType != ROWOW_SKILL_EFFECT_TRAP || skillEffect.TriggerSpellID == 0)
                 continue;
-            trapObject->SetDuration(0);
-            caster->CastSpell(target, skillEffect.TriggerSpellID, true);
+            if (caster->CastSpell(target, skillEffect.TriggerSpellID, true) == SPELL_CAST_OK)
+                trapObject->SetDuration(0);
             return;
         }
     }
