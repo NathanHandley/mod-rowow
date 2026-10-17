@@ -36,25 +36,24 @@ struct ROWOWCreatureTemplate
     uint32 AttackVisualSpellID = 0; // Visual-only spell cast on the target with each attack, 0 for none
 };
 
-// An RO illusion spell (from mod_rowow_illusion), with its display for each garment (from mod_rowow_illusion_display)
+// An RO illusion spell (from mod_rowow_illusion), with its display for each weapon and shield type (from mod_rowow_illusion_display)
 struct ROWOWIllusion
 {
     uint32 SpellID = 0;
     uint32 FormCreatureTemplateID = 0;
     bool IsMale = true;
-    std::unordered_map<uint64, uint32> DisplayIDsByKey; // See GetIllusionDisplayKey.  Garment, weapon and shield type 0 are none
+    std::unordered_map<uint32, uint32> DisplayIDsByKey; // See GetIllusionDisplayKey.  Weapon and shield type 0 are none
     std::unordered_map<uint32, uint32> WeaponTypeIDsByItemSubclass; // The RO weapon type shown for each WoW weapon subclass
     std::unordered_set<uint32> ShieldTypeIDs; // The RO shield types this job has
-    std::unordered_map<uint32, uint32> GarmentViewIDsByDisplayID; // Displays with the same garment share a model (they differ in weapon and shield textures)
+    std::unordered_set<uint32> DisplayIDs; // They all share one model (they differ in weapon and shield textures)
 
-    static uint64 GetIllusionDisplayKey(uint32 garmentViewID, uint32 weaponTypeID, uint32 shieldTypeID)
+    static uint32 GetIllusionDisplayKey(uint32 weaponTypeID, uint32 shieldTypeID)
     {
-        return (uint64(garmentViewID) << 32) | (uint64(weaponTypeID & 0xFFFF) << 16) | (shieldTypeID & 0xFFFF);
+        return ((weaponTypeID & 0xFFFF) << 16) | (shieldTypeID & 0xFFFF);
     }
 };
 
 // What an item draws on an RO illusion when worn (from mod_rowow_item_visual)
-#define ROWOW_ITEM_VISUAL_TYPE_GARMENT              1
 #define ROWOW_ITEM_VISUAL_TYPE_SHIELD               5
 
 // RO shield types (an RO shield item's view, as the converter numbers them in mod_rowow_illusion_display)
@@ -78,8 +77,8 @@ struct ROWOWIllusionDisplayState : public DataMap::Base
 struct ROWOWItemVisual
 {
     uint8 VisualType = 0;
-    uint32 ViewID = 0; // RO garment sprite ID or headgear accessory ID
-    uint32 VisualSpellID = 0; // Aura that attaches the headgear model, 0 for garments
+    uint32 ViewID = 0; // RO headgear accessory ID or shield type
+    uint32 VisualSpellID = 0; // Aura that attaches the headgear model, 0 for none
 };
 
 // What the RO skill script does for a skill spell (from mod_rowow_skill_effect)
@@ -197,7 +196,7 @@ public:
     // The script parts of an RO skill spell, or null if it has none
     std::vector<ROWOWSkillEffect> const* GetSkillEffects(uint32 spellID) const;
 
-    // RO illusions: while one is the player's transform, the player shows its display for the garment worn on their back
+    // RO illusions: while one is the player's transform, the player shows its display for the weapon and shield held
     ROWOWIllusion const* GetActiveIllusion(Player* player) const;
     uint32 GetIllusionDisplayIDForPlayer(Player* player, ROWOWIllusion const& illusion) const;
     void RefreshIllusionDisplay(Player* player);

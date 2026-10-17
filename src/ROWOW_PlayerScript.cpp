@@ -34,7 +34,7 @@ public:
 
     void OnPlayerUpdate(Player* player, uint32 /*p_time*/) override
     {
-        // Unequipping, hiding the cloak and the core putting the transform's own display back (after a shapeshift, for one) have no
+        // Unequipping, hiding the helm and the core putting the transform's own display back (after a shapeshift, for one) have no
         // hooks, so the display is checked each update.  It's cheap: nothing happens unless an RO illusion is the transform
         ROWOW->RefreshIllusionDisplay(player);
     }
@@ -47,7 +47,7 @@ public:
 
     void OnAuraApply(Unit* unit, Aura* aura) override
     {
-        // The core has just shown the illusion's form display; show the one for the garment worn instead
+        // The core has just shown the illusion's form display; show the one for the weapon and shield held instead
         if (unit == nullptr || aura == nullptr || unit->IsPlayer() == false)
             return;
         if (ROWOW->IllusionsBySpellID.find(aura->GetId()) == ROWOW->IllusionsBySpellID.end())

@@ -281,7 +281,7 @@ void ROWOWMod::LoadIllusionData()
     QueryResult tableResult = WorldDatabase.Query("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name IN ('mod_rowow_illusion', 'mod_rowow_illusion_display', 'mod_rowow_item_visual')");
     if (!tableResult || tableResult->Fetch()[0].Get<uint64>() < 3)
     {
-        LOG_INFO("module.ROWOW", "ROWOWMod::LoadIllusionData found no RO illusion tables, so RO illusions show without garments");
+        LOG_INFO("module.ROWOW", "ROWOWMod::LoadIllusionData found no RO illusion tables, so RO illusions show without weapons or headgear");
         return;
     }
     if (QueryResult result = WorldDatabase.Query("SELECT `SpellID`, `FormCreatureTemplateID`, `IsMale` FROM `mod_rowow_illusion`"))
@@ -296,7 +296,7 @@ void ROWOWMod::LoadIllusionData()
             IllusionsBySpellID[illusion.SpellID] = illusion;
         } while (result->NextRow());
     }
-    if (QueryResult result = WorldDatabase.Query("SELECT `SpellID`, `GarmentViewID`, `WeaponTypeID`, `ShieldTypeID`, `DisplayID` FROM `mod_rowow_illusion_display`"))
+    if (QueryResult result = WorldDatabase.Query("SELECT `SpellID`, `WeaponTypeID`, `ShieldTypeID`, `DisplayID` FROM `mod_rowow_illusion_display`"))
     {
         do
         {
@@ -304,9 +304,9 @@ void ROWOWMod::LoadIllusionData()
             auto illusionIter = IllusionsBySpellID.find(fields[0].Get<uint32>());
             if (illusionIter == IllusionsBySpellID.end())
                 continue;
-            uint32 shieldTypeID = fields[3].Get<uint32>();
-            illusionIter->second.DisplayIDsByKey[ROWOWIllusion::GetIllusionDisplayKey(fields[1].Get<uint32>(), fields[2].Get<uint32>(), shieldTypeID)] = fields[4].Get<uint32>();
-            illusionIter->second.GarmentViewIDsByDisplayID[fields[4].Get<uint32>()] = fields[1].Get<uint32>();
+            uint32 shieldTypeID = fields[2].Get<uint32>();
+            illusionIter->second.DisplayIDsByKey[ROWOWIllusion::GetIllusionDisplayKey(fields[1].Get<uint32>(), shieldTypeID)] = fields[3].Get<uint32>();
+            illusionIter->second.DisplayIDs.insert(fields[3].Get<uint32>());
             if (shieldTypeID != 0)
                 illusionIter->second.ShieldTypeIDs.insert(shieldTypeID);
         } while (result->NextRow());
@@ -368,17 +368,6 @@ ROWOWIllusion const* ROWOWMod::GetActiveIllusion(Player* player) const
 
 uint32 ROWOWMod::GetIllusionDisplayIDForPlayer(Player* player, ROWOWIllusion const& illusion) const
 {
-    // The garment on the back, unless the cloak is hidden.  A garment this job has no sprite for shows no garment, as in RO
-    uint32 garmentViewID = 0;
-    if (player->HasPlayerFlag(PLAYER_FLAGS_HIDE_CLOAK) == false)
-    {
-        if (Item* backItem = player->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_BACK))
-        {
-            auto itemVisualIter = ItemVisualsByItemID.find(backItem->GetEntry());
-            if (itemVisualIter != ItemVisualsByItemID.end() && itemVisualIter->second.VisualType == ROWOW_ITEM_VISUAL_TYPE_GARMENT)
-                garmentViewID = itemVisualIter->second.ViewID;
-        }
-    }
     // The weapon drawn while ready and attacking: the main hand's, or with none there the ranged slot's.  A weapon this job has no
     // sprite for shows no weapon
     uint32 weaponTypeID = 0;
@@ -416,16 +405,11 @@ uint32 ROWOWMod::GetIllusionDisplayIDForPlayer(Player* player, ROWOWIllusion con
         }
     }
 
-    // The display for the garment, weapon and shield, falling back to no garment
-    uint64 candidateKeys[2] = { ROWOWIllusion::GetIllusionDisplayKey(garmentViewID, weaponTypeID, shieldTypeID),
-        ROWOWIllusion::GetIllusionDisplayKey(0, weaponTypeID, shieldTypeID) };
-    for (uint64 candidateKey : candidateKeys)
-    {
-        auto displayIter = illusion.DisplayIDsByKey.find(candidateKey);
-        if (displayIter != illusion.DisplayIDsByKey.end())
-            return displayIter->second;
-    }
-    auto displayIter = illusion.DisplayIDsByKey.find(ROWOWIllusion::GetIllusionDisplayKey(0, 0, 0));
+    // The display for the weapon and shield, falling back to holding nothing
+    auto displayIter = illusion.DisplayIDsByKey.find(ROWOWIllusion::GetIllusionDisplayKey(weaponTypeID, shieldTypeID));
+    if (displayIter != illusion.DisplayIDsByKey.end())
+        return displayIter->second;
+    displayIter = illusion.DisplayIDsByKey.find(ROWOWIllusion::GetIllusionDisplayKey(0, 0));
     if (displayIter != illusion.DisplayIDsByKey.end())
         return displayIter->second;
     return 0;
@@ -448,9 +432,9 @@ void ROWOWMod::RefreshIllusionDisplay(Player* player)
         return;
     }
 
-    // Displays of the same model differ only in their weapon and shield textures, which the client doesn't reload when the display
-    // changes to another of the same model, even one update after an invisible display.  So the change goes through the invisible
-    // display held long enough for the client to have swapped models
+    // An illusion's displays share one model and differ only in their weapon and shield textures, which the client doesn't reload when
+    // the display changes to another of the same model, even one update after an invisible display.  So the change goes through the
+    // invisible display held long enough for the client to have swapped models
     uint64 nowMS = GameTime::GetGameTimeMS().count();
     if (currentDisplayID == ROWOW_INVISIBLE_DISPLAY_ID && displayState->InvisibleSinceMS != 0)
     {
@@ -460,10 +444,7 @@ void ROWOWMod::RefreshIllusionDisplay(Player* player)
         player->SetDisplayId(displayID);
         return;
     }
-    auto currentGarmentIter = illusion->GarmentViewIDsByDisplayID.find(currentDisplayID);
-    auto wantedGarmentIter = illusion->GarmentViewIDsByDisplayID.find(displayID);
-    if (currentGarmentIter != illusion->GarmentViewIDsByDisplayID.end() && wantedGarmentIter != illusion->GarmentViewIDsByDisplayID.end()
-        && currentGarmentIter->second == wantedGarmentIter->second)
+    if (illusion->DisplayIDs.find(currentDisplayID) != illusion->DisplayIDs.end())
     {
         displayState->InvisibleSinceMS = nowMS;
         player->SetDisplayId(ROWOW_INVISIBLE_DISPLAY_ID);
