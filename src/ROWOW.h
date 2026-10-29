@@ -36,7 +36,8 @@ struct ROWOWCreatureTemplate
     uint32 AttackVisualSpellID = 0; // Visual-only spell cast on the target with each attack, 0 for none
 };
 
-// An RO illusion spell (from mod_rowow_illusion), with its display for each weapon and shield type (from mod_rowow_illusion_display)
+// An RO illusion spell (from mod_rowow_illusion), with its display for each weapon and shield type (from mod_rowow_illusion_display).
+// The displays share one sprite model, and differ in their weapon and shield textures
 struct ROWOWIllusion
 {
     uint32 SpellID = 0;
@@ -45,7 +46,6 @@ struct ROWOWIllusion
     std::unordered_map<uint32, uint32> DisplayIDsByKey; // See GetIllusionDisplayKey.  Weapon and shield type 0 are none
     std::unordered_map<uint32, uint32> WeaponTypeIDsByItemSubclass; // The RO weapon type shown for each WoW weapon subclass
     std::unordered_set<uint32> ShieldTypeIDs; // The RO shield types this job has
-    std::unordered_set<uint32> DisplayIDs; // They all share one model (they differ in weapon and shield textures)
 
     static uint32 GetIllusionDisplayKey(uint32 weaponTypeID, uint32 shieldTypeID)
     {
@@ -62,15 +62,6 @@ struct ROWOWIllusion
 #define ROWOW_RO_SHIELD_TYPE_SHIELD                 3
 #define ROWOW_RO_SHIELD_TYPE_MIRROR_SHIELD          4
 
-// An invisible creature display, shown for a moment between two RO illusion displays of the same model (see RefreshIllusionDisplay)
-#define ROWOW_INVISIBLE_DISPLAY_ID                  11686
-#define ROWOW_INVISIBLE_DISPLAY_HOLD_MS             100
-
-// Per player: when an RO illusion's display went invisible on its way to another of the same model (0 if it isn't)
-struct ROWOWIllusionDisplayState : public DataMap::Base
-{
-    uint64 InvisibleSinceMS = 0;
-};
 #define ROWOW_ITEM_VISUAL_TYPE_HEADGEAR_TOP         2
 #define ROWOW_ITEM_VISUAL_TYPE_HEADGEAR_MID         3
 #define ROWOW_ITEM_VISUAL_TYPE_HEADGEAR_LOW         4

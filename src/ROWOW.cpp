@@ -21,7 +21,6 @@
 #include "GridTerrainData.h"
 #include "Log.h"
 #include "Map.h"
-#include "GameTime.h"
 #include "Player.h"
 #include "SpellAuraEffects.h"
 #include "ModelIgnoreFlags.h"
@@ -306,7 +305,6 @@ void ROWOWMod::LoadIllusionData()
                 continue;
             uint32 shieldTypeID = fields[2].Get<uint32>();
             illusionIter->second.DisplayIDsByKey[ROWOWIllusion::GetIllusionDisplayKey(fields[1].Get<uint32>(), shieldTypeID)] = fields[3].Get<uint32>();
-            illusionIter->second.DisplayIDs.insert(fields[3].Get<uint32>());
             if (shieldTypeID != 0)
                 illusionIter->second.ShieldTypeIDs.insert(shieldTypeID);
         } while (result->NextRow());
@@ -423,33 +421,11 @@ void ROWOWMod::RefreshIllusionDisplay(Player* player)
     RefreshIllusionHeadgear(player, illusion);
     if (illusion == nullptr)
         return;
-    uint32 displayID = GetIllusionDisplayIDForPlayer(player, *illusion);
-    uint32 currentDisplayID = player->GetDisplayId();
-    ROWOWIllusionDisplayState* displayState = player->CustomData.GetDefault<ROWOWIllusionDisplayState>("ROWOWIllusionDisplayState");
-    if (displayID == 0 || currentDisplayID == displayID)
-    {
-        displayState->InvisibleSinceMS = 0;
-        return;
-    }
 
-    // An illusion's displays share one model and differ only in their weapon and shield textures, which the client doesn't reload when
-    // the display changes to another of the same model, even one update after an invisible display.  So the change goes through the
-    // invisible display held long enough for the client to have swapped models
-    uint64 nowMS = GameTime::GetGameTimeMS().count();
-    if (currentDisplayID == ROWOW_INVISIBLE_DISPLAY_ID && displayState->InvisibleSinceMS != 0)
-    {
-        if (nowMS - displayState->InvisibleSinceMS < ROWOW_INVISIBLE_DISPLAY_HOLD_MS)
-            return;
-        displayState->InvisibleSinceMS = 0;
-        player->SetDisplayId(displayID);
-        return;
-    }
-    if (illusion->DisplayIDs.find(currentDisplayID) != illusion->DisplayIDs.end())
-    {
-        displayState->InvisibleSinceMS = nowMS;
-        player->SetDisplayId(ROWOW_INVISIBLE_DISPLAY_ID);
-    }
-    else
+    // The illusion's displays share one sprite model and differ in their weapon and shield textures, which the client swaps on the
+    // sprite shown
+    uint32 displayID = GetIllusionDisplayIDForPlayer(player, *illusion);
+    if (displayID != 0 && player->GetDisplayId() != displayID)
         player->SetDisplayId(displayID);
 }
 
