@@ -479,7 +479,7 @@ uint8 ROWOWMod::BattleWeaponAttack(Unit* src, Unit* target, ROWOWDamage& wdOut)
 {
     // battle_weapon_attack, for a normal attack: the statuses that end with it or turn it into something else, the attack, and its
     // additional effects once WoW has dealt it.  wdOut is what the client shows of the swing: ATK_NONE when it became something that shows
-    // itself.  (Triple Attack and the third jobs' triggers are left out: Triple Attack comes with the Monk, R6.5)
+    // itself (Triple Attack, Sacrifice).  (The third jobs' triggers are left out)
     wdOut.DmgLv = ROWOW_ATK_NONE;
     ROWOWStatus const* sstatus = GetROStatus(src);
     ROWOWStatus const* tstatus = GetROStatus(target);
@@ -550,6 +550,28 @@ uint8 ROWOWMod::BattleWeaponAttack(Unit* src, Unit* target, ROWOWDamage& wdOut)
             wdOut.DmgLv = ROWOW_ATK_MISS; // Display MISS.
             SCStart4(src, target, ROWOW_SC_BLADESTOP, 100, skillLevel, 0, 0, int32(src->GetGUID().GetCounter()), duration);
             return ROWOW_ATK_BLOCK;
+        }
+    }
+
+    // Triple Attack: a chance (30% less its level) that the swing is the skill instead, with the skill's after-cast delay (it doesn't go
+    // through skill_castend_id), which opens the Chain Combo window
+    if (int32 skillv = sd != nullptr ? PCCheckSkill(sd, ROWOW_SKILL_MO_TRIPLEATTACK) : 0; skillv > 0)
+    {
+        int32 tripleRate = 30 - skillv; // Base Rate
+        if (ROWOWStatusChangeEntry const* sce = sc != nullptr ? sc->GetSCE(ROWOW_SC_SKILLRATE_UP) : nullptr; sce != nullptr && sce->Val1 == ROWOW_SKILL_MO_TRIPLEATTACK)
+        {
+            tripleRate += tripleRate * sce->Val2 / 100;
+            StatusChangeEnd(src, ROWOW_SC_SKILLRATE_UP);
+        }
+        if (int32(urand(0, 99)) < tripleRate)
+        {
+            // Need to apply canact_tick here because it doesn't go through skill_castend_id
+            ROWOWSkillUnitData* ud = GetSkillUnitData(sd);
+            ud->CanActTime = std::max<uint64>(tick + uint64(SkillDelayFix(src, ROWOW_SKILL_MO_TRIPLEATTACK, uint16(skillv))), ud->CanActTime);
+            SendSkillDelayToClient(sd, ROWOW_SKILL_MO_TRIPLEATTACK);
+            if (SkillAttack(ROWOW_BF_WEAPON, src, src, target, ROWOW_SKILL_MO_TRIPLEATTACK, uint16(skillv), tick, 0) != 0)
+                return ROWOW_ATK_DEF;
+            return ROWOW_ATK_MISS;
         }
     }
 
@@ -2352,10 +2374,14 @@ void ROWOWMod::BattleCalcElementDamage(ROWOWDamage& wd, Unit* src, Unit* target,
         }
     }
 
-    // These mastery bonuses are non-elemental and should apply even if the attack misses.  (The Star Crumbs of forged weapons, R8, and the
-    // Spirit Spheres of the Monk, R6.5)
+    // These mastery bonuses are non-elemental and should apply even if the attack misses.  (The Star Crumbs of forged weapons come with
+    // forging, R8)
     if (BattleSkillStacksMasteriesVVS(skillID, false) == true)
     {
+        // Spirit Sphere bonus damage
+        int32 spiritBallDamage = BattleGetSpiritBallDamage(wd, src, skillID);
+        AttackAdd(wd, isLeftHanded, spiritBallDamage, spiritBallDamage);
+
         // Skill-specific bonuses
         switch (skillID)
         {
@@ -2400,8 +2426,10 @@ void ROWOWMod::BattleCalcElementDamage(ROWOWDamage& wd, Unit* src, Unit* target,
         ROWOWStatusChangeEntry const* sce = sc->GetSCE(ROWOW_SC_WATK_ELEMENT);
         if (src->IsPlayer() == true && sce != nullptr)
         {
-            // Pretend the normal attack was of the element stored in the status change.  (Star Crumbs and Spirit Spheres, R8 and R6.5)
+            // Pretend the normal attack was of the element stored in the status change.  (Star Crumbs come with forging, R8)
             wd.BaseDamage = BattleAttrFix(src, target, wd.BaseDamage, sce->Val1, tstatus->DefElement, tstatus->ElementLevel, 1);
+            // Spirit Sphere bonus damage
+            wd.BaseDamage += BattleGetSpiritBallDamage(wd, src, skillID);
             // Add percent of the base damage to the damage
             wd.Damage += (wd.BaseDamage * sce->Val2) / 100;
         }
@@ -2410,6 +2438,30 @@ void ROWOWMod::BattleCalcElementDamage(ROWOWDamage& wd, Unit* src, Unit* target,
     // Cap damage to 0
     if (BattleConfig.AttrRecover == 0)
         BattleMinDamage(wd, src, skillID, 0);
+}
+
+int32 ROWOWMod::BattleGetSpiritBallDamage(ROWOWDamage const& wd, Unit const* src, uint16 skillID) const
+{
+    // battle_get_spiritball_damage: a player's Spirit Spheres add 3 each (pre-renewal Occult Impaction and Throw Spirit Sphere count the
+    // spheres they used as their hits)
+    if (src->IsPlayer() == false)
+        return 0; // Return 0 for non-players
+    switch (skillID)
+    {
+        case ROWOW_SKILL_MO_INVESTIGATE:
+        case ROWOW_SKILL_MO_FINGEROFFENSIVE:
+            // These skills used as many spheres as they do hits
+            return (wd.Div + PCGetSpiritBall(src)) * 3;
+        case ROWOW_SKILL_MO_EXTREMITYFIST:
+        {
+            // These skills store the number of spheres the player had before cast
+            ROWOWSkillUnitData const* ud = src->CustomData.Get<ROWOWSkillUnitData>("ROWOWSkillUnitData");
+            return ud != nullptr ? ud->SpiritBallOld * 3 : 0;
+        }
+        default:
+            // Any skills that do not consume spheres or do not care
+            return PCGetSpiritBall(src) * 3;
+    }
 }
 
 int64 ROWOWMod::BattleAttrFix(Unit* src, Unit* target, int64 damage, int32 atkElement, int32 defElement, int32 defElementLevel, int32 flag)

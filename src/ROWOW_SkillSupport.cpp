@@ -20,11 +20,14 @@
 #include "Chat.h"
 #include "Creature.h"
 #include "Item.h"
+#include "Log.h"
 #include "Map.h"
 #include "ObjectAccessor.h"
 #include "Player.h"
+#include "Spell.h"
 #include "SpellInfo.h"
 #include "SpellMgr.h"
+#include "Util.h"
 #include "WorldPacket.h"
 #include "WorldSession.h"
 
@@ -34,8 +37,11 @@ using namespace std;
 
 // What skills do to items and players outside the skill engine: stealing (pc_steal_item), making items (skill_produce_mix for Holy Water,
 // skill_arrow_create), breaking equipment (skill_break_equip), the invincibility after arriving (pc_setinvincibletimer), riding a Peco
-// (pc_setriding), a Crusader's Devotion links (sd->devotion and the devoted's SC_DEVOTION) and the Merchant's prices (pc_modifybuyvalue,
-// pc_modifysellvalue).  All of it runs in the player's own map thread, a Devotion link's two players being on one map whenever either
+// (pc_setriding), a Crusader's Devotion links (sd->devotion and the devoted's SC_DEVOTION), the Merchant's prices (pc_modifybuyvalue,
+// pc_modifysellvalue), the Mage line's systems (Abracadabra's abra_db, Hindsight's menu, the Elemental Converter list, Sense's window,
+// Mystical Amplification's toggle, the elemental fields, the cells Ice Wall and Land Protector change), and the Acolyte line's (a Monk's
+// Spirit Spheres, reviving, a Priest's partners) and the Archer line's (a Hunter's falcon, the traps given back and revealed, an ensemble's
+// partner).  All of it runs in the player's own map thread, a Devotion link's or an ensemble's two players being on one map whenever either
 // reads the other
 
 namespace
@@ -80,6 +86,45 @@ namespace
             return false;
         return std::any_of(status->Bonus.Deferred.begin(), status->Bonus.Deferred.end(), [type](ROWOWDeferredBonus const& bonus) { return bonus.Type == type; });
     }
+
+    // skill_can_produce_mix's part for one produce_db recipe: the skill at its level and every material in the bags, qty times (the materials'
+    // templates and amounts, to take)
+    bool CanProduceRecipe(Player* player, ROWOWDataTable const& produceTable, size_t rowIndex, int32 qty, std::vector<std::pair<uint32, uint32>>& materialsOut)
+    {
+        int32 skillColumnIndex = produceTable.GetColumnIndex("RequireSkill");
+        int32 skillLevelColumnIndex = produceTable.GetColumnIndex("RequireSkillLevel");
+        int32 materialsColumnIndex = produceTable.GetColumnIndex("Materials");
+        if (ROWOW->PCCheckSkill(player, uint16(produceTable.GetInt(rowIndex, skillColumnIndex, 0))) < produceTable.GetInt(rowIndex, skillLevelColumnIndex, 0))
+            return false;
+        materialsOut.clear();
+        for (auto const& material : ROWOWDataTable::ParseMapList(produceTable.GetCell(rowIndex, materialsColumnIndex)))
+        {
+            uint32 materialID = 0, amount = 0;
+            for (auto const& field : material)
+            {
+                if (field.first == "ItemID")
+                    materialID = uint32(strtoul(field.second.c_str(), nullptr, 10));
+                else if (field.first == "Amount")
+                    amount = uint32(strtoul(field.second.c_str(), nullptr, 10));
+            }
+            if (materialID == 0)
+                continue;
+            auto materialTemplateIDIter = ROWOW->ItemTemplateIDsByItemID.find(materialID);
+            if (materialTemplateIDIter == ROWOW->ItemTemplateIDsByItemID.end() || player->GetItemCount(materialTemplateIDIter->second) < amount * uint32(qty))
+                return false;
+            materialsOut.emplace_back(materialTemplateIDIter->second, amount * uint32(qty));
+        }
+        return true;
+    }
+
+    // The names Sense's window shows a monster's element, race and size by (the client's)
+    char const* const ElementNames[ROWOW_ELEMENT_COUNT] = { "Neutral", "Water", "Earth", "Fire", "Wind", "Poison", "Holy", "Shadow", "Ghost", "Undead" };
+    char const* const RaceNames[ROWOW_RACE_DRAGON + 1] = { "Formless", "Undead", "Brute", "Plant", "Insect", "Fish", "Demon", "Demi-Human", "Angel", "Dragon" };
+    char const* const SizeNames[ROWOW_SIZE_COUNT] = { "Small", "Medium", "Large" };
+
+    // Hindsight's spells (clif_autospell's pre-renewal list): each with the Hindsight level it needs to be above
+    std::pair<uint16, uint16> const AutospellSkills[] = { { ROWOW_SKILL_MG_NAPALMBEAT, 0 }, { ROWOW_SKILL_MG_COLDBOLT, 1 }, { ROWOW_SKILL_MG_FIREBOLT, 1 },
+        { ROWOW_SKILL_MG_LIGHTNINGBOLT, 1 }, { ROWOW_SKILL_MG_SOULSTRIKE, 4 }, { ROWOW_SKILL_MG_FIREBALL, 7 }, { ROWOW_SKILL_MG_FROSTDIVER, 9 } };
 }
 
 bool ROWOWMod::PCStealItem(Player* player, Unit* bl, uint16 skillLevel)
@@ -157,8 +202,6 @@ bool ROWOWMod::SkillProduceMix(Player* player, uint16 skillID, uint32 nameID, in
         return false;
     int32 productColumnIndex = produceTable->GetColumnIndex("ProduceItemID");
     int32 skillColumnIndex = produceTable->GetColumnIndex("RequireSkill");
-    int32 skillLevelColumnIndex = produceTable->GetColumnIndex("RequireSkillLevel");
-    int32 materialsColumnIndex = produceTable->GetColumnIndex("Materials");
     if (qty < 1)
         qty = 1;
     for (size_t rowIndex = 0; rowIndex < produceTable->Rows.size(); rowIndex++)
@@ -166,29 +209,12 @@ bool ROWOWMod::SkillProduceMix(Player* player, uint16 skillID, uint32 nameID, in
         // skill_can_produce_mix: the recipe, the skill at its level, and every material in the bags
         if (uint32(produceTable->GetInt(rowIndex, productColumnIndex, 0)) != nameID || produceTable->GetInt(rowIndex, skillColumnIndex, 0) != skillID)
             continue;
-        if (PCCheckSkill(player, skillID) < produceTable->GetInt(rowIndex, skillLevelColumnIndex, 0))
-            return false;
         std::vector<std::pair<uint32, uint32>> materials;
-        for (auto const& material : ROWOWDataTable::ParseMapList(produceTable->GetCell(rowIndex, materialsColumnIndex)))
-        {
-            uint32 materialID = 0, amount = 0;
-            for (auto const& field : material)
-            {
-                if (field.first == "ItemID")
-                    materialID = uint32(strtoul(field.second.c_str(), nullptr, 10));
-                else if (field.first == "Amount")
-                    amount = uint32(strtoul(field.second.c_str(), nullptr, 10));
-            }
-            if (materialID == 0)
-                continue;
-            auto materialTemplateIDIter = ItemTemplateIDsByItemID.find(materialID);
-            if (materialTemplateIDIter == ItemTemplateIDsByItemID.end() || player->GetItemCount(materialTemplateIDIter->second) < amount * uint32(qty))
-                return false;
-            materials.emplace_back(materialTemplateIDIter->second, amount * uint32(qty));
-        }
+        if (CanProduceRecipe(player, *produceTable, rowIndex, qty, materials) == false)
+            return false;
         for (auto const& material : materials)
             player->DestroyItemCount(material.first, material.second, true);
-        // AL_HOLYWATER: make_per = 100000, 100% success
+        // AL_HOLYWATER and SA_CREATECON: make_per = 100000, 100% success
         GiveROItem(player, nameID, uint32(qty), true);
         return true;
     }
@@ -580,4 +606,789 @@ int32 ROWOWMod::PCModifySellValue(Player const* player, int32 origValue) const
     if (origValue > 0 && val < 1)
         val = 1;
     return val;
+}
+
+void ROWOWMod::LoadAbraData()
+{
+    // abra_db (AbraDatabase::parseBodyNode): the skills Abracadabra can pick, each with its chance in 10000 at each of Abracadabra's levels
+    // (one value for all of them, or 500 at every level when none is given).  An unknown or passive skill is left out
+    AbraSkills.clear();
+    if (IsEnabled == false)
+        return;
+    ROWOWDataTable const* abraTable = GetDataTable("mod_rowow_db_abra");
+    if (abraTable == nullptr)
+    {
+        LOG_ERROR("module.ROWOW", "ROWOWMod::LoadAbraData found no mod_rowow_db_abra table, so Abracadabra picks nothing (run the converter)");
+        return;
+    }
+    int32 skillColumnIndex = abraTable->GetColumnIndex("Skill");
+    int32 probabilityColumnIndex = abraTable->GetColumnIndex("Probability");
+    for (size_t rowIndex = 0; rowIndex < abraTable->Rows.size(); rowIndex++)
+    {
+        std::string const& skillName = abraTable->GetCell(rowIndex, skillColumnIndex);
+        ROWOWSkill const* skill = GetSkill(GetSkillIDByName(skillName));
+        if (skill == nullptr || skill->IsPassive == true)
+        {
+            LOG_ERROR("module.ROWOW", "ROWOWMod::LoadAbraData: Abracadabra can't cast skill '{}', skipping", skillName);
+            continue;
+        }
+        ROWOWAbraSkill abraSkill;
+        abraSkill.SkillID = skill->SkillID;
+        std::string const& probability = abraTable->GetCell(rowIndex, probabilityColumnIndex);
+        if (probability.empty() == true)
+            std::fill(std::begin(abraSkill.Per), std::end(abraSkill.Per), 500);
+        else if (probability.find('=') == std::string::npos)
+            std::fill(std::begin(abraSkill.Per), std::end(abraSkill.Per), int32(strtol(probability.c_str(), nullptr, 10)));
+        else
+        {
+            for (auto const& levelProbability : ROWOWDataTable::ParseMapList(probability))
+            {
+                int32 level = 0, chance = 0;
+                for (auto const& field : levelProbability)
+                {
+                    if (field.first == "Level")
+                        level = int32(strtol(field.second.c_str(), nullptr, 10));
+                    else if (field.first == "Probability")
+                        chance = int32(strtol(field.second.c_str(), nullptr, 10));
+                }
+                if (level >= 1 && level <= ROWOW_MAX_SKILL_LEVEL)
+                    abraSkill.Per[level - 1] = chance;
+            }
+        }
+        AbraSkills.push_back(abraSkill);
+    }
+    LOG_INFO("module.ROWOW", "ROWOWMod::LoadAbraData loaded {} skills Abracadabra can cast", AbraSkills.size());
+}
+
+bool ROWOWMod::SkillCastAbraSkill(Unit* src, uint16 skillID, uint16 skillLevel)
+{
+    // Abracadabra's pick.  A player's is its skill item (clif_item_skill), which RO's client then lets the player aim; a WoW client can't be
+    // made to start aiming a spell, so it's aimed as a monster's Abracadabra aims (SkillHocusPocus's mob branch), with the player's selection
+    // standing for the monster's target: a self skill at the caster, a support skill at the selected friend (a monster's at itself), an
+    // offensive skill at the target, a ground skill at the target's cell (or the caster's own).  It's cast as the skill's spell, with its cast
+    // time; a pick with no spell (the special picks, which have no cast time) goes off at once.  Runs in the caster's update
+    ROWOWSkill const* skill = GetSkill(skillID);
+    ROWOWSkillUnitData* ud = GetSkillUnitData(src);
+    Player* sd = src->ToPlayer();
+    if (skill == nullptr || src->IsAlive() == false || IsROCombatant(src) == false || (sd != nullptr && ud->SkillItemID != skillID))
+        return false;
+    Unit* selected = sd != nullptr ? sd->GetSelectedUnit() : src->GetVictim();
+    if (selected != nullptr && (selected->GetMap() != src->GetMap() || IsROCombatant(selected) == false))
+        selected = nullptr;
+    uint8 castType = SkillGetCastType(skillID);
+    Unit* target = src;
+    if ((skill->Inf & ROWOW_INF_SUPPORT_SKILL) != 0)
+        target = (sd != nullptr && selected != nullptr && BattleCheckTarget(src, selected, ROWOW_BCT_NOENEMY) > 0) ? selected : src;
+    else if (castType == ROWOW_CAST_GROUND)
+        target = selected != nullptr ? selected : src;
+    else if ((skill->Inf & ROWOW_INF_SELF_SKILL) == 0)
+    {
+        // Assume offensive skills: with no target there's nothing to cast it on
+        if (selected == nullptr || selected == src)
+        {
+            if (sd != nullptr)
+            {
+                ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_LEVEL);
+                ud->SkillItemID = 0;
+                ud->SkillItemLevel = 0;
+            }
+            return false;
+        }
+        target = selected;
+    }
+
+    uint32 spellID = GetSkillSpellID(skillID, skillLevel);
+    SpellInfo const* spellInfo = spellID != 0 ? sSpellMgr->GetSpellInfo(spellID) : nullptr;
+    if (spellInfo == nullptr)
+    {
+        WorldLocation dest(target->GetMapId(), target->GetPositionX(), target->GetPositionY(), target->GetPositionZ());
+        if (SkillCastEndCheck(src, target, castType == ROWOW_CAST_GROUND ? &dest : nullptr, skillID, skillLevel) != SPELL_CAST_OK)
+            return false;
+        SkillCastEnd(src, target, castType == ROWOW_CAST_GROUND ? &dest : nullptr, skillID, skillLevel);
+        return true;
+    }
+    SpellCastTargets targets;
+    if (castType == ROWOW_CAST_GROUND)
+        targets.SetDst(*target);
+    else
+        targets.SetUnitTarget(target);
+    return src->CastSpell(targets, spellInfo, nullptr, TRIGGERED_NONE) == SPELL_CAST_OK;
+}
+
+void ROWOWMod::SkillToggleMagicPower(Unit* bl, uint16 skillID)
+{
+    // skill_toggle_magicpower: Mystical Amplification waits for a magic damage skill; that skill's cast start turns it on (val4) for the
+    // skill's hits, and the next one's start ends it.  Non-offensive and non-magic skills do not affect the status
+    ROWOWSkill const* skill = GetSkill(skillID);
+    if (skill == nullptr || skill->NK[ROWOW_NK_NODAMAGE] == true || (skill->AttackType & ROWOW_BF_MAGIC) == 0)
+        return;
+    ROWOWStatusChange* sc = GetStatusChange(bl);
+    ROWOWStatusChangeEntry* sce = sc != nullptr ? sc->GetSCE(ROWOW_SC_MAGICPOWER) : nullptr;
+    if (sce == nullptr)
+        return;
+    if (sce->Val4 != 0)
+        StatusChangeEnd(bl, ROWOW_SC_MAGICPOWER);
+    else
+    {
+        sce->Val4 = 1;
+        if (ROWOWStatusChangeDB const* scdb = GetStatusChangeDB(ROWOW_SC_MAGICPOWER))
+            StatusCalcBL(bl, scdb->CalcFlag);
+    }
+}
+
+void ROWOWMod::ClifAutospell(Player* sd, uint16 skillLevel)
+{
+    // clif_autospell: Hindsight's menu of the bolts the player knows that its level allows (ROWOWAUTOSPELL "<skill>:<name>,..."), whose pick
+    // comes back as .ro autospell (clif_parse_AutoSpell)
+    std::string choices;
+    for (auto const& autospellSkill : AutospellSkills)
+    {
+        ROWOWSkill const* skill = GetSkill(autospellSkill.first);
+        if (skill == nullptr || skillLevel <= autospellSkill.second || PCCheckSkill(sd, autospellSkill.first) <= 0)
+            continue;
+        choices += fmt::format("{}{}:{}", choices.empty() == true ? "" : ",", skill->SkillID, skill->Description);
+    }
+    ROWOWIdentity* identity = GetIdentity(sd);
+    identity->MenuSkillID = ROWOW_SKILL_SA_AUTOSPELL;
+    identity->MenuSkillValue = skillLevel;
+    WorldPacket data;
+    ChatHandler::BuildChatPacket(data, CHAT_MSG_SYSTEM, LANG_ADDON, nullptr, nullptr, "ROWOWAUTOSPELL\t" + choices);
+    sd->SendDirectMessage(&data);
+}
+
+int32 ROWOWMod::SkillAutospell(Player* sd, uint16 skillID)
+{
+    // skill_autospell: the bolt picked from Hindsight's menu, at most at the level Hindsight's level allows (and the player knows).  The Sage
+    // spirit lets the bolts go up to 10
+    ROWOWIdentity* identity = GetIdentity(sd);
+    if (identity->MenuSkillID != ROWOW_SKILL_SA_AUTOSPELL || GetSkill(skillID) == nullptr)
+        return 0;
+    uint16 lv = uint16(PCCheckSkill(sd, skillID));
+    uint16 skillLevel = uint16(identity->MenuSkillValue);
+    identity->MenuSkillID = 0; // clif_menuskill_clear
+    identity->MenuSkillValue = 0;
+    uint16 maxlv = 1;
+    if (skillLevel == 0 || lv == 0)
+        return 0; // Player must learn the skill before doing auto-spell [Lance]
+    if (skillID == ROWOW_SKILL_MG_NAPALMBEAT)
+        maxlv = 3;
+    else if (skillID == ROWOW_SKILL_MG_COLDBOLT || skillID == ROWOW_SKILL_MG_FIREBOLT || skillID == ROWOW_SKILL_MG_LIGHTNINGBOLT)
+    {
+        ROWOWStatusChangeEntry const* spirit = GetSCE(sd, ROWOW_SC_SPIRIT);
+        if (spirit != nullptr && spirit->Val2 == ROWOW_SKILL_SL_SAGE)
+            maxlv = 10; // Soul Linker bonus. [Skotlex]
+        else if (skillLevel == 2)
+            maxlv = 1;
+        else if (skillLevel == 3)
+            maxlv = 2;
+        else if (skillLevel >= 4)
+            maxlv = 3;
+    }
+    else if (skillID == ROWOW_SKILL_MG_SOULSTRIKE)
+    {
+        if (skillLevel == 5)
+            maxlv = 1;
+        else if (skillLevel == 6)
+            maxlv = 2;
+        else if (skillLevel >= 7)
+            maxlv = 3;
+    }
+    else if (skillID == ROWOW_SKILL_MG_FIREBALL)
+    {
+        if (skillLevel == 8)
+            maxlv = 1;
+        else if (skillLevel >= 9)
+            maxlv = 2;
+    }
+    else if (skillID == ROWOW_SKILL_MG_FROSTDIVER)
+        maxlv = 1;
+    else
+        return 0;
+    maxlv = std::min(lv, maxlv);
+    SCStart4(sd, sd, ROWOW_SC_AUTOSPELL, 100, skillLevel, skillID, maxlv, 0, SkillGetTime(ROWOW_SKILL_SA_AUTOSPELL, skillLevel));
+    return 0;
+}
+
+void ROWOWMod::ClifElementalConverterList(Player* sd)
+{
+    // clif_elementalconverter_list: the Elemental Converters (produce_db's item level 23) the player has the materials for, for the RO_Identity
+    // addon to list (ROWOWCONVERTER "<item template>,..."); the one picked comes back as .ro makearrow, as Arrow Crafting's list does
+    ROWOWDataTable const* produceTable = GetDataTable("mod_rowow_db_produce");
+    if (produceTable == nullptr)
+        return;
+    int32 productColumnIndex = produceTable->GetColumnIndex("ProduceItemID");
+    int32 itemLevelColumnIndex = produceTable->GetColumnIndex("ItemLevel");
+    std::string itemTemplateIDs;
+    int32 count = 0;
+    for (size_t rowIndex = 0; rowIndex < produceTable->Rows.size(); rowIndex++)
+    {
+        std::vector<std::pair<uint32, uint32>> materials;
+        if (produceTable->GetInt(rowIndex, itemLevelColumnIndex, 0) != 23 || CanProduceRecipe(sd, *produceTable, rowIndex, 1, materials) == false)
+            continue;
+        auto itemTemplateIDIter = ItemTemplateIDsByItemID.find(uint32(produceTable->GetInt(rowIndex, productColumnIndex, 0)));
+        if (itemTemplateIDIter == ItemTemplateIDsByItemID.end())
+            continue;
+        itemTemplateIDs += fmt::format("{}{}", itemTemplateIDs.empty() == true ? "" : ",", itemTemplateIDIter->second);
+        count++;
+    }
+    if (count > 0)
+    {
+        ROWOWIdentity* identity = GetIdentity(sd);
+        identity->MenuSkillID = ROWOW_SKILL_SA_CREATECON;
+        identity->MenuSkillValue = count;
+    }
+    WorldPacket data;
+    ChatHandler::BuildChatPacket(data, CHAT_MSG_SYSTEM, LANG_ADDON, nullptr, nullptr, "ROWOWCONVERTER\t" + itemTemplateIDs);
+    sd->SendDirectMessage(&data);
+}
+
+void ROWOWMod::ClifSkillEstimation(Player* sd, Creature* creature)
+{
+    // clif_skill_estimation: Sense's window of the monster (level, size, HP, DEF and MDEF by estimation_type 3, race, element, and how much
+    // each element hurts it, a negative one shown as 0), as system messages to the caster
+    ROWOWStatus const* status = GetROStatus(creature);
+    if (status == nullptr)
+        return;
+    ChatHandler handler(sd->GetSession());
+    handler.PSendSysMessage("{} (Lv {}): {}, {}, {} {}", creature->GetName(), status->Level, status->Size < ROWOW_SIZE_COUNT ? SizeNames[status->Size] : "?",
+        status->Race <= ROWOW_RACE_DRAGON ? RaceNames[status->Race] : "?", status->DefElement < ROWOW_ELEMENT_COUNT ? ElementNames[status->DefElement] : "?",
+        status->ElementLevel);
+    handler.PSendSysMessage("HP {} / {}, DEF {}, MDEF {}", creature->GetHealth(), creature->GetMaxHealth(), status->Def + status->Def2, status->MDef + status->MDef2);
+    std::string elements;
+    for (int32 element = ROWOW_ELEMENT_WATER; element < ROWOW_ELEMENT_COUNT; element++)
+        elements += fmt::format("{}{} {}%", elements.empty() == true ? "" : ", ", ElementNames[element],
+            std::max<int64>(BattleAttrFix(nullptr, nullptr, 100, element, status->DefElement, status->ElementLevel, 0), 0));
+    handler.PSendSysMessage("{}", elements);
+}
+
+std::shared_ptr<ROWOWSkillUnitGroup> ROWOWMod::SkillLocateElementField(Unit* bl)
+{
+    // skill_locate_element_field: the unit's elemental field (Volcano, Deluge, Whirlwind), Land Protector or Suiton, of which it has one at most
+    ROWOWSkillUnitData const* ud = GetSkillUnitData(bl);
+    for (int32 groupID : ud->SkillUnitGroupIDs)
+    {
+        std::shared_ptr<ROWOWSkillUnitGroup> group = SkillID2Group(bl->GetMap(), groupID);
+        if (group == nullptr)
+            continue;
+        switch (group->SkillID)
+        {
+            case ROWOW_SKILL_SA_DELUGE:
+            case ROWOW_SKILL_SA_VOLCANO:
+            case ROWOW_SKILL_SA_VIOLENTGALE:
+            case ROWOW_SKILL_SA_LANDPROTECTOR:
+            case ROWOW_SKILL_NJ_SUITON:
+                return group;
+        }
+    }
+    return nullptr;
+}
+
+int32 ROWOWMod::SkillClearGroup(Unit* bl, int32 flag)
+{
+    // skill_clear_group: the unit's groups of a kind go: flag&1 the elemental fields, Land Protector, Suiton and Kaensin; flag&2 its traps
+    std::vector<int32> groupIDs = GetSkillUnitData(bl)->SkillUnitGroupIDs;
+    int32 count = 0;
+    for (int32 groupID : groupIDs)
+    {
+        std::shared_ptr<ROWOWSkillUnitGroup> group = SkillID2Group(bl->GetMap(), groupID);
+        if (group == nullptr)
+            continue;
+        ROWOWSkill const* skill = GetSkill(group->SkillID);
+        bool isCleared = false;
+        switch (group->SkillID)
+        {
+            case ROWOW_SKILL_SA_DELUGE:
+            case ROWOW_SKILL_SA_VOLCANO:
+            case ROWOW_SKILL_SA_VIOLENTGALE:
+            case ROWOW_SKILL_SA_LANDPROTECTOR:
+            case ROWOW_SKILL_NJ_SUITON:
+            case ROWOW_SKILL_NJ_KAENSIN:
+                isCleared = (flag & 1) != 0;
+                break;
+            default:
+                isCleared = (flag & 2) != 0 && skill != nullptr && skill->Inf2[ROWOW_INF2_ISTRAP] == true;
+                break;
+        }
+        if (isCleared == true)
+        {
+            SkillDelUnitGroup(bl->GetMap(), group);
+            count++;
+        }
+    }
+    return count;
+}
+
+std::shared_ptr<ROWOWSkillUnitGroup> ROWOWMod::MapFindSkillUnitOnCell(Unit* target, int32 x, int32 y, uint16 skillID, int32 flag, int32& indexOut)
+{
+    // map_find_skill_unit_oncell: a live unit of the skill on the cell of the target's map, with flag&1 one whose targets the target is
+    std::shared_ptr<ROWOWSkillUnitGroup> found;
+    Map* map = target->GetMap();
+    MapForEachSkillUnitInArea(map, x, y, x, y, [this, map, target, skillID, flag, &found, &indexOut](ROWOWSkillUnitGroup& group, int32 index)
+    {
+        if (found != nullptr || group.SkillID != skillID)
+            return 0;
+        if ((flag & 1) != 0 && BattleCheckTargetSkillUnit(group, map, target, group.TargetFlag) <= 0)
+            return 0;
+        found = SkillID2Group(map, group.GroupID);
+        indexOut = index;
+        return 1;
+    });
+    return found;
+}
+
+void ROWOWMod::ClifSkillPosEffect(Unit* src, uint16 skillID, uint16 skillLevel, int32 x, int32 y, float z)
+{
+    // clif_skill_poseffect: the skill's look on a cell (each of Meteor Storm's meteors), its spell cast there for the look alone
+    SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(GetSkillSpellID(skillID, skillLevel));
+    if (spellInfo == nullptr || src->IsInWorld() == false)
+        return;
+    float worldX = 0, worldY = 0;
+    GetCellWorldPosition(src->GetMapId(), x, y, worldX, worldY);
+    SpellCastTargets targets;
+    targets.SetDst(worldX, worldY, z, 0, src->GetMapId());
+    ROWOWSkillUnitData* ud = GetSkillUnitData(src);
+    ud->IsSkillLookCast = true;
+    src->CastSpell(targets, spellInfo, nullptr, TRIGGERED_FULL_MASK);
+    ud->IsSkillLookCast = false;
+}
+
+void ROWOWMod::ClifSkillNoDamage(Unit* src, Unit* target, uint16 skillID, uint16 skillLevel)
+{
+    // clif_skill_nodamage: the skill's look on a unit (Magic Rod taking a spell in, Soul Drain), its spell cast on it for the look alone
+    SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(GetSkillSpellID(skillID, skillLevel));
+    if (spellInfo == nullptr || src->IsInWorld() == false || target->IsInWorld() == false)
+        return;
+    ROWOWSkillUnitData* ud = GetSkillUnitData(src);
+    ud->IsSkillLookCast = true;
+    src->CastSpell(target, spellInfo, TRIGGERED_FULL_MASK);
+    ud->IsSkillLookCast = false;
+}
+
+bool ROWOWMod::SkillCheckConditionSCRequired(Player* sd, uint16 skillID, ROWOWSkillCondition const& require)
+{
+    // skill_check_condition_sc_required: each status the skill needs is on the player (the Pushcart has its own message)
+    for (int32 type : require.Statuses)
+    {
+        if (type == ROWOW_SC_NONE || GetSCE(sd, type) != nullptr)
+            continue;
+        ClifSkillFail(sd, skillID, type == ROWOW_SC_PUSH_CART ? ROWOW_USESKILL_FAIL_CART : ROWOW_USESKILL_FAIL_LEVEL);
+        return false;
+    }
+    return true;
+}
+
+int64 ROWOWMod::StatusPercentChange(Unit* src, Unit* target, int8 hpRate, int8 spRate, uint8 flag)
+{
+    // status_percent_change: HP and SP by a rate of what the target has (positive) or of its maximum (negative, -100 all of it), at least 1;
+    // flag 0 heals them, 1 takes them (it can kill), 2 takes them but leaves 1 HP.  Damage with no attacker (or the target's own) is passive
+    uint32 hp = 0, sp = 0;
+    uint32 curSP = target->GetPower(POWER_MANA), maxSP = target->GetMaxPower(POWER_MANA);
+    if (hpRate > 99)
+        hp = target->GetHealth();
+    else if (hpRate > 0)
+        hp = uint32(uint64(target->GetHealth()) * hpRate / 100);
+    else if (hpRate < -99)
+        hp = target->GetMaxHealth();
+    else if (hpRate < 0)
+        hp = uint32(uint64(target->GetMaxHealth()) * (-hpRate) / 100);
+    if (hpRate != 0 && hp == 0)
+        hp = 1;
+    if (flag == 2 && hp >= target->GetHealth())
+        hp = target->GetHealth() - 1; // Must not kill target.
+    if (spRate > 99)
+        sp = curSP;
+    else if (spRate > 0)
+        sp = uint32(uint64(curSP) * spRate / 100);
+    else if (spRate < -99)
+        sp = maxSP;
+    else if (spRate < 0)
+        sp = uint32(uint64(maxSP) * (-spRate) / 100);
+    if (spRate != 0 && sp == 0)
+        sp = 1;
+    if (flag == 0)
+        return StatusHeal(target, hp, sp, 0, nullptr, 0);
+    sp = std::min(sp, curSP);
+    hp = std::min(hp, target->GetHealth());
+    if (src == nullptr || src == target || hp == 0)
+        StatusZap(target, hp, sp);
+    else
+    {
+        StatusZap(target, 0, sp);
+        Unit::DealDamage(src, target, hp, nullptr, DIRECT_DAMAGE, SPELL_SCHOOL_MASK_NORMAL, nullptr, false);
+    }
+    return int64(hp) + sp;
+}
+
+void ROWOWMod::StatusSetSP(Unit* bl, uint32 sp)
+{
+    // status_set_sp: the SP set outright, never past the maximum
+    if (bl->GetMaxPower(POWER_MANA) > 0)
+        bl->SetPower(POWER_MANA, std::min(sp, bl->GetMaxPower(POWER_MANA)));
+}
+
+void ROWOWMod::StatusKill(Unit* bl)
+{
+    // status_kill (status_percent_damage(nullptr, bl, 100, 0, true)): all its HP, with no attacker
+    if (bl->IsAlive() == true)
+        StatusZap(bl, bl->GetHealth(), 0);
+}
+
+uint32 ROWOWMod::GetMobCreatureEntry(uint32 mobID) const
+{
+    // The creature template a monster spawns as (its first, when the converter made several)
+    uint32 entry = 0;
+    for (auto const& mobIDByCreatureEntry : MobIDsByCreatureEntry)
+        if (mobIDByCreatureEntry.second == mobID && (entry == 0 || mobIDByCreatureEntry.first < entry))
+            entry = mobIDByCreatureEntry.first;
+    return entry;
+}
+
+uint32 ROWOWMod::MobGetRandomID(std::string const& groupName, bool isDBRate) const
+{
+    // mob_get_random_id: a random monster of a mob_summon group (RMF_DB_RATE: each kept at its rate in 1000000), tried three times the group's
+    // size, else the group's default.  Only monsters that have a creature template here count
+    ROWOWDataTable const* summonTable = GetDataTable("mod_rowow_db_mob_summon");
+    ROWOWDataTable const* mobTable = GetDataTable(ROWOW_DATA_TABLE_MOB);
+    if (summonTable == nullptr || mobTable == nullptr)
+        return 0;
+    int32 aegisColumnIndex = mobTable->GetColumnIndex("AegisName");
+    int32 idColumnIndex = mobTable->GetColumnIndex("Id");
+    auto getMobID = [mobTable, aegisColumnIndex, idColumnIndex](std::string const& aegisName)
+    {
+        for (size_t rowIndex = 0; rowIndex < mobTable->Rows.size(); rowIndex++)
+            if (StringEqualI(mobTable->GetCell(rowIndex, aegisColumnIndex), aegisName) == true)
+                return uint32(mobTable->GetInt(rowIndex, idColumnIndex, 0));
+        return uint32(0);
+    };
+    int32 groupColumnIndex = summonTable->GetColumnIndex("Group");
+    for (size_t rowIndex = 0; rowIndex < summonTable->Rows.size(); rowIndex++)
+    {
+        if (StringEqualI(summonTable->GetCell(rowIndex, groupColumnIndex), groupName) == false)
+            continue;
+        std::vector<std::pair<uint32, int32>> list;
+        for (auto const& summon : ROWOWDataTable::ParseMapList(summonTable->GetCell(rowIndex, summonTable->GetColumnIndex("Summon"))))
+        {
+            uint32 mobID = 0;
+            int32 rate = 0;
+            for (auto const& field : summon)
+            {
+                if (field.first == "Mob")
+                    mobID = getMobID(field.second);
+                else if (field.first == "Rate")
+                    rate = int32(strtol(field.second.c_str(), nullptr, 10));
+            }
+            list.emplace_back(mobID, rate);
+        }
+        for (size_t i = 0, max = list.size() * 3; i < max && list.empty() == false; i++)
+        {
+            std::pair<uint32, int32> const& entry = list[urand(0, uint32(list.size() - 1))];
+            if (entry.first == 0 || GetMobCreatureEntry(entry.first) == 0 || (isDBRate == true && entry.second < 1000000 && entry.second <= int32(urand(0, 999999))))
+                continue;
+            return entry.first;
+        }
+        return getMobID(summonTable->GetCell(rowIndex, summonTable->GetColumnIndex("Default")));
+    }
+    return 0;
+}
+
+bool ROWOWMod::MobClassChange(Creature* md, uint32 mobID)
+{
+    // mob_class_change: the monster becomes another (its creature template, whose level, HP and status the template's selection sets),
+    // keeping its HP rate, its Keeping and Barrier ended and its attack stopped
+    uint32 entry = GetMobCreatureEntry(mobID);
+    if (md->IsInWorld() == false || mobID == 0 || entry == 0 || GetROMobID(md) == mobID)
+        return false;
+    uint64 hpRate = md->GetMaxHealth() > 0 ? uint64(md->GetHealth()) * 100 / md->GetMaxHealth() : 100;
+    StatusChangeEnd(md, ROWOW_SC_KEEPING); // End before calling status_calc_mob().
+    StatusChangeEnd(md, ROWOW_SC_BARRIER);
+    md->AttackStop();
+    md->StopMoving();
+    if (md->UpdateEntry(entry) == false)
+        return false;
+    StatusCalcBL(md, std::bitset<ROWOW_SCB_MAX>().set());
+    md->SetHealth(uint32(std::max<uint64>(1, uint64(md->GetMaxHealth()) * hpRate / 100)));
+    return true;
+}
+
+int32 ROWOWMod::PCGetSpiritBall(Unit const* unit) const
+{
+    // sd->spiritball: only a player has Spirit Spheres
+    if (unit == nullptr || unit->IsPlayer() == false)
+        return 0;
+    ROWOWSkillUnitData const* ud = unit->CustomData.Get<ROWOWSkillUnitData>("ROWOWSkillUnitData");
+    return ud != nullptr ? int32(ud->SpiritBallEndTimes.size()) : 0;
+}
+
+void ROWOWMod::PCAddSpiritBall(Player* sd, int64 interval, int32 max)
+{
+    // pc_addspiritball: a sphere for interval ms (a negative interval: one that stays, as @spiritball's), kept in the order the spheres go;
+    // at the most (max, never past MAX_SPIRITBALL) the one going soonest makes room
+    ROWOWSkillUnitData* ud = GetSkillUnitData(sd);
+    if (max > ROWOW_MAX_SPIRITBALL)
+        max = ROWOW_MAX_SPIRITBALL;
+    std::vector<uint64>& endTimes = ud->SpiritBallEndTimes;
+    if (endTimes.empty() == false && int32(endTimes.size()) >= max)
+        endTimes.erase(endTimes.begin());
+    uint64 endTime = interval < 0 ? std::numeric_limits<uint64>::max() : GetTick() + uint64(interval);
+    endTimes.insert(std::upper_bound(endTimes.begin(), endTimes.end(), endTime), endTime);
+    SendSpiritBallsToClient(sd);
+}
+
+void ROWOWMod::PCDelSpiritBall(Player* sd, int32 count, int32 type)
+{
+    // pc_delspiritball: the spheres going soonest go first
+    ROWOWSkillUnitData* ud = sd->CustomData.Get<ROWOWSkillUnitData>("ROWOWSkillUnitData");
+    if (ud == nullptr || ud->SpiritBallEndTimes.empty() == true || count <= 0)
+        return;
+    count = std::min<int32>(count, int32(ud->SpiritBallEndTimes.size()));
+    ud->SpiritBallEndTimes.erase(ud->SpiritBallEndTimes.begin(), ud->SpiritBallEndTimes.begin() + count);
+    if (type == 0)
+        SendSpiritBallsToClient(sd);
+}
+
+void ROWOWMod::UpdateSpiritBalls(Player* sd)
+{
+    // pc_spiritball_timer: each sphere goes at its time
+    ROWOWSkillUnitData* ud = sd->CustomData.Get<ROWOWSkillUnitData>("ROWOWSkillUnitData");
+    if (ud == nullptr || ud->SpiritBallEndTimes.empty() == true)
+        return;
+    uint64 tick = GetTick();
+    auto firstLeftIter = std::upper_bound(ud->SpiritBallEndTimes.begin(), ud->SpiritBallEndTimes.end(), tick);
+    if (firstLeftIter == ud->SpiritBallEndTimes.begin())
+        return;
+    ud->SpiritBallEndTimes.erase(ud->SpiritBallEndTimes.begin(), firstLeftIter);
+    SendSpiritBallsToClient(sd);
+}
+
+void ROWOWMod::SendSpiritBallsToClient(Player* sd)
+{
+    // clif_spiritball: the RO_Identity addon draws the spheres around the player's frame.  "ROWOWSPHERES<tab><count><tab><ms left of each,
+    // soonest first>" (-1 for a sphere that stays)
+    ROWOWSkillUnitData const* ud = sd->CustomData.Get<ROWOWSkillUnitData>("ROWOWSkillUnitData");
+    std::string timesLeft;
+    uint64 tick = GetTick();
+    size_t count = ud != nullptr ? ud->SpiritBallEndTimes.size() : 0;
+    for (size_t i = 0; i < count; i++)
+    {
+        uint64 endTime = ud->SpiritBallEndTimes[i];
+        if (i != 0)
+            timesLeft += ",";
+        timesLeft += endTime == std::numeric_limits<uint64>::max() ? "-1" : std::to_string(endTime > tick ? endTime - tick : 0);
+    }
+    WorldPacket data;
+    ChatHandler::BuildChatPacket(data, CHAT_MSG_SYSTEM, LANG_ADDON, nullptr, nullptr, fmt::format("ROWOWSPHERES\t{}\t{}", count, timesLeft));
+    sd->SendDirectMessage(&data);
+}
+
+bool ROWOWMod::StatusRevive(Unit* bl, uint8 perHP, uint8 perSP)
+{
+    // status_revive: a dead player stands again with a share of its max HP (at least 1 with a share) and a share of its max SP added to the SP
+    // it kept, then pc_revive: the invincibility after reviving, its statuses shown again.  RO's revive is WoW's resurrection.  (A monster's
+    // revive comes with the monsters' skills, R10)
+    Player* sd = bl->ToPlayer();
+    if (sd == nullptr || sd->IsAlive() == true || IsInROForm(sd) == false)
+        return false;
+    uint32 maxHP = sd->GetMaxHealth();
+    uint32 maxSP = sd->GetMaxPower(POWER_MANA);
+    uint32 sp = std::min(GetIdentity(sd)->SP, maxSP); // RO keeps the SP through death (WoW's death empties the power; the identity kept it)
+    uint32 hp = uint32(uint64(maxHP) * perHP / 100);
+    uint32 addSP = uint32(uint64(maxSP) * perSP / 100);
+    if (perHP != 0 && hp == 0)
+        hp = 1;
+    addSP = std::min(addSP, maxSP - std::min(sp, maxSP));
+    if (sd->getDeathState() == DeathState::JustDied)
+        sd->KillPlayer();
+    sd->ResurrectPlayer(1.0f);
+    sd->SetHealth(std::max<uint32>(1, std::min(hp, maxHP)));
+    sd->SetPower(POWER_MANA, sp + addSP);
+    PCSetInvincibleTimer(sd);
+    SendStatusChangesToClient(sd); // The statuses that stay through death show again
+    return true;
+}
+
+int32 ROWOWMod::SkillCheckPCPartner(Player* sd, uint16 skillID, uint16& skillLevel, int32 range, int32 castFlag)
+{
+    // skill_check_pc_partner: the partners a skill needs within range cells (skill_check_condition_char_sub), found when the cast starts and
+    // kept on the caster for its end (castFlag), when they give their part.  B.S. Sacramenti needs two Acolyte line players standing to the
+    // caster's left and right, who give 10 SP each.  An ensemble needs one partner beside the performer: a Bard or Dancer of the other sex in
+    // its party, standing (not sitting, free to move, not dancing), holding an instrument or a whip and knowing the ensemble; its level is the
+    // average of both (for the search's caller), and once the ensemble is set the partner dances it too (its SC_DANCING names the performer and
+    // the same unit group).  With player_skill_partner_check off there are always enough
+    if (BattleConfig.PlayerSkillPartnerCheck == 0)
+        return 99; // As if there were infinite partners.
+    ROWOWSkillUnitData* ud = GetSkillUnitData(sd);
+    ROWOWSkill const* skill = GetSkill(skillID);
+    if (castFlag != 0)
+    {
+        // Execute the skill on the partners.
+        if (skillID == ROWOW_SKILL_PR_BENEDICTIO)
+        {
+            for (ObjectGuid const& partnerGUID : ud->PartnerGUIDs)
+                if (Player* tsd = ObjectAccessor::GetPlayer(sd->GetMap(), partnerGUID))
+                    StatusCharge(tsd, 0, 10);
+        }
+        else if (skill != nullptr && skill->Inf2[ROWOW_INF2_ISENSEMBLE] == true)
+        {
+            Player* tsd = ud->PartnerGUIDs.empty() == false ? ObjectAccessor::GetPlayer(sd->GetMap(), ud->PartnerGUIDs[0]) : nullptr;
+            ROWOWStatusChange* sc = GetStatusChange(sd);
+            if (ROWOWStatusChangeEntry* dancing = sc != nullptr ? sc->GetSCE(ROWOW_SC_DANCING) : nullptr; tsd != nullptr && dancing != nullptr)
+            {
+                dancing->Val4 = int32(tsd->GetGUID().GetCounter());
+                SCStart4(sd, tsd, ROWOW_SC_DANCING, 100, skillID, dancing->Val2, skillLevel, int32(sd->GetGUID().GetCounter()), SkillGetTime(skillID, skillLevel) + 1000);
+                ClifSkillNoDamage(tsd, sd, skillID, skillLevel);
+                ROWOWSkillUnitData* tud = GetSkillUnitData(tsd);
+                tud->SkillIDDance = skillID;
+                tud->SkillLevelDance = skillLevel;
+            }
+        }
+        return int32(ud->PartnerGUIDs.size());
+    }
+
+    // Else: new search for partners.
+    ud->PartnerGUIDs.clear();
+    int32 sdX = 0, sdY = 0;
+    GetUnitCell(sd, sdX, sdY);
+    int32 i = MapForEachInRange(sd, range, [this, sd, skillID, ud, sdX, sdY](Unit* bl)
+    {
+        // skill_check_condition_char_sub: one companion (B.S. Sacramenti two)
+        Player* tsd = bl->ToPlayer();
+        if (tsd == nullptr || tsd == sd || ud->PartnerGUIDs.size() >= (skillID == ROWOW_SKILL_PR_BENEDICTIO ? 2u : 1u) || tsd->IsAlive() == false ||
+            IsInROForm(tsd) == false)
+            return 0;
+        ROWOWStatusChange const* tsc = GetStatusChange(static_cast<Unit const*>(tsd));
+        if (tsc != nullptr && tsc->Cant.Cast == true)
+            return 0;
+        if (skillID == ROWOW_SKILL_PR_BENEDICTIO)
+        {
+            int32 tsdX = 0, tsdY = 0;
+            GetUnitCell(tsd, tsdX, tsdY);
+            uint8 dir = GetRODirection(float(tsdX - sdX), float(tsdY - sdY));
+            dir = (UnitGetDir(sd) + dir) % ROWOW_RO_DIRECTION_COUNT; // This adjusts dir to account for the direction the sd is facing.
+            ROWOWJob const* job = GetJob(GetIdentity(tsd)->JobID);
+            bool isAcolyte = job != nullptr && (job->JobID == ROWOW_JOB_ACOLYTE || job->JobID == ROWOW_JOB_ACOLYTE_HIGH || job->FirstJobID == ROWOW_JOB_ACOLYTE);
+            if (isAcolyte == true && (dir == 2 || dir == 6) && sd->GetPower(POWER_MANA) >= 10) // Must be standing to the left/right of Priest.
+                ud->PartnerGUIDs.push_back(tsd->GetGUID());
+            return 1;
+        }
+        // Warning: Assuming Ensemble Dance/Songs for code speed. [Skotlex]
+        if (tsd->IsSitState() == true || tsd->HasUnitState(UNIT_STATE_ROOT) == true || (tsc != nullptr && tsc->Cant.Move == true)) // pc_issit, unit_can_move
+            return 0;
+        ROWOWStatus const* tstatus = GetROStatus(tsd);
+        int32 partnerSkillLevel = PCCheckSkill(tsd, skillID);
+        if (sd->getGender() != tsd->getGender() && PCIsBardDancer(tsd) == true && partnerSkillLevel > 0 && tstatus != nullptr &&
+            (tstatus->WeaponType == ROWOW_WEAPON_TYPE_MUSICAL || tstatus->WeaponType == ROWOW_WEAPON_TYPE_WHIP) && sd->GetGroup() != nullptr &&
+            sd->GetGroup() == tsd->GetGroup() && (tsc == nullptr || tsc->HasSCE(ROWOW_SC_DANCING) == false))
+        {
+            ud->PartnerGUIDs.push_back(tsd->GetGUID());
+            return partnerSkillLevel;
+        }
+        return 0;
+    });
+    if (skillID != ROWOW_SKILL_PR_BENEDICTIO) // Apply the average lv to encore skills.
+        skillLevel = uint16((i + skillLevel) / (int32(ud->PartnerGUIDs.size()) + 1)); // I know c should be one, but this shows how it could be used for the average of n partners.
+    return int32(ud->PartnerGUIDs.size());
+}
+
+bool ROWOWMod::PCIsBardDancer(Unit const* unit) const
+{
+    // (class_&MAPID_SECONDMASK) == MAPID_BARDDANCER: a Bard or Dancer, normal or transcendent (Clown, Gypsy)
+    if (unit == nullptr || unit->IsPlayer() == false)
+        return false;
+    ROWOWIdentity const* identity = unit->ToPlayer()->CustomData.Get<ROWOWIdentity>("ROWOWIdentity");
+    if (identity == nullptr || identity->IsInForm == false)
+        return false;
+    switch (identity->JobID)
+    {
+        case ROWOW_JOB_BARD:
+        case ROWOW_JOB_DANCER:
+        case ROWOW_JOB_CLOWN:
+        case ROWOW_JOB_GYPSY:
+            return true;
+    }
+    return false;
+}
+
+bool ROWOWMod::PCIsFalcon(Unit const* unit) const
+{
+    // pc_isfalcon: a player in the form with its falcon
+    if (unit == nullptr || unit->IsPlayer() == false)
+        return false;
+    ROWOWIdentity const* identity = unit->ToPlayer()->CustomData.Get<ROWOWIdentity>("ROWOWIdentity");
+    return identity != nullptr && identity->IsInForm == true && (identity->Option & ROWOW_OPTION_FALCON) != 0;
+}
+
+void ROWOWMod::PCSetFalcon(Player* player, bool isFalcon)
+{
+    // pc_setfalcon: takes a falcon (only with Falconry Mastery learned) or lets it go.  It's an option kept with the identity, as the Peco is;
+    // the falcon changes no status (pc_setoption's only part for it is the EFST_FALCON icon, which RO's client shows; here a message).  It's
+    // seen flying as Blitz Beat's and Falcon Assault's projectile, the converter's FALCON effect (the 매 sprite); the falcon perched on the
+    // Hunter is the presentation step's (R9.5)
+    ROWOWIdentity* identity = GetIdentity(player);
+    uint32 option = identity->Option;
+    if (isFalcon == true)
+    {
+        if (PCCheckSkill(*identity, ROWOW_SKILL_HT_FALCON) > 0) // add falcon if he have the skill
+            option |= ROWOW_OPTION_FALCON;
+    }
+    else
+        option &= ~ROWOW_OPTION_FALCON; // remove falcon
+    if (option == identity->Option)
+        return;
+    identity->Option = option;
+    ChatHandler(player->GetSession()).SendSysMessage((option & ROWOW_OPTION_FALCON) != 0 ? "A falcon is now with you." : "Your falcon has flown away.");
+}
+
+void ROWOWMod::SkillRevealTrapInArea(Unit* src, int32 range, int32 x, int32 y)
+{
+    // skill_reveal_trap_inarea: the hidden traps around a cell show (skill_reveal_trap).  A trap is only hidden with traps_setting (pre-renewal's
+    // is 0, and no pre-renewal trap has UF_HIDDENTRAP), so nothing is hidden to reveal unless the battle config says otherwise
+    if (BattleConfig.TrapsSetting == 0 || src->IsInWorld() == false)
+        return;
+    MapForEachSkillUnitInArea(src->GetMap(), x - range, y - range, x + range, y + range, [](ROWOWSkillUnitGroup& group, int32 index)
+    {
+        ROWOWSkillUnit& unit = group.Units[index];
+        ROWOWSkill const* skill = ROWOW->GetSkill(group.SkillID);
+        if (unit.IsAlive == false || unit.IsHidden == false || skill == nullptr || skill->Inf2[ROWOW_INF2_ISTRAP] == false)
+            return 0;
+        unit.IsHidden = false;
+        return 1;
+    });
+}
+
+void ROWOWMod::SkillTrapGiveBack(Unit* src, ROWOWSkillUnitGroup const& group)
+{
+    // The trap an expired trap turns back into (skill_unit_timer_sub's revert, map_addflooritem at the trap's cell), or the one Remove Trap gets
+    // back (pc_additem).  RO's items on the ground are R10's: until then it goes into the Hunter's bags
+    Player* sd = src != nullptr ? src->ToPlayer() : nullptr;
+    if (sd == nullptr || IsInROForm(sd) == false)
+        return;
+    GiveROItem(sd, group.ItemID != 0 ? group.ItemID : ROWOW_ITEMID_TRAP, 1, true);
+}
+
+void ROWOWMod::SkillExtremityFistEnd(Unit* src, Unit* target, uint16 skillLevel)
+{
+    // What Asura Strike leaves its user with, once it hit (SkillAsuraStrike::castendDamageId) or failed (skill_castend_id's failure): no SP
+    // and no SP regen for its time (SC_EXTREMITYFIST), Fury and Blade Stop over, and the Monk moved 3 cells toward the target (from its cell)
+    StatusSetSP(src, 0);
+    SCStart(src, src, ROWOW_SC_EXTREMITYFIST, 100, skillLevel, SkillGetTime(ROWOW_SKILL_MO_EXTREMITYFIST, skillLevel));
+    StatusChangeEnd(src, ROWOW_SC_EXPLOSIONSPIRITS);
+    StatusChangeEnd(src, ROWOW_SC_BLADESTOP);
+    if (target == nullptr)
+        return;
+    int32 srcX = 0, srcY = 0, targetX = 0, targetY = 0;
+    GetUnitCell(src, srcX, srcY);
+    GetUnitCell(target, targetX, targetY);
+    uint8 dir = GetRODirection(float(targetX - srcX), float(targetY - srcY)); // map_calc_dir
+    int32 i = 3; // Move 3 cells (From caster)
+    int32 x = 0, y = 0;
+    if (dir > 0 && dir < 4)
+        x = -i;
+    else if (dir > 4)
+        x = i;
+    if (dir > 2 && dir < 6)
+        y = -i;
+    else if (dir == 7 || dir < 2)
+        y = i;
+    if (UnitMovePos(src, srcX + x, srcY + y) == true && src->IsPlayer() == true)
+        SendSpiritBallsToClient(src->ToPlayer()); // clif_spiritball
 }

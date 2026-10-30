@@ -527,117 +527,124 @@ namespace
         return std::clamp(mdef2, 1, int32(SHRT_MAX));
     }
 
-    // status_calc_speed: the walk speed (ms per cell), from the statuses that slow and speed it, and riding a Peco.  (Free Cast with the
-    // Sage, R6.5)
+    // status_calc_speed: the walk speed (ms per cell), from the statuses that slow and speed it, riding a Peco, and casting with Free Cast
     int32 StatusCalcSpeed(Unit const* bl, ROWOWStatusChange const* sc, ROWOWBonus const& bonus, int32 speed)
     {
         // A player riding a Peco is hastened with no statuses too: its statuses are then none rather than missing
         static ROWOWStatusChange const NoStatusChange;
         bool isPlayer = bl->IsPlayer();
         bool isRiding = isPlayer == true && ROWOW->PCIsRiding(bl) == true;
+        ROWOWSkillUnitData const* ud = isPlayer == true ? bl->CustomData.Get<ROWOWSkillUnitData>("ROWOWSkillUnitData") : nullptr;
+        int32 freeCast = (ud != nullptr && ud->IsSkillTimer == true) ? ROWOW->PCCheckSkill(bl, ROWOW_SKILL_SA_FREECAST) : 0;
         int32 speedRate = 100;
         if (sc == nullptr)
         {
-            if (isRiding == false)
+            if (isRiding == false && freeCast == 0)
                 return std::clamp(speed, ROWOW_MIN_WALK_SPEED, ROWOW_MAX_WALK_SPEED);
             sc = &NoStatusChange;
         }
         int32 itemSpeedRate = isPlayer == true ? GetDeferredBonusSum(bonus, "bSpeedRate") + GetDeferredBonusSum(bonus, "bSpeedAddRate") : 0;
 
-        // GetMoveHasteValue2()
-        int32 val = 0;
-        if (sc->HasSCE(ROWOW_SC_FUSION) == true)
-            val = 25;
-        else if (isRiding == true)
-            val = 25; // (Same bonus as a dragon's, a third job's)
-        speedRate -= val;
-
-        // GetMoveSlowValue()
-        if (isPlayer == true && sc->HasSCE(ROWOW_SC_HIDING) == true && ROWOW->PCCheckSkill(bl, ROWOW_SKILL_RG_TUNNELDRIVE) > 0)
-            val = 120 - 6 * ROWOW->PCCheckSkill(bl, ROWOW_SKILL_RG_TUNNELDRIVE);
-        else if (isPlayer == true && sc->HasSCE(ROWOW_SC_CHASEWALK) == true && SCVal(sc, ROWOW_SC_CHASEWALK, 3) < 0)
-            val = SCVal(sc, ROWOW_SC_CHASEWALK, 3);
+        // A Sage casting with Free Cast walks at its own rate, in place of every haste and slowness
+        if (freeCast > 0)
+            speedRate = 175 - 5 * freeCast;
         else
         {
-            val = 0;
-            // Longing for Freedom/Special Singer cancels song/dance penalty
-            if (sc->HasSCE(ROWOW_SC_LONGING) == true)
-                val = std::max(val, 50 - 10 * SCVal(sc, ROWOW_SC_LONGING, 1));
-            else if (isPlayer == true && sc->HasSCE(ROWOW_SC_DANCING) == true)
-            {
-                ROWOWStatusChangeEntry const* spirit = sc->GetSCE(ROWOW_SC_SPIRIT);
-                int32 lessonSkill = ROWOW->PCCheckSkill(bl, ROWOW_SKILL_BA_MUSICALLESSON) + ROWOW->PCCheckSkill(bl, ROWOW_SKILL_DC_DANCINGLESSON);
-                val = std::max(val, 500 - (40 + 10 * (spirit != nullptr && spirit->Val2 == ROWOW_SKILL_SL_BARDDANCER ? 1 : 0)) * lessonSkill);
-            }
-            if (sc->HasSCE(ROWOW_SC_DECREASEAGI) == true)
-                val = std::max(val, 25);
-            if (sc->HasSCE(ROWOW_SC_QUAGMIRE) == true)
-                val = std::max(val, 50);
-            if (sc->HasSCE(ROWOW_SC_DONTFORGETME) == true)
-                val = std::max(val, SCVal(sc, ROWOW_SC_DONTFORGETME, 3));
-            if (sc->HasSCE(ROWOW_SC_CURSE) == true)
-                val = std::max(val, 300);
-            if (sc->HasSCE(ROWOW_SC_CHASEWALK) == true)
-                val = std::max(val, SCVal(sc, ROWOW_SC_CHASEWALK, 3));
-            if (sc->HasSCE(ROWOW_SC_WEDDING) == true)
-                val = std::max(val, 100);
-            if (sc->HasSCE(ROWOW_SC_JOINTBEAT) == true && (SCVal(sc, ROWOW_SC_JOINTBEAT, 2) & (ROWOW_BREAK_ANKLE | ROWOW_BREAK_KNEE)) != 0)
-            {
-                int32 jointBeat = SCVal(sc, ROWOW_SC_JOINTBEAT, 2);
-                val = std::max(val, ((jointBeat & ROWOW_BREAK_ANKLE) != 0 ? 50 : 0) + ((jointBeat & ROWOW_BREAK_KNEE) != 0 ? 30 : 0));
-            }
-            if (ROWOWStatusChangeEntry const* cloaking = sc->GetSCE(ROWOW_SC_CLOAKING); cloaking != nullptr && (cloaking->Val4 & 1) == 0)
-                val = std::max(val, cloaking->Val1 < 3 ? 300 : 30 - 3 * cloaking->Val1);
-            if (sc->HasSCE(ROWOW_SC_GOSPEL) == true && SCVal(sc, ROWOW_SC_GOSPEL, 4) == ROWOW_BCT_ENEMY)
-                val = std::max(val, 75);
-            if (sc->HasSCE(ROWOW_SC_SLOWDOWN) == true) // Slow Potion
-                val = std::max(val, SCVal(sc, ROWOW_SC_SLOWDOWN, 1));
-            if (sc->HasSCE(ROWOW_SC_GATLINGFEVER) == true)
-                val = std::max(val, 100);
-            if (sc->HasSCE(ROWOW_SC_SUITON) == true)
-                val = std::max(val, SCVal(sc, ROWOW_SC_SUITON, 3));
-            if (sc->HasSCE(ROWOW_SC_SWOO) == true)
-                val = std::max(val, 300);
-            if (isPlayer == true && itemSpeedRate > 0) // Permanent item-based speedup
-                val = std::max(val, itemSpeedRate);
-        }
-        speedRate += val;
-        val = 0;
+            // GetMoveHasteValue2()
+            int32 val = 0;
+            if (sc->HasSCE(ROWOW_SC_FUSION) == true)
+                val = 25;
+            else if (isRiding == true)
+                val = 25; // (Same bonus as a dragon's, a third job's)
+            speedRate -= val;
 
-        // GetMoveHasteValue1()
-        if (sc->HasSCE(ROWOW_SC_AGIUP) == true)
-            val = std::max(val, SCVal(sc, ROWOW_SC_AGIUP, 1));
-        if (sc->HasSCE(ROWOW_SC_INCREASEAGI) == true)
-            val = std::max(val, 25);
-        if (sc->HasSCE(ROWOW_SC_WINDWALK) == true)
-            val = std::max(val, 2 * SCVal(sc, ROWOW_SC_WINDWALK, 1));
-        if (sc->HasSCE(ROWOW_SC_CARTBOOST) == true)
-            val = std::max(val, 20);
-        if (isPlayer == true && ROWOW->PCCheckSkill(bl, ROWOW_SKILL_TF_MISS) > 0)
-        {
-            // An Assassin's Improve Dodge also hastens (MAPID_ASSASSIN)
-            ROWOWIdentity const* identity = bl->ToPlayer()->CustomData.Get<ROWOWIdentity>("ROWOWIdentity");
-            ROWOWJob const* job = identity != nullptr ? ROWOW->GetJob(identity->JobID) : nullptr;
-            if (job != nullptr && job->IllusionJobKey.find("assassin") != std::string::npos)
-                val = std::max(val, 1 * ROWOW->PCCheckSkill(bl, ROWOW_SKILL_TF_MISS));
+            // GetMoveSlowValue()
+            if (isPlayer == true && sc->HasSCE(ROWOW_SC_HIDING) == true && ROWOW->PCCheckSkill(bl, ROWOW_SKILL_RG_TUNNELDRIVE) > 0)
+                val = 120 - 6 * ROWOW->PCCheckSkill(bl, ROWOW_SKILL_RG_TUNNELDRIVE);
+            else if (isPlayer == true && sc->HasSCE(ROWOW_SC_CHASEWALK) == true && SCVal(sc, ROWOW_SC_CHASEWALK, 3) < 0)
+                val = SCVal(sc, ROWOW_SC_CHASEWALK, 3);
+            else
+            {
+                val = 0;
+                // Longing for Freedom/Special Singer cancels song/dance penalty
+                if (sc->HasSCE(ROWOW_SC_LONGING) == true)
+                    val = std::max(val, 50 - 10 * SCVal(sc, ROWOW_SC_LONGING, 1));
+                else if (isPlayer == true && sc->HasSCE(ROWOW_SC_DANCING) == true)
+                {
+                    ROWOWStatusChangeEntry const* spirit = sc->GetSCE(ROWOW_SC_SPIRIT);
+                    int32 lessonSkill = ROWOW->PCCheckSkill(bl, ROWOW_SKILL_BA_MUSICALLESSON) + ROWOW->PCCheckSkill(bl, ROWOW_SKILL_DC_DANCINGLESSON);
+                    val = std::max(val, 500 - (40 + 10 * (spirit != nullptr && spirit->Val2 == ROWOW_SKILL_SL_BARDDANCER ? 1 : 0)) * lessonSkill);
+                }
+                if (sc->HasSCE(ROWOW_SC_DECREASEAGI) == true)
+                    val = std::max(val, 25);
+                if (sc->HasSCE(ROWOW_SC_QUAGMIRE) == true)
+                    val = std::max(val, 50);
+                if (sc->HasSCE(ROWOW_SC_DONTFORGETME) == true)
+                    val = std::max(val, SCVal(sc, ROWOW_SC_DONTFORGETME, 3));
+                if (sc->HasSCE(ROWOW_SC_CURSE) == true)
+                    val = std::max(val, 300);
+                if (sc->HasSCE(ROWOW_SC_CHASEWALK) == true)
+                    val = std::max(val, SCVal(sc, ROWOW_SC_CHASEWALK, 3));
+                if (sc->HasSCE(ROWOW_SC_WEDDING) == true)
+                    val = std::max(val, 100);
+                if (sc->HasSCE(ROWOW_SC_JOINTBEAT) == true && (SCVal(sc, ROWOW_SC_JOINTBEAT, 2) & (ROWOW_BREAK_ANKLE | ROWOW_BREAK_KNEE)) != 0)
+                {
+                    int32 jointBeat = SCVal(sc, ROWOW_SC_JOINTBEAT, 2);
+                    val = std::max(val, ((jointBeat & ROWOW_BREAK_ANKLE) != 0 ? 50 : 0) + ((jointBeat & ROWOW_BREAK_KNEE) != 0 ? 30 : 0));
+                }
+                if (ROWOWStatusChangeEntry const* cloaking = sc->GetSCE(ROWOW_SC_CLOAKING); cloaking != nullptr && (cloaking->Val4 & 1) == 0)
+                    val = std::max(val, cloaking->Val1 < 3 ? 300 : 30 - 3 * cloaking->Val1);
+                if (sc->HasSCE(ROWOW_SC_GOSPEL) == true && SCVal(sc, ROWOW_SC_GOSPEL, 4) == ROWOW_BCT_ENEMY)
+                    val = std::max(val, 75);
+                if (sc->HasSCE(ROWOW_SC_SLOWDOWN) == true) // Slow Potion
+                    val = std::max(val, SCVal(sc, ROWOW_SC_SLOWDOWN, 1));
+                if (sc->HasSCE(ROWOW_SC_GATLINGFEVER) == true)
+                    val = std::max(val, 100);
+                if (sc->HasSCE(ROWOW_SC_SUITON) == true)
+                    val = std::max(val, SCVal(sc, ROWOW_SC_SUITON, 3));
+                if (sc->HasSCE(ROWOW_SC_SWOO) == true)
+                    val = std::max(val, 300);
+                if (isPlayer == true && itemSpeedRate > 0) // Permanent item-based speedup
+                    val = std::max(val, itemSpeedRate);
+            }
+            speedRate += val;
+            val = 0;
+
+            // GetMoveHasteValue1()
+            if (sc->HasSCE(ROWOW_SC_AGIUP) == true)
+                val = std::max(val, SCVal(sc, ROWOW_SC_AGIUP, 1));
+            if (sc->HasSCE(ROWOW_SC_INCREASEAGI) == true)
+                val = std::max(val, 25);
+            if (sc->HasSCE(ROWOW_SC_WINDWALK) == true)
+                val = std::max(val, 2 * SCVal(sc, ROWOW_SC_WINDWALK, 1));
+            if (sc->HasSCE(ROWOW_SC_CARTBOOST) == true)
+                val = std::max(val, 20);
+            if (isPlayer == true && ROWOW->PCCheckSkill(bl, ROWOW_SKILL_TF_MISS) > 0)
+            {
+                // An Assassin's Improve Dodge also hastens (MAPID_ASSASSIN)
+                ROWOWIdentity const* identity = bl->ToPlayer()->CustomData.Get<ROWOWIdentity>("ROWOWIdentity");
+                ROWOWJob const* job = identity != nullptr ? ROWOW->GetJob(identity->JobID) : nullptr;
+                if (job != nullptr && job->IllusionJobKey.find("assassin") != std::string::npos)
+                    val = std::max(val, 1 * ROWOW->PCCheckSkill(bl, ROWOW_SKILL_TF_MISS));
+            }
+            if (ROWOWStatusChangeEntry const* cloaking = sc->GetSCE(ROWOW_SC_CLOAKING); cloaking != nullptr && (cloaking->Val4 & 1) == 1)
+                val = std::max(val, cloaking->Val1 >= 10 ? 25 : 3 * cloaking->Val1 - 3);
+            if (sc->HasSCE(ROWOW_SC_BERSERK) == true)
+                val = std::max(val, 25);
+            if (sc->HasSCE(ROWOW_SC_RUN) == true)
+                val = std::max(val, 55);
+            if (sc->HasSCE(ROWOW_SC_AVOID) == true)
+                val = std::max(val, SCVal(sc, ROWOW_SC_AVOID, 2));
+            if (sc->HasSCE(ROWOW_SC_INVINCIBLE) == true)
+                val = std::max(val, SCVal(sc, ROWOW_SC_INVINCIBLE, 3));
+            if (sc->HasSCE(ROWOW_SC_PARALYSE) == true && SCVal(sc, ROWOW_SC_PARALYSE, 3) == 0)
+                val = std::max(val, 50);
+            if (isPlayer == true && itemSpeedRate < 0) // Permanent item-based speedup
+                val = std::max(val, -itemSpeedRate);
+            speedRate -= val;
+            if (speedRate < 40)
+                speedRate = 40;
         }
-        if (ROWOWStatusChangeEntry const* cloaking = sc->GetSCE(ROWOW_SC_CLOAKING); cloaking != nullptr && (cloaking->Val4 & 1) == 1)
-            val = std::max(val, cloaking->Val1 >= 10 ? 25 : 3 * cloaking->Val1 - 3);
-        if (sc->HasSCE(ROWOW_SC_BERSERK) == true)
-            val = std::max(val, 25);
-        if (sc->HasSCE(ROWOW_SC_RUN) == true)
-            val = std::max(val, 55);
-        if (sc->HasSCE(ROWOW_SC_AVOID) == true)
-            val = std::max(val, SCVal(sc, ROWOW_SC_AVOID, 2));
-        if (sc->HasSCE(ROWOW_SC_INVINCIBLE) == true)
-            val = std::max(val, SCVal(sc, ROWOW_SC_INVINCIBLE, 3));
-        if (sc->HasSCE(ROWOW_SC_PARALYSE) == true && SCVal(sc, ROWOW_SC_PARALYSE, 3) == 0)
-            val = std::max(val, 50);
-        if (isPlayer == true && itemSpeedRate < 0) // Permanent item-based speedup
-            val = std::max(val, -itemSpeedRate);
-        speedRate -= val;
-        if (speedRate < 40)
-            speedRate = 40;
 
         // GetSpeed()
         if (isPlayer == true && ROWOW->PCIsCartOn(bl) == true)
@@ -908,7 +915,7 @@ int32 ROWOWMod::StatusGetSPBonus(ROWOWStatusChange const* sc, int32 type) const
     return bonus;
 }
 
-void ROWOWMod::StatusCalcRegenRate(ROWOWStatusChange const* sc, ROWOWStatus& status) const
+void ROWOWMod::StatusCalcRegenRate(Player const* sd, ROWOWStatusChange const* sc, ROWOWStatus& status) const
 {
     // status_calc_regen_rate: what regenerates and how fast, from the statuses (the regen skills when they give anything)
     status.RegenFlag = ROWOW_RGN_HP | ROWOW_RGN_SP;
@@ -927,8 +934,13 @@ void ROWOWMod::StatusCalcRegenRate(ROWOWStatusChange const* sc, ROWOWStatus& sta
         (sc->HasSCE(ROWOW_SC_MAGICMUSHROOM) == true && SCVal(sc, ROWOW_SC_MAGICMUSHROOM, 3) == 1) || sc->HasSCE(ROWOW_SC_NORECOVER_STATE) == true)
         status.RegenFlag = 0;
 
-    // No natural SP regen.  (A Monk's Fury and Asura Strike stop it, with the Monk, R6.5)
+    // No natural SP regen: a Monk's (or Champion's) Fury and Asura Strike stop it, but with the Monk spirit
+    ROWOWStatusChangeEntry const* spirit = sc->GetSCE(ROWOW_SC_SPIRIT);
+    ROWOWIdentity const* identity = sd != nullptr ? sd->CustomData.Get<ROWOWIdentity>("ROWOWIdentity") : nullptr;
+    bool isMonk = identity != nullptr && (identity->JobID == ROWOW_JOB_MONK || identity->JobID == ROWOW_JOB_CHAMPION);
     if (sc->HasSCE(ROWOW_SC_DANCING) == true || sc->HasSCE(ROWOW_SC_MAXIMIZEPOWER) == true ||
+        (isMonk == true && (sc->HasSCE(ROWOW_SC_EXTREMITYFIST) == true || sc->HasSCE(ROWOW_SC_EXPLOSIONSPIRITS) == true) &&
+        (spirit == nullptr || spirit->Val2 != ROWOW_SKILL_SL_MONK)) ||
         (sc->HasSCE(ROWOW_SC_OBLIVIONCURSE) == true && SCVal(sc, ROWOW_SC_OBLIVIONCURSE, 3) == 1))
         status.RegenFlag &= ~ROWOW_RGN_SP;
     if (sc->HasSCE(ROWOW_SC_TENSIONRELAX) == true)
@@ -1103,8 +1115,13 @@ void ROWOWMod::StatusCalcBLMain(Unit const* unit, ROWOWStatus const& baseStatus,
         ROWOWIdentity const* identity = sd->CustomData.Get<ROWOWIdentity>("ROWOWIdentity");
         int32 amotion = identity != nullptr ? StatusBaseAmotionPC(*identity, status) : b.AttackMotion;
         status.AspdRate = StatusCalcAspdRate(unit, sc, status.WeaponType, b.AspdRate);
-        // Absolute ASPD % modifiers.  (Free Cast's slowing while casting comes with the Sage, R6.5)
+        // Absolute ASPD % modifiers
         amotion = amotion * status.AspdRate / 1000;
+        // Free Cast while casting: increases amotion to reduce ASPD to the corresponding absolute percentage for each level (overriding other
+        // adjustments)
+        ROWOWSkillUnitData const* ud = unit->CustomData.Get<ROWOWSkillUnitData>("ROWOWSkillUnitData");
+        if (int32 freeCast = (ud != nullptr && ud->IsSkillTimer == true) ? PCCheckSkill(unit, ROWOW_SKILL_SA_FREECAST) : 0; freeCast > 0)
+            amotion += (2000 - amotion) * (55 - 5 * (freeCast + 1)) / 100;
         amotion = StatusCalcFixAspd(unit, sc, amotion);
         status.AttackMotion = std::clamp(amotion, BattleConfig.MaxAspdAmotion / 2, ROWOW_MIN_ASPD / 2); // pc_maxaspd / AMOTION_DIVIDER_PC, MIN_ASPD / AMOTION_DIVIDER_PC
         status.AttackDelay = 2 * status.AttackMotion;
@@ -1136,7 +1153,7 @@ void ROWOWMod::StatusCalcBLMain(Unit const* unit, ROWOWStatus const& baseStatus,
     if (sd != nullptr)
     {
         StatusCalcRegen(unit, status);
-        StatusCalcRegenRate(sc, status);
+        StatusCalcRegenRate(sd, sc, status);
     }
 }
 

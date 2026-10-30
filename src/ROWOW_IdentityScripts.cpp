@@ -86,8 +86,10 @@ public:
         if (ROWOW->IsEnabled == false || ROWOW->IsInROForm(player) == false)
             return;
         ROWOW->UpdateSkillUnitMove(player);
+        ROWOW->UpdateSkillCastMove(player);
         ROWOW->UpdateInvincibleTimer(player);
         ROWOW->UpdateAutoBonuses(player);
+        ROWOW->UpdateSpiritBalls(player);
 
         // A vendor stays sitting by its shop: standing up or walking away closes it
         ROWOWIdentity* identity = ROWOW->GetIdentity(player);
@@ -102,6 +104,7 @@ public:
             return;
         ROWOW->VendingCloseVending(player);
         ROWOW->SkillClearUnitGroup(player);
+        ROWOW->SkillClearTimerSkill(player);
     }
 
     bool OnPlayerCanRegenerate(Player* player) override
@@ -135,7 +138,10 @@ public:
             // same invincibility as an arrival (clif_parse_LoadEndAck), from the spot it lands on
             ROWOW->VendingCloseVending(player);
             if (mapid != player->GetMapId())
+            {
                 ROWOW->SkillClearUnitGroup(player);
+                ROWOW->SkillClearTimerSkill(player);
+            }
             else
             {
                 ROWOW->PCSetInvincibleTimer(player);
@@ -341,10 +347,14 @@ public:
             }
             case CMSG_STANDSTATECHANGE:
             {
-                // Sitting needs Basic Skill 3
+                // Sitting needs Basic Skill 3, and no performing or Gravitation Field (clif_parse_ActionRequest_sub: no sitting during these
+                // states either)
                 WorldPacket packetCopy(packet);
                 uint32 standState = 0;
                 packetCopy >> standState;
+                ROWOWStatusChangeEntry const* gravitation = ROWOW->GetSCE(player, ROWOW_SC_GRAVITATION);
+                if (standState == UNIT_STAND_STATE_SIT && (ROWOW->GetSCE(player, ROWOW_SC_DANCING) != nullptr || (gravitation != nullptr && gravitation->Val3 == ROWOW_BCT_SELF)))
+                    return false;
                 if (standState != UNIT_STAND_STATE_SIT || ROWOW->BattleConfig.BasicSkillCheck == 0 || ROWOW->PCCheckSkill(player, ROWOW_SKILL_NV_BASIC) >= 3)
                     return true;
                 ChatHandler(session).SendNotification("You need Basic Skill level 3 to sit.");
@@ -418,12 +428,17 @@ public:
             int32 x = 0, y = 0;
             ROWOW->GetUnitCell(unit, x, y);
             ROWOW->SkillUnitMove(unit, ROWOWMod::GetTick(), 4, x, y, skillUnitCell);
+            ROWOW->SkillClearTimerSkill(unit);
         }
         if (Player* player = unit->ToPlayer())
         {
             ROWOW->VendingCloseVending(player);
             if (ROWOW->IsInROForm(player) == true)
-                ROWOW->PCDelDevotions(player); // pc_dead
+            {
+                // pc_dead: its devotions end, and its Spirit Spheres go
+                ROWOW->PCDelDevotions(player);
+                ROWOW->PCDelSpiritBall(player, ROWOW->PCGetSpiritBall(player), 0);
+            }
         }
         if (unit->IsCreature() == true)
             ROWOW->MobDeadExp(unit->ToCreature());
@@ -455,6 +470,12 @@ public:
         if (caster == nullptr || caster->IsPlayer() == false || ROWOW->IsInROForm(caster->ToPlayer()) == false)
             return;
         if (ROWOW->IsSpellKeptInROForm(spell->GetSpellInfo()) == true || ROWOW->IsIdentitySkillSpell(caster->ToPlayer(), spell->GetSpellInfo()->Id) == true)
+            return;
+        // A skill item (Abracadabra's pick) is cast at its own level without being learned (SkillCastAbraSkill)
+        uint16 skillID = 0;
+        uint16 skillLevel = 0;
+        ROWOWSkillUnitData const* ud = ROWOW->GetSkillUnitData(caster->ToPlayer());
+        if (ROWOW->GetSkillOfSpell(spell->GetSpellInfo()->Id, skillID, skillLevel) == true && ud->SkillItemID == skillID && ud->SkillItemLevel == skillLevel)
             return;
         res = SPELL_FAILED_NOT_KNOWN;
     }
@@ -534,8 +555,13 @@ public:
             { "memo",     HandleROMemoCommand,   SEC_PLAYER,     Console::No },
             { "warp",     HandleROWarpCommand,   SEC_PLAYER,     Console::No },
             { "makearrow", HandleROMakeArrowCommand, SEC_PLAYER, Console::No },
+            { "autospell", HandleROAutospellCommand, SEC_PLAYER, Console::No },
+            { "message",  HandleROMessageCommand, SEC_PLAYER,    Console::No },
+            { "mobcast",  HandleROMobCastCommand, SEC_GAMEMASTER, Console::No },
             { "setcart",  HandleROSetCartCommand, SEC_GAMEMASTER, Console::No },
             { "setriding", HandleROSetRidingCommand, SEC_GAMEMASTER, Console::No },
+            { "setfalcon", HandleROSetFalconCommand, SEC_GAMEMASTER, Console::No },
+            { "spiritball", HandleROSpiritBallCommand, SEC_GAMEMASTER, Console::No },
             { "units",    HandleROUnitsCommand,  SEC_GAMEMASTER, Console::No },
             { "info",     HandleROInfoCommand,   SEC_GAMEMASTER, Console::No },
             { "form",     HandleROFormCommand,   SEC_GAMEMASTER, Console::No },
@@ -550,6 +576,7 @@ public:
             { "skill",    HandleROSkillCommand,  SEC_GAMEMASTER, Console::No },
             { "battle",   HandleROBattleCommand, SEC_GAMEMASTER, Console::No },
             { "sc",       HandleROStatusChangeCommand, SEC_GAMEMASTER, Console::No },
+            { "song",     HandleROSongCommand,   SEC_GAMEMASTER, Console::No },
             { "scend",    HandleROStatusChangeEndCommand, SEC_GAMEMASTER, Console::No },
             { "scrate",   HandleROStatusChangeRateCommand, SEC_GAMEMASTER, Console::No },
             { "identity", identityCommandTable },
@@ -575,6 +602,7 @@ public:
             ROWOW->SendEquipmentToClient(player, *ROWOW->GetIdentity(player), true);
             ROWOW->SendItemCardsToClient(player, *ROWOW->GetIdentity(player), true);
             ROWOW->SendSkillsToClient(player, *ROWOW->GetIdentity(player), true);
+            ROWOW->SendSpiritBallsToClient(player);
         }
         return true;
     }
@@ -647,14 +675,32 @@ public:
 
     static bool HandleROCartOffCommand(ChatHandler* handler)
     {
-        // clif_parse_RemoveOption: the Peco is let go of first, then the cart (its items stay in it)
+        // clif_parse_RemoveOption: the Peco and the falcon are let go of first, then the cart (its items stay in it)
         Player* player = GetFormPlayer(handler);
         if (player == nullptr)
             return false;
-        if (ROWOW->PCIsRiding(player) == true)
+        if (ROWOW->PCIsRiding(player) == true || ROWOW->PCIsFalcon(player) == true)
+        {
             ROWOW->PCSetRiding(player, false);
+            ROWOW->PCSetFalcon(player, false);
+        }
         else
             ROWOW->PCSetCart(player, 0);
+        return true;
+    }
+
+    static bool HandleROSpiritBallCommand(ChatHandler* handler, uint32 number)
+    {
+        // rAthena's @spiritball: the selected player (or the player) has that many Spirit Spheres, which stay (as the oracle's runs set them)
+        Player* player = handler->getSelectedPlayerOrSelf();
+        if (player == nullptr || ROWOW->IsInROForm(player) == false)
+            return false;
+        number = std::min<uint32>(number, ROWOW_MAX_SPIRITBALL);
+        ROWOW->PCDelSpiritBall(player, ROWOW->PCGetSpiritBall(player), 1);
+        for (uint32 i = 0; i < number; i++)
+            ROWOW->PCAddSpiritBall(player, -1, ROWOW_MAX_SPIRITBALL);
+        ROWOW->SendSpiritBallsToClient(player);
+        handler->PSendSysMessage("{} has {} Spirit Spheres.", player->GetName(), ROWOW->PCGetSpiritBall(player));
         return true;
     }
 
@@ -668,6 +714,30 @@ public:
         ROWOW->PCSetRiding(player, flag.value_or(1) != 0);
         handler->PSendSysMessage("{} {}.", player->GetName(), ROWOW->PCIsRiding(player) == true ? "rides a Peco Peco" :
             (flag.value_or(1) != 0 ? "can't mount a Peco Peco (no Riding)" : "has released the Peco Peco"));
+        return true;
+    }
+
+    static bool HandleROSetFalconCommand(ChatHandler* handler, Optional<uint32> flag)
+    {
+        // The Hunter guild's falcon breeder (the script command setfalcon, R8; rAthena's @falcon toggles): a falcon (it needs Falconry Mastery)
+        // or, with 0, none
+        Player* player = handler->getSelectedPlayerOrSelf();
+        if (player == nullptr || ROWOW->IsInROForm(player) == false)
+            return false;
+        ROWOW->PCSetFalcon(player, flag.value_or(1) != 0);
+        handler->PSendSysMessage("{} {}.", player->GetName(), ROWOW->PCIsFalcon(player) == true ? "has a falcon" :
+            (flag.value_or(1) != 0 ? "can't take a falcon (no Falconry Mastery)" : "has no falcon"));
+        return true;
+    }
+
+    static bool HandleROMessageCommand(ChatHandler* handler, Tail message)
+    {
+        // What the player's next Talkie Box says (RO's client asks for it as the trap is set, clif_parse_UseSkillToPosMoreInfo's sd->message)
+        Player* player = GetFormPlayer(handler);
+        if (player == nullptr)
+            return false;
+        ROWOW->GetSkillUnitData(player)->Message = std::string(message).substr(0, 79); // MESSAGE_SIZE
+        handler->PSendSysMessage("Talkie Box message: {}", ROWOW->GetSkillUnitData(player)->Message);
         return true;
     }
 
@@ -782,19 +852,71 @@ public:
 
     static bool HandleROMakeArrowCommand(ChatHandler* handler, uint32 itemTemplateID)
     {
-        // The Arrow Crafting list's pick (clif_parse_SelectArrow), by the item's template
+        // The Arrow Crafting list's pick, or the Elemental Converter list's (clif_parse_SelectArrow), by the item's template
         Player* player = GetFormPlayer(handler);
         if (player == nullptr)
             return false;
         auto itemIter = ROWOW->ItemsByItemTemplateID.find(itemTemplateID);
+        ROWOWIdentity* identity = ROWOW->GetIdentity(player);
+        if (identity->MenuSkillID == ROWOW_SKILL_SA_CREATECON)
+        {
+            identity->MenuSkillID = 0; // clif_menuskill_clear
+            identity->MenuSkillValue = 0;
+            if (itemIter == ROWOW->ItemsByItemTemplateID.end() || ROWOW->SkillProduceMix(player, ROWOW_SKILL_SA_CREATECON, itemIter->second.ItemID, 1) == false)
+                ROWOW->ClifSkillFail(player, ROWOW_SKILL_SA_CREATECON, ROWOW_USESKILL_FAIL_LEVEL);
+            return true;
+        }
         if (itemIter == ROWOW->ItemsByItemTemplateID.end() || ROWOW->SkillArrowCreate(player, itemIter->second.ItemID) == false)
             ROWOW->ClifSkillFail(player, ROWOW_SKILL_AC_MAKINGARROW, ROWOW_USESKILL_FAIL_LEVEL);
         return true;
     }
 
+    static bool HandleROAutospellCommand(ChatHandler* handler, uint32 skillID)
+    {
+        // Hindsight's menu pick (clif_parse_AutoSpell)
+        Player* player = GetFormPlayer(handler);
+        if (player == nullptr)
+            return false;
+        ROWOW->SkillAutospell(player, uint16(skillID));
+        return true;
+    }
+
+    static bool HandleROMobCastCommand(ChatHandler* handler, std::string skillName, Optional<uint32> skillLevel)
+    {
+        // Has the selected RO monster cast a skill (its skill_db name or id) at the player, as its spell with its cast time (a ground skill at
+        // the player's spot): for checking what meets a monster's skills (Magic Rod, Spell Breaker) until monsters use skills (R10)
+        Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
+        Creature* creature = handler->getSelectedCreature();
+        uint16 skillID = ROWOW->GetSkillIDByName(skillName);
+        if (skillID == 0 && std::all_of(skillName.begin(), skillName.end(), ::isdigit) == true)
+            skillID = uint16(strtoul(skillName.c_str(), nullptr, 10));
+        ROWOWSkill const* skill = ROWOW->GetSkill(skillID);
+        if (player == nullptr || creature == nullptr || ROWOW->GetROStatus(creature) == nullptr || skill == nullptr)
+        {
+            handler->SendSysMessage("Select an RO monster and name an RO skill.");
+            return false;
+        }
+        uint16 level = uint16(std::clamp<uint32>(skillLevel.value_or(1), 1, skill->MaxLevel));
+        SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(ROWOW->GetSkillSpellID(skillID, level));
+        if (spellInfo == nullptr)
+        {
+            handler->SendSysMessage("That skill level has no spell.");
+            return false;
+        }
+        SpellCastTargets targets;
+        if (ROWOW->SkillGetCastType(skillID) == ROWOW_CAST_GROUND)
+            targets.SetDst(*player);
+        else
+            targets.SetUnitTarget((skill->Inf & ROWOW_INF_SELF_SKILL) != 0 ? static_cast<Unit*>(creature) : static_cast<Unit*>(player));
+        SpellCastResult result = creature->CastSpell(targets, spellInfo, nullptr, TRIGGERED_NONE);
+        handler->PSendSysMessage("{} casts {} {}: {}", creature->GetName(), skill->Name, level, uint32(result));
+        return true;
+    }
+
     static bool HandleROUnitsCommand(ChatHandler* handler)
     {
-        // The ground skill unit groups on the player's map: skill, level, unit, live cells and time left
+        // The ground skill unit groups on the player's map: skill, level, unit, live cells, time left, and the first live cell (its RO cell and
+        // WoW position)
         Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
         ROWOWMapSkillUnits* mapUnits = player != nullptr ? ROWOW->GetMapSkillUnits(player->GetMap(), false) : nullptr;
         if (mapUnits == nullptr || mapUnits->GroupsByID.empty() == true)
@@ -807,8 +929,14 @@ public:
         {
             ROWOWSkillUnitGroup const& group = *groupByID.second;
             ROWOWSkill const* skill = ROWOW->GetSkill(group.SkillID);
-            handler->PSendSysMessage("Group {}: {} {} unit {:#x}, {} of {} cells alive, {} ms left, val1 {} val2 {} val3 {}", group.GroupID, skill != nullptr ? skill->Name : "?",
-                group.SkillLevel, group.UnitID, group.AliveCount, group.Units.size(), group.Limit - (int64(tick) - int64(group.Tick)), group.Val1, group.Val2, group.Val3);
+            auto unitIter = std::find_if(group.Units.begin(), group.Units.end(), [](ROWOWSkillUnit const& unit) { return unit.IsAlive == true; });
+            float x = 0, y = 0;
+            if (unitIter != group.Units.end())
+                ROWOW->GetCellWorldPosition(player->GetMapId(), unitIter->X, unitIter->Y, x, y);
+            handler->PSendSysMessage("Group {}: {} {} unit {:#x}, {} of {} cells alive, {} ms left, val1 {} val2 {} val3 {}, cell {},{} at {:.2f} {:.2f} {:.2f}", group.GroupID,
+                skill != nullptr ? skill->Name : "?", group.SkillLevel, group.UnitID, group.AliveCount, group.Units.size(), group.Limit - (int64(tick) - int64(group.Tick)),
+                group.Val1, group.Val2, group.Val3, unitIter != group.Units.end() ? unitIter->X : 0, unitIter != group.Units.end() ? unitIter->Y : 0, x, y,
+                unitIter != group.Units.end() ? unitIter->Z : 0.0f);
         }
         return true;
     }
@@ -1166,11 +1294,14 @@ public:
         return true;
     }
 
-    static bool HandleROBattleCommand(ChatHandler* handler, Optional<uint32> swings, Optional<std::string> skillName, Optional<uint32> skillLevel)
+    static bool HandleROBattleCommand(ChatHandler* handler, Optional<uint32> swings, Optional<std::string> skillName, Optional<uint32> skillLevel,
+        Optional<std::string> mobStatusName)
     {
         // Works out RO attacks between the player and the selected RO monster without dealing them, and prints the totals the rAthena
         // oracle's @oracledmg prints (for comparing with it): normal attacks both ways, and with a skill (its skill_db name or id and level)
-        // the skill's cast time, after-cast delay, SP and heal, and its hits on the monster.  The lines also go to the server log
+        // the skill's cast time, after-cast delay, SP and heal, and its hits on the monster.  With a status too, the skill's hits again with the
+        // status started on the monster before each (one a hit uses up, Lex Aeterna: the oracle's @oracledmgsc).  The lines also go to the
+        // server log
         Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
         Creature* creature = handler->getSelectedCreature();
         if (player == nullptr || ROWOW->IsInROForm(player) == false || creature == nullptr || ROWOW->GetROStatus(creature) == nullptr)
@@ -1215,7 +1346,8 @@ public:
             mobStatus.Critical, mobStatus.DefElement, mobStatus.ElementLevel, mobStatus.Race, mobStatus.Size, mobStatus.Class, mobStatus.AttackMotion,
             mobStatus.AttackDelay, mobStatus.DamageMotion);
         print("mob_speed speed={} batk={} mode={}", mobStatus.Speed, mobStatus.BaseAttack, mobStatus.Mode);
-        auto runSwings = [print, swingCount](char const* label, Unit* src, Unit* target, int32 attackType, uint16 swingSkillID, uint16 swingSkillLevel)
+        auto runSwings = [print, swingCount](char const* label, Unit* src, Unit* target, int32 attackType, uint16 swingSkillID, uint16 swingSkillLevel,
+            std::function<void()> const& beforeSwing = nullptr)
         {
             uint32 landed = 0, flee = 0, lucky = 0, otherMiss = 0, crit = 0, multi = 0;
             uint64 total = 0, normalTotal = 0, critTotal = 0;
@@ -1223,6 +1355,8 @@ public:
             int32 divMin = std::numeric_limits<int32>::max(), divMax = 0;
             for (uint32 swing = 0; swing < swingCount; swing++)
             {
+                if (beforeSwing != nullptr)
+                    beforeSwing();
                 ROWOWDamage d = ROWOW->BattleCalcAttack(attackType, src, target, swingSkillID, swingSkillLevel, 0);
                 int64 damage = d.Damage + d.Damage2;
                 if (d.DmgLv == ROWOW_ATK_LUCKY || d.Type == ROWOW_DMG_LUCY_DODGE)
@@ -1284,6 +1418,25 @@ public:
                 // A skill that hits its caster too (Grand Cross) on the player itself
                 if (skill->Inf2[ROWOW_INF2_TARGETSELF] == true)
                     runSwings("pcself", player, player, skill->AttackType, skillID, level);
+                // The monster's status started again before each hit
+                int32 mobStatusType = mobStatusName.has_value() == true ? GetStatusTypeByName(*mobStatusName) : -1;
+                if (mobStatusType >= 0)
+                {
+                    uint32 started = 0, ended = 0;
+                    runSwings("pcskillsc", player, creature, skill->AttackType, skillID, level, [player, creature, mobStatusType, &started, &ended]()
+                    {
+                        // The previous hit's use of it is counted before it starts again
+                        if (started != 0 && ROWOW->GetSCE(creature, mobStatusType) == nullptr)
+                            ended++;
+                        started += ROWOW->StatusChangeStart(player, creature, mobStatusType, 10000, 1, 0, 0, 0, 60000,
+                            ROWOW_SCSTART_NOAVOID | ROWOW_SCSTART_NOTICKDEF | ROWOW_SCSTART_NORATEDEF) == true ? 1 : 0;
+                    });
+                    if (ROWOW->GetSCE(creature, mobStatusType) == nullptr)
+                        ended++;
+                    else
+                        ROWOW->StatusChangeEnd(creature, mobStatusType);
+                    print("mob_sc type={} started={} ended_by_hit={}", mobStatusType, started, ended);
+                }
             }
         }
         return true;
@@ -1338,7 +1491,45 @@ public:
         Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
         bool started = ROWOW->StatusChangeStart(player != nullptr ? static_cast<Unit*>(player) : unit, unit, type, 10000, val1, val2.value_or(0), val3.value_or(0), val4.value_or(0),
             tick, ROWOW_SCSTART_NOAVOID | ROWOW_SCSTART_NOTICKDEF | ROWOW_SCSTART_NORATEDEF);
-        handler->PSendSysMessage("{} on {}: {} ({} ms).", statusName, unit->GetName(), started == true ? "started" : "failed", tick);
+        ROWOWStatusChangeEntry const* sce = ROWOW->GetSCE(unit, type);
+        handler->PSendSysMessage("{} on {}: {} ({} ms), v1={} v2={} v3={} v4={}.", statusName, unit->GetName(), started == true ? "started" : "failed", tick,
+            sce != nullptr ? sce->Val1 : 0, sce != nullptr ? sce->Val2 : 0, sce != nullptr ? sce->Val3 : 0, sce != nullptr ? sce->Val4 : 0);
+        return true;
+    }
+
+    static bool HandleROSongCommand(ChatHandler* handler, std::string skillName, Optional<uint32> skillLevel)
+    {
+        // A song's or dance's effect on the player itself, with the values its units would give (skill_unitsetting with the player as the
+        // performer, at its cell: the group's val1 and val2), as the oracle's @oraclesong does, for comparing the status it gives (.ro battle's
+        // status lines, a skill's cast and delay).  The group goes at once (the player's dance with it); the status lasts a minute
+        Player* player = GetFormPlayer(handler);
+        if (player == nullptr)
+            return false;
+        uint16 skillID = ROWOW->GetSkillIDByName(skillName);
+        if (skillID == 0 && std::all_of(skillName.begin(), skillName.end(), ::isdigit) == true)
+            skillID = uint16(strtoul(skillName.c_str(), nullptr, 10));
+        ROWOWSkill const* skill = ROWOW->GetSkill(skillID);
+        if (skill == nullptr || skill->UnitTypeID == 0 || skill->StatusID == ROWOW_SC_NONE)
+        {
+            handler->SendSysMessage("No RO song or dance of that name.");
+            return false;
+        }
+        uint16 level = uint16(std::clamp<uint32>(skillLevel.value_or(1), 1, skill->MaxLevel));
+        int32 x = 0, y = 0;
+        ROWOW->GetUnitCell(player, x, y);
+        ROWOW->GetSkillUnitData(player)->SkillZ = player->GetPositionZ();
+        std::shared_ptr<ROWOWSkillUnitGroup> group = ROWOW->SkillUnitSetting(player, skillID, level, x, y, 0);
+        if (group == nullptr)
+        {
+            handler->SendSysMessage("The song's units couldn't be set here.");
+            return false;
+        }
+        int32 val1 = group->Val1, val2 = group->Val2;
+        ROWOW->SkillDelUnitGroup(player->GetMap(), group);
+        ROWOW->SCStart4(player, player, skill->StatusID, 100, level, val1, val2, 0, 60000);
+        ROWOWStatusChangeEntry const* sce = ROWOW->GetSCE(player, skill->StatusID);
+        handler->PSendSysMessage("song {} lv={} group_val1={} group_val2={} sc v1={} v2={} v3={}", skill->Name, level, val1, val2, sce != nullptr ? sce->Val1 : 0,
+            sce != nullptr ? sce->Val2 : 0, sce != nullptr ? sce->Val3 : 0);
         return true;
     }
 

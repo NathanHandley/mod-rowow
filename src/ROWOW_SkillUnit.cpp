@@ -18,7 +18,9 @@
 //  Copyright (c) rAthena Dev Teams - Licensed under GNU GPL.  For more information, see LICENCE in rAthena's main folder
 
 #include "CellImpl.h"
+#include "Chat.h"
 #include "Creature.h"
+#include "CreatureAI.h"
 #include "DatabaseEnv.h"
 #include "DynamicObject.h"
 #include "GridNotifiers.h"
@@ -29,6 +31,8 @@
 #include "ObjectAccessor.h"
 #include "Player.h"
 #include "QueryResult.h"
+#include "SpellInfo.h"
+#include "SpellMgr.h"
 #include "Unit.h"
 
 #include "ROWOW.h"
@@ -109,6 +113,33 @@ namespace
         if (DynamicObject* dynObj = map->GetDynamicObject(visualGUID))
             dynObj->Remove();
         visualGUID.Clear();
+    }
+
+    // Whether a live unit of the skill is on the cell (the cell flags its units set, skill_unitsetmapcell)
+    bool HasSkillUnitOnCell(ROWOWMapSkillUnits const* mapUnits, int32 x, int32 y, uint16 skillID)
+    {
+        if (mapUnits == nullptr)
+            return false;
+        auto cellIter = mapUnits->UnitsByCell.find(GetCellKey(x, y));
+        if (cellIter == mapUnits->UnitsByCell.end())
+            return false;
+        for (std::pair<int32, int32> const& unitRef : cellIter->second)
+        {
+            auto groupIter = mapUnits->GroupsByID.find(unitRef.first);
+            if (groupIter != mapUnits->GroupsByID.end() && groupIter->second->SkillID == skillID && groupIter->second->Units[unitRef.second].IsAlive == true)
+                return true;
+        }
+        return false;
+    }
+
+    // Whether Land Protector stops a magic unit acting on a char: the unit's own cell is protected, or (land_protector_behavior) the char's
+    bool IsCellLandProtected(Map* map, ROWOWSkillUnit const& unit, Unit const* bl)
+    {
+        if (ROWOW->BattleConfig.LandProtectorBehavior == 0)
+            return ROWOW->MapGetCellLandProtector(map, unit.X, unit.Y);
+        int32 x = 0, y = 0;
+        ROWOW->GetUnitCell(bl, x, y);
+        return ROWOW->MapGetCellLandProtector(map, x, y);
     }
 }
 
@@ -400,6 +431,39 @@ int32 ROWOWMod::MapForEachSkillUnitInArea(Map* map, int32 x0, int32 y0, int32 x1
     return returnCount;
 }
 
+bool ROWOWMod::MapGetCellLandProtector(Map* map, int32 x, int32 y) const
+{
+    // CELL_CHKLANDPROTECTOR: Land Protector's units set it on their cell (skill_unitsetmapcell, their range being none)
+    return HasSkillUnitOnCell(GetMapSkillUnits(map, false), x, y, ROWOW_SKILL_SA_LANDPROTECTOR);
+}
+
+bool ROWOWMod::MapGetCellIceWall(Map* map, int32 x, int32 y) const
+{
+    // CELL_CHKICEWALL: an Ice Wall unit makes its cell a wall that can be shot over (map_setgatcell 5)
+    return HasSkillUnitOnCell(GetMapSkillUnits(map, false), x, y, ROWOW_SKILL_WZ_ICEWALL);
+}
+
+bool ROWOWMod::MapGetCellBasilica(Map* map, int32 x, int32 y) const
+{
+    // CELL_CHKBASILICA: Basilica's units set it on their cell (skill_unitsetmapcell, their range being none)
+    return HasSkillUnitOnCell(GetMapSkillUnits(map, false), x, y, ROWOW_SKILL_HP_BASILICA);
+}
+
+void ROWOWMod::PCCellBasilica(Player* sd)
+{
+    // pc_cell_basilica: a player standing on a Basilica cell has SC_BASILICA (no attacks, no skills, and safe from monsters' hits), which
+    // stepping off ends.  The caster's own (val4 its id) holds it still
+    int32 x = 0, y = 0;
+    GetUnitCell(sd, x, y);
+    if (MapGetCellBasilica(sd->GetMap(), x, y) == false)
+    {
+        if (GetSCE(sd, ROWOW_SC_BASILICA) != nullptr)
+            StatusChangeEnd(sd, ROWOW_SC_BASILICA);
+    }
+    else if (GetSCE(sd, ROWOW_SC_BASILICA) == nullptr)
+        SCStart(sd, sd, ROWOW_SC_BASILICA, 100, 0, ROWOW_INFINITE_TICK);
+}
+
 int32 ROWOWMod::BattleCheckTargetSkillUnit(ROWOWSkillUnitGroup const& group, Map* map, Unit const* target, int32 flag) const
 {
     // battle_check_target with a skill unit as the source: the group's caster's view of the target, and its own self rules
@@ -420,7 +484,8 @@ int32 ROWOWMod::BattleCheckTargetSkillUnit(ROWOWSkillUnitGroup const& group, Map
 std::shared_ptr<ROWOWSkillUnitGroup> ROWOWMod::SkillUnitSetting(Unit* src, uint16 skillID, uint16 skillLevel, int32 x, int32 y, int32 flag)
 {
     // skill_unitsetting: the skill's unit group, its units on the layout's cells around x,y (not on walls, nor behind them from the caster for
-    // UF_PATHCHECK skills), each acting at once on what stands in it.  (The other jobs' cases of its switches are ported with them)
+    // UF_PATHCHECK skills), each acting at once on what stands in it.  A trap remembers the item it was made of; a song or dance starts its
+    // performer's SC_DANCING (and an ensemble its partner's).  (The other jobs' cases of its switches are ported with them)
     ROWOWSkill const* skill = GetSkill(skillID);
     if (src == nullptr || skill == nullptr || src->IsInWorld() == false)
         return nullptr;
@@ -434,9 +499,12 @@ std::shared_ptr<ROWOWSkillUnitGroup> ROWOWMod::SkillUnitSetting(Unit* src, uint1
     Player* sd = src->ToPlayer();
     ROWOWStatusChange const* sc = GetStatusChange(static_cast<Unit const*>(src)); // for traps, firewall and fogwall - celest
     int32 val1 = 0, val2 = 0, val3 = 0;
+    int32 linkGroupID = 0;
     uint32 reqItem = 0;
     int32 activeFlag = 1;
-    bool hidden = false; // (traps_setting is 0 off the PvP maps: no trap is hidden)
+    ROWOWStatus const* status = GetROStatus(src);
+    // A hidden trap (UF_HIDDENTRAP) is hidden by traps_setting: 2 everywhere, 1 on the PvP maps (none here)
+    bool hidden = skill->UnitFlags[ROWOW_UF_HIDDENTRAP] == true && BattleConfig.TrapsSetting == 2;
 
     switch (skillID)
     {
@@ -453,6 +521,149 @@ std::shared_ptr<ROWOWSkillUnitGroup> ROWOWMod::SkillUnitSetting(Unit* src, uint1
             if ((flag & 1) == 0)
                 limit = 2000;
             break;
+        case ROWOW_SKILL_WZ_METEOR:
+            limit = flag;
+            flag = 0; // Flag should not influence anything else for these skills
+            break;
+        case ROWOW_SKILL_WZ_FIREPILLAR:
+            if (MapGetCellLandProtector(map, x, y) == true)
+                return nullptr;
+            if ((flag & 1) != 0)
+                limit = 1000;
+            val1 = skillLevel + 2;
+            break;
+        case ROWOW_SKILL_SA_LANDPROTECTOR:
+        case ROWOW_SKILL_SA_VOLCANO:
+        case ROWOW_SKILL_SA_DELUGE:
+        case ROWOW_SKILL_SA_VIOLENTGALE:
+        {
+            // HelloKitty confirmed that these are interchangeable, so you can change element and not consume gemstones: the caster's
+            // old field goes, and a new elemental field takes the old one's time left [Skotlex]
+            if (std::shared_ptr<ROWOWSkillUnitGroup> oldGroup = SkillLocateElementField(src))
+            {
+                if ((oldGroup->SkillID == ROWOW_SKILL_SA_VOLCANO || oldGroup->SkillID == ROWOW_SKILL_SA_DELUGE || oldGroup->SkillID == ROWOW_SKILL_SA_VIOLENTGALE) &&
+                    oldGroup->Limit > 0)
+                {
+                    limit = oldGroup->Limit - int64(GetTick() - oldGroup->Tick);
+                    if (limit < 0) // This can happen...
+                        limit = SkillGetTime(skillID, skillLevel);
+                }
+                SkillClearGroup(src, 1);
+            }
+            break;
+        }
+        case ROWOW_SKILL_HP_BASILICA:
+            val1 = int32(src->GetGUID().GetCounter()); // Store caster id.
+            break;
+        case ROWOW_SKILL_HT_SKIDTRAP:
+        case ROWOW_SKILL_MA_SKIDTRAP:
+        {
+            // Save position of caster
+            int32 srcX = 0, srcY = 0;
+            GetUnitCell(src, srcX, srcY);
+            val1 = (srcX << 16) | srcY;
+            [[fallthrough]];
+        }
+        case ROWOW_SKILL_HT_ANKLESNARE:
+        case ROWOW_SKILL_HT_SHOCKWAVE:
+        case ROWOW_SKILL_HT_SANDMAN:
+        case ROWOW_SKILL_MA_SANDMAN:
+        case ROWOW_SKILL_HT_CLAYMORETRAP:
+        case ROWOW_SKILL_HT_LANDMINE:
+        case ROWOW_SKILL_MA_LANDMINE:
+        case ROWOW_SKILL_HT_FLASHER:
+        case ROWOW_SKILL_HT_FREEZINGTRAP:
+        case ROWOW_SKILL_MA_FREEZINGTRAP:
+        case ROWOW_SKILL_HT_BLASTMINE:
+            // The trap item it was made of (Booby Trap, or Special Alloy Trap), which it turns back into.  (gvg_traps_target_all's targets need
+            // the PvP maps)
+            if (sd != nullptr)
+            {
+                ROWOWSkillCondition req = SkillGetRequirement(sd, skillID, skillLevel);
+                for (int32 i = 0; i < ROWOW_MAX_SKILL_ITEM_REQUIRE && reqItem == 0; i++)
+                    if (req.ItemIDs[i] == ROWOW_ITEMID_TRAP || req.ItemIDs[i] == ROWOW_ITEMID_TRAP_ALLOY)
+                        reqItem = req.ItemIDs[i];
+            }
+            break;
+        case ROWOW_SKILL_BA_WHISTLE:
+            val1 = skillLevel + status->Stats[ROWOW_STAT_AGI] / 10; // Flee increase
+            val2 = (skillLevel + 1) / 2 + status->Stats[ROWOW_STAT_LUK] / 30; // Perfect dodge increase
+            if (sd != nullptr)
+            {
+                val1 += PCCheckSkill(sd, ROWOW_SKILL_BA_MUSICALLESSON) / 2;
+                val2 += PCCheckSkill(sd, ROWOW_SKILL_BA_MUSICALLESSON) / 5;
+            }
+            break;
+        case ROWOW_SKILL_DC_HUMMING:
+            val1 = 1 + 2 * skillLevel + status->Stats[ROWOW_STAT_DEX] / 10; // Hit increase
+            if (sd != nullptr)
+                val1 += PCCheckSkill(sd, ROWOW_SKILL_DC_DANCINGLESSON);
+            break;
+        case ROWOW_SKILL_BA_POEMBRAGI:
+            val1 = 3 * skillLevel + status->Stats[ROWOW_STAT_DEX] / 10; // Casting time reduction
+            // For some reason at level 10 the base delay reduction is 50%.
+            val2 = (skillLevel < 10 ? 3 * skillLevel : 50) + status->Stats[ROWOW_STAT_INT] / 5; // After-cast delay reduction
+            if (sd != nullptr)
+            {
+                val1 += PCCheckSkill(sd, ROWOW_SKILL_BA_MUSICALLESSON);
+                val2 += 2 * PCCheckSkill(sd, ROWOW_SKILL_BA_MUSICALLESSON);
+            }
+            break;
+        case ROWOW_SKILL_DC_DONTFORGETME:
+            val1 = 5 + 3 * skillLevel + status->Stats[ROWOW_STAT_DEX] / 10; // ASPD decrease
+            val2 = 5 + 3 * skillLevel + status->Stats[ROWOW_STAT_AGI] / 10; // Movement speed adjustment.
+            if (sd != nullptr)
+            {
+                val1 += PCCheckSkill(sd, ROWOW_SKILL_DC_DANCINGLESSON);
+                val2 += PCCheckSkill(sd, ROWOW_SKILL_DC_DANCINGLESSON);
+            }
+            val1 *= 10; // Because 10 is actually 1% aspd
+            break;
+        case ROWOW_SKILL_DC_SERVICEFORYOU:
+            val1 = 15 + skillLevel + (status->Stats[ROWOW_STAT_INT] / 10); // MaxSP percent increase
+            val2 = 20 + 3 * skillLevel + (status->Stats[ROWOW_STAT_INT] / 10); // SP cost reduction
+            if (sd != nullptr)
+            {
+                val1 += PCCheckSkill(sd, ROWOW_SKILL_DC_DANCINGLESSON) / 2;
+                val2 += PCCheckSkill(sd, ROWOW_SKILL_DC_DANCINGLESSON) / 2;
+            }
+            break;
+        case ROWOW_SKILL_BA_ASSASSINCROSS:
+            if (sd != nullptr)
+                val1 = PCCheckSkill(sd, ROWOW_SKILL_BA_MUSICALLESSON) / 2;
+            val1 += 5 + skillLevel + (status->Stats[ROWOW_STAT_AGI] / 20);
+            val1 *= 10; // ASPD works with 1000 as 100%
+            break;
+        case ROWOW_SKILL_DC_FORTUNEKISS:
+            val1 = 10 + skillLevel + (status->Stats[ROWOW_STAT_LUK] / 10); // Critical increase
+            val1 *= 10; // Because every 10 crit is an actual cri point.
+            if (sd != nullptr)
+                val1 += 5 * PCCheckSkill(sd, ROWOW_SKILL_DC_DANCINGLESSON);
+            break;
+        case ROWOW_SKILL_BD_DRUMBATTLEFIELD:
+            val1 = (skillLevel + 1) * 25; // Atk increase
+            val2 = (skillLevel + 1) * 2; // Def increase
+            break;
+        case ROWOW_SKILL_BD_RINGNIBELUNGEN:
+            val1 = (skillLevel + 2) * 25; // Atk increase
+            break;
+        case ROWOW_SKILL_BD_RICHMANKIM:
+            val1 = 25 + 11 * skillLevel; // Exp increase bonus.
+            break;
+        case ROWOW_SKILL_BD_SIEGFRIED:
+            val1 = 55 + skillLevel * 5; // Elemental Resistance
+            val2 = skillLevel * 10; // Status ailment resistance
+            break;
+        case ROWOW_SKILL_PR_SANCTUARY:
+            val1 = skillLevel + 3; // The undead and demons it can still hit
+            break;
+        case ROWOW_SKILL_HW_GRAVITATION:
+            // The caster's own Gravitation status deletes the field with it
+            if (ROWOWStatusChangeEntry const* gravitation = sc != nullptr ? sc->GetSCE(ROWOW_SC_GRAVITATION) : nullptr; gravitation != nullptr &&
+                gravitation->Val3 == ROWOW_BCT_SELF)
+                linkGroupID = gravitation->Val4;
+            break;
+        // (Quagmire's targets turn to all on the PvP maps with vs_traps_bctall, which no RO map has here)
     }
 
     // Init skill unit group
@@ -463,10 +674,10 @@ std::shared_ptr<ROWOWSkillUnitGroup> ROWOWMod::SkillUnitSetting(Unit* src, uint1
     group->Val1 = val1;
     group->Val2 = val2;
     group->Val3 = val3;
+    group->LinkGroupID = linkGroupID;
     group->TargetFlag = target;
     group->BLFlag = skill->UnitBLTarget;
     // Store if this skill needs to consume ammo.
-    ROWOWStatus const* status = GetROStatus(src);
     group->IsAmmoConsume = sd != nullptr && status != nullptr && status->IsArrowAttack == true && skillID != ROWOW_SKILL_GS_GROUNDDRIFT && (flag & ROWOW_UNIT_NOCONSUME_AMMO) == 0;
     group->SongDance = uint8(((skill->UnitFlags[ROWOW_UF_DANCE] == true || skill->UnitFlags[ROWOW_UF_SONG] == true) ? 1 : 0) | (skill->UnitFlags[ROWOW_UF_ENSEMBLE] == true ? 2 : 0)); // Signals if this is a song/dance/duet
     group->IsGuildAura = skillID >= ROWOW_SKILL_GD_LEADERSHIP && skillID <= ROWOW_SKILL_GD_HAWKEYES;
@@ -474,6 +685,27 @@ std::shared_ptr<ROWOWSkillUnitGroup> ROWOWMod::SkillUnitSetting(Unit* src, uint1
     // If tick is greater than current, do not invoke onplace function just yet. [Skotlex]
     if (group->Tick > GetTick() + ROWOW_SKILLUNITTIMER_INTERVAL)
         activeFlag = 0;
+
+    // Put message for Talkie Box & Graffiti
+    if (skillID == ROWOW_SKILL_HT_TALKIEBOX || skillID == ROWOW_SKILL_RG_GRAFFITI)
+        group->ValStr = sd != nullptr ? GetSkillUnitData(sd)->Message : "Boo!"; // Eh... we have to write something here... even though mobs shouldn't use this. [Skotlex]
+
+    // Dance skill: the performer dances it (an ensemble waits for its partner, BCT_SELF, whom the partner search then makes dance it too)
+    if (group->SongDance != 0)
+    {
+        if (sd != nullptr)
+        {
+            ROWOWSkillUnitData* sud = GetSkillUnitData(sd);
+            sud->SkillIDDance = skillID;
+            sud->SkillLevelDance = skillLevel;
+        }
+        if (SCStart4(src, src, ROWOW_SC_DANCING, 100, skillID, group->GroupID, skillLevel, ((group->SongDance & 2) != 0 ? ROWOW_BCT_SELF : 0), limit + 1000) == true &&
+            sd != nullptr && (group->SongDance & 2) != 0 && skillID != ROWOW_SKILL_CG_HERMODE) // Hermod is a encore with a warp!
+        {
+            uint16 partnerLevel = skillLevel;
+            SkillCheckPCPartner(sd, skillID, partnerLevel, 1, 1);
+        }
+    }
 
     // Set skill unit
     ROWOWSkillUnitData* ud = GetSkillUnitData(src);
@@ -526,6 +758,19 @@ std::shared_ptr<ROWOWSkillUnitGroup> ROWOWMod::SkillUnitSetting(Unit* src, uint1
             case ROWOW_SKILL_NPC_GRANDDARKNESS:
                 unitVal1 = int32(SkillGetTime(skillID, skillLevel) / std::max(1, interval)); // Default: 950/300 = 3 hits
                 break;
+            case ROWOW_SKILL_WZ_ICEWALL:
+                unitVal1 = 200 + 200 * skillLevel; // Its HP
+                break;
+            case ROWOW_SKILL_WZ_WATERBALL:
+            {
+                // Check if there are cells that can be turned into waterball units: water, Deluge or Suiton (a monster's needs none)
+                int32 dummyIndex = -1;
+                if (sd == nullptr || map->IsInWater(src->GetPhaseMask(), cellX, cellY, cellZ + 0.5f, 0.0f) == true ||
+                    MapFindSkillUnitOnCell(src, ux, uy, ROWOW_SKILL_SA_DELUGE, 1, dummyIndex) != nullptr ||
+                    MapFindSkillUnitOnCell(src, ux, uy, ROWOW_SKILL_NJ_SUITON, 1, dummyIndex) != nullptr)
+                    break; // Turn water, deluge or suiton into waterball cell
+                continue;
+            }
             default:
                 if ((group->SongDance & 0x1) != 0)
                 {
@@ -550,9 +795,23 @@ std::shared_ptr<ROWOWSkillUnitGroup> ROWOWMod::SkillUnitSetting(Unit* src, uint1
         if (unit == nullptr)
             return nullptr;
         unit->Z = cellZ;
-        if (skill->UnitSpellIDsByLevel.size() > size_t(levelIndex) && skill->IsUnitSpellPerCellByLevel[levelIndex] == true && unit->IsHidden == false)
+        // skill_initunit's oninit actions: a song or dance cell on another's turns both into Dissonance (or Ugly Dance)
+        if ((group->SongDance & 0x1) != 0) // Check for dissonance.
+            SkillDanceOverlap(map, *group, i, ROWOW_OVERLAP_SET);
+        if (skillID == ROWOW_SKILL_PF_FOGWALL && alive == 2)
+        {
+            // Double duration of cells on top of Deluge/Suiton
+            unit->Limit *= 2;
+            group->Limit = unit->Limit;
+        }
+        if (skill->UnitSpellIDsByLevel.size() > size_t(levelIndex) && skill->IsUnitSpellPerCellByLevel[levelIndex] == true && unit->IsHidden == false &&
+            unit->VisualGUID.IsEmpty() == true) // (a song cell that turned into Dissonance on its init already shows that)
+        {
+            // An Ice Wall cell shows for as long as its HP lasts (it loses 50 a second), its limit being renewed each second
+            int64 visualLimit = skillID == ROWOW_SKILL_WZ_ICEWALL ? int64(unit->Val1 / 50 + 1) * std::max(1, interval) : unit->Limit;
             unit->VisualGUID = CreateSkillUnitVisual(src, skill->UnitSpellIDsByLevel[levelIndex], cellX, cellY, cellZ, (GetMapGrid(map->GetId()) != nullptr ?
-                GetMapGrid(map->GetId())->CellSize : CellSize) * 0.5f, limit);
+                GetMapGrid(map->GetId())->CellSize : CellSize) * 0.5f, visualLimit);
+        }
 
         // Execute on all targets standing on this cell
         if (range == 0 && activeFlag != 0)
@@ -618,8 +877,8 @@ std::shared_ptr<ROWOWSkillUnitGroup> ROWOWMod::SkillInitUnitGroup(Unit* src, int
 
 ROWOWSkillUnit* ROWOWMod::SkillInitUnit(Unit* src, ROWOWSkillUnitGroup& group, int32 index, int32 x, int32 y, int32 val1, int32 val2, bool hidden, int32 range, int64 limit)
 {
-    // skill_initunit: a cell of the group, on the caster's map.  (The cell changes of Ice Wall, Land Protector and Basilica, and the songs'
-    // dissonance check, come with their jobs)
+    // skill_initunit: a cell of the group, on the caster's map.  (Ice Wall's, Land Protector's and Basilica's cell changes are their live units;
+    // its oninit Dissonance check is skill_unitsetting's, once the cell's ground is known)
     if (index < 0 || index >= int32(group.Units.size()))
         return nullptr;
     ROWOWMapSkillUnits* mapUnits = GetMapSkillUnits(src->GetMap(), false);
@@ -642,8 +901,9 @@ ROWOWSkillUnit* ROWOWMod::SkillInitUnit(Unit* src, ROWOWSkillUnitGroup& group, i
 
 void ROWOWMod::SkillDelUnit(Map* map, ROWOWSkillUnitGroup& group, int32 index)
 {
-    // skill_delunit: the cell goes, acting on what stands on it as if it left (onout, then onleft), and the group with its last cell.
-    // (The cell changes of Ice Wall, Land Protector and Basilica, Ankle Snare's catch and the songs' dissonance come with their jobs)
+    // skill_delunit: the cell goes, acting on what stands on it as if it left (onout, then onleft), and the group with its last cell; a song's
+    // Dissonance with it ends, and Ankle Snare lets go of what it caught.  (Ice Wall's, Land Protector's and Basilica's cells are their live
+    // units, MapGetCellIceWall, MapGetCellLandProtector and MapGetCellBasilica)
     if (index < 0 || index >= int32(group.Units.size()))
         return;
     ROWOWSkillUnit& unit = group.Units[index];
@@ -651,6 +911,8 @@ void ROWOWMod::SkillDelUnit(Map* map, ROWOWSkillUnitGroup& group, int32 index)
         return;
     unit.IsAlive = false;
     std::shared_ptr<ROWOWSkillUnitGroup> groupRef = SkillID2Group(map, group.GroupID); // Kept while the cell's onout may delete things
+    if ((group.SongDance & 0x1) != 0) // Cancel dissonance effect.
+        SkillDanceOverlap(map, group, index, ROWOW_OVERLAP_REMOVE);
 
     // invoke onout event
     if (unit.Range == 0)
@@ -660,6 +922,15 @@ void ROWOWMod::SkillDelUnit(Map* map, ROWOWSkillUnitGroup& group, int32 index)
             SkillUnitEffect(map, bl, group, index, GetTick(), 4);
             return 0;
         });
+    }
+
+    // perform ondelete actions
+    switch (group.SkillID)
+    {
+        case ROWOW_SKILL_HT_ANKLESNARE:
+            if (Unit* target = group.Val2GUID.IsEmpty() == false ? GetSkillUnitGroupSource(map, group.Val2GUID) : nullptr)
+                StatusChangeEnd(target, ROWOW_SC_ANKLE);
+            break;
     }
 
     RemoveSkillUnitVisual(map, unit.VisualGUID);
@@ -726,6 +997,27 @@ void ROWOWMod::SkillDelUnitGroup(Map* map, std::shared_ptr<ROWOWSkillUnitGroup> 
             BattleConsumeAmmo(sd, group->SkillID, group->SkillLevel);
     }
 
+    if (group->SkillID == ROWOW_SKILL_PF_SPIDERWEB && group->Val2GUID.IsEmpty() == false)
+    {
+        // Clear group id from status change; the last web cleared ends it (a web that status_change_end already let go is no longer named)
+        Unit* target = GetSkillUnitGroupSource(map, group->Val2GUID);
+        ROWOWStatusChange* sc = target != nullptr ? GetStatusChange(target) : nullptr;
+        if (ROWOWStatusChangeEntry* sce = sc != nullptr ? sc->GetSCE(ROWOW_SC_SPIDERWEB) : nullptr)
+        {
+            bool isRemoved = true;
+            if (sce->Val2 == group->GroupID)
+                sce->Val2 = 0;
+            else if (sce->Val3 == group->GroupID)
+                sce->Val3 = 0;
+            else if (sce->Val4 == group->GroupID)
+                sce->Val4 = 0;
+            else
+                isRemoved = false; // Group was already removed in status_change_end, don't call it again!
+            if (isRemoved == true && sce->Val2 == 0 && sce->Val3 == 0 && sce->Val4 == 0)
+                StatusChangeEnd(target, ROWOW_SC_SPIDERWEB);
+        }
+    }
+
     // remove all unit cells (alive_count is never 0 again, so the last skill_delunit doesn't come back here)
     group->AliveCount = 0;
     for (int32 j = 0; j < int32(group->Units.size()); j++)
@@ -786,8 +1078,10 @@ ROWOWSkillUnitGroupTickset* ROWOWMod::SkillUnitGroupTicksetSearch(Unit* bl, ROWO
 
 int32 ROWOWMod::SkillUnitOnPlace(Map* map, ROWOWSkillUnitGroup& group, int32 index, Unit* bl, uint64 tick)
 {
-    // skill_unit_onplace: what stepping into the unit's cell (or the cell being placed under it) does.  (Land Protector and Maelstrom's
-    // cells, Hovering, and the other jobs' units come with them)
+    // skill_unit_onplace: what stepping into the unit's cell (or the cell being placed under it) does; a magic unit does nothing on Land
+    // Protector, nor a song on Basilica.  A song's or an ensemble's status is given to those in it (not to its performer, but with the Bard
+    // and Dancer spirit), lasting a moment past the group (its icon endless).  (Maelstrom's cells, Hovering, and the other jobs' units come
+    // with them)
     ROWOWSkillUnit& unit = group.Units[index];
     if (bl->IsInWorld() == false || unit.IsAlive == false || bl->IsAlive() == false)
         return 0;
@@ -795,23 +1089,178 @@ int32 ROWOWMod::SkillUnitOnPlace(Map* map, ROWOWSkillUnitGroup& group, int32 ind
     ROWOWSkill const* skill = GetSkill(group.SkillID);
     if (ss == nullptr || skill == nullptr)
         return 0;
-    ROWOWStatusChange const* sc = GetStatusChange(static_cast<Unit const*>(bl));
+    if (skill->AttackType == ROWOW_BF_MAGIC && group.SkillID != ROWOW_SKILL_SA_LANDPROTECTOR && IsCellLandProtected(map, unit, bl) == true)
+        return 0; // AoE skills are ineffective. [Skotlex]
+    if (skill->Inf2[ROWOW_INF2_ISSONG] == true || skill->Inf2[ROWOW_INF2_ISENSEMBLE] == true)
+    {
+        int32 blX = 0, blY = 0;
+        GetUnitCell(bl, blX, blY);
+        if (MapGetCellBasilica(map, blX, blY) == true)
+            return 0; // Songs don't work in Basilica
+    }
+    ROWOWStatusChange* sc = GetStatusChange(bl);
     if (sc != nullptr && (sc->Option & ROWOW_OPTION_HIDE) != 0 && skill->Inf2[ROWOW_INF2_TARGETHIDDEN] == false)
         return 0; // Hidden characters are immune to AoE skills except to these. [Skotlex]
     int32 type = skill->StatusID;
-    ROWOWStatusChangeEntry const* sce = (sc != nullptr && type != ROWOW_SC_NONE) ? sc->GetSCE(type) : nullptr;
+    ROWOWStatusChangeEntry* sce = (sc != nullptr && type != ROWOW_SC_NONE) ? sc->GetSCE(type) : nullptr;
     uint16 skillID = group.SkillID; // In case the group is deleted, we need to return the correct skill id, still.
     switch (group.UnitID)
     {
+        case ROWOW_UNT_SPIDERWEB:
+        {
+            // Duration in PVM is: 1st - 8s, 2nd - 16s, 3rd - 8s (PvP's halved durations need the PvP maps).  The web holds up to three webs'
+            // ids on the status (val2-4); the target is pulled onto the web's cell
+            sc = bl->CustomData.GetDefault<ROWOWStatusChange>("ROWOWStatusChange");
+            sce = sc->GetSCE(type);
+            uint64 now = GetTick();
+            int64 sec = SkillGetTime2(group.SkillID, group.SkillLevel);
+            if (sce != nullptr)
+            {
+                if (sce->Val2 != 0 && sce->Val3 != 0 && sce->Val4 != 0)
+                {
+                    // Already triple affected, immune
+                    group.Limit = int64(tick - group.Tick);
+                    break;
+                }
+                // Don't increase val1 here, we need a higher val in status_change_start so it overwrites the old one
+                if (sce->Val1 < 2)
+                    sec *= (sce->Val1 + 1);
+                // Add group id to status change
+                if (sce->Val2 == 0)
+                    sce->Val2 = group.GroupID;
+                else if (sce->Val3 == 0)
+                    sce->Val3 = group.GroupID;
+                else if (sce->Val4 == 0)
+                    sce->Val4 = group.GroupID;
+                // Overwrite status change with new duration
+                if (sce->TimerTime != 0)
+                    StatusChangeStart(ss, bl, type, 10000, sce->Val1 + 1, sce->Val2, sce->Val3, sce->Val4, std::max<int64>(int64(sce->TimerTime) - int64(now), sec),
+                        ROWOW_SCSTART_NORATEDEF);
+            }
+            else
+            {
+                if (StatusChangeStart(ss, bl, type, 10000, 1, group.GroupID, 0, 0, sec, ROWOW_SCSTART_NORATEDEF) == true)
+                {
+                    if (ROWOWStatusChangeEntry const* started = sc->GetSCE(type); started != nullptr && started->TimerTime != 0)
+                        sec = int64(started->TimerTime) - int64(now);
+                    UnitMovePos(bl, unit.X, unit.Y); // map_moveblock onto the web
+                }
+                else
+                    sec = 3000; // Couldn't trap it?
+            }
+            group.Val2GUID = bl->GetGUID();
+            group.Limit = int64(tick - group.Tick) + sec;
+            break;
+        }
+
+        case ROWOW_UNT_QUAGMIRE:
+            if (sce == nullptr && BattleCheckTargetSkillUnit(group, map, bl, group.TargetFlag) > 0)
+                SCStart4(ss, bl, type, 100, group.SkillLevel, group.GroupID, 0, 0, group.Limit);
+            break;
+
+        case ROWOW_UNT_VOLCANO:
+        case ROWOW_UNT_DELUGE:
+        case ROWOW_UNT_VIOLENTGALE:
+            if (sce == nullptr)
+                SCStart(ss, bl, type, 100, group.SkillLevel, group.Limit);
+            break;
+
+        case ROWOW_UNT_FOGWALL:
+            if (sce == nullptr)
+            {
+                SCStart4(ss, bl, type, 100, group.SkillLevel, group.Val1, group.Val2, group.GroupID, group.Limit);
+                if (BattleCheckTargetSkillUnit(group, map, bl, ROWOW_BCT_ENEMY) > 0)
+                    SkillAdditionalEffect(ss, bl, group.SkillID, group.SkillLevel, ROWOW_BF_MISC, ROWOW_ATK_DEF, tick);
+            }
+            break;
+
+        case ROWOW_UNT_GRAVITATION:
+            if (sce == nullptr)
+                SCStart4(ss, bl, type, 100, group.SkillLevel, 0, ROWOW_BCT_ENEMY, group.GroupID, group.Limit);
+            break;
+
         case ROWOW_UNT_SAFETYWALL:
             if (sce == nullptr)
                 SCStart4(ss, bl, type, 100, group.SkillLevel, group.SkillID, group.GroupID, 0, group.Limit);
             break;
 
+        case ROWOW_UNT_BASILICA:
+        {
+            // Placed under a char: rAthena asks the char about itself, which is never an enemy, so all on its cells get the status (val3 the
+            // group, val4 the caster)
+            int32 i = BattleCheckTarget(bl, bl, ROWOW_BCT_ENEMY);
+            if (i > 0)
+            {
+                SkillBlown(ss, bl, skill->Knockback[ROWOWSkill::GetLevelIndex(group.SkillLevel)], int8(UnitGetDir(bl)), ROWOW_BLOWN_NONE);
+                break;
+            }
+            if (sce == nullptr && i <= 0)
+                SCStart4(ss, bl, type, 100, 0, 0, group.GroupID, int32(ss->GetGUID().GetCounter()), group.Limit);
+            break;
+        }
+
         case ROWOW_UNT_PNEUMA:
             if (sce == nullptr)
                 SCStart4(ss, bl, type, 100, group.SkillLevel, group.GroupID, 0, 0, group.Limit);
             break;
+
+        case ROWOW_UNT_HERMODE:
+            if (group.SrcGUID != bl->GetGUID() && BattleCheckTargetSkillUnit(group, map, bl, ROWOW_BCT_PARTY | ROWOW_BCT_GUILD) > 0)
+                StatusChangeClearBuffs(bl, ROWOW_SCCB_HERMODE); // Should dispell only allies.
+            [[fallthrough]];
+        case ROWOW_UNT_RICHMANKIM:
+        case ROWOW_UNT_ETERNALCHAOS:
+        case ROWOW_UNT_DRUMBATTLEFIELD:
+        case ROWOW_UNT_RINGNIBELUNGEN:
+        case ROWOW_UNT_ROKISWEIL:
+        case ROWOW_UNT_INTOABYSS:
+        case ROWOW_UNT_SIEGFRIED:
+        {
+            // Needed to check when a dancer/bard leaves their ensemble area.
+            ROWOWStatusChangeEntry const* spirit = sc != nullptr ? sc->GetSCE(ROWOW_SC_SPIRIT) : nullptr;
+            if (group.SrcGUID == bl->GetGUID() && (spirit == nullptr || spirit->Val2 != ROWOW_SKILL_SL_BARDDANCER))
+                return skillID;
+            if (sce == nullptr)
+                SCStart4(ss, bl, type, 100, group.SkillLevel, group.Val1, group.Val2, 0, group.Limit);
+            break;
+        }
+
+        case ROWOW_UNT_WHISTLE:
+        case ROWOW_UNT_ASSASSINCROSS:
+        case ROWOW_UNT_POEMBRAGI:
+        case ROWOW_UNT_APPLEIDUN:
+        case ROWOW_UNT_HUMMING:
+        case ROWOW_UNT_DONTFORGETME:
+        case ROWOW_UNT_FORTUNEKISS:
+        case ROWOW_UNT_SERVICEFORYOU:
+        {
+            ROWOWStatusChangeEntry const* spirit = sc != nullptr ? sc->GetSCE(ROWOW_SC_SPIRIT) : nullptr;
+            if (group.SrcGUID == bl->GetGUID() && (spirit == nullptr || spirit->Val2 != ROWOW_SKILL_SL_BARDDANCER))
+                return 0;
+            // Pseudo-infinite duration.  In case it is just started, it needs to last one interval longer than the skill unit lasts.  This is to
+            // ensure the skill unit is removed before the status change ends
+            if (sce == nullptr)
+                SCStart4(ss, bl, type, 100, group.SkillLevel, group.Val1, group.Val2, 0, group.Limit + ROWOW_SKILLUNITTIMER_INTERVAL);
+            else if (BattleConfig.RefreshSong == 1 && sce->Val4 == 1)
+            {
+                // Readjust timers since the effect will not last long.
+                sce->Val4 = 0; // remove the mark that we stepped out
+                sce->TimerTime = tick + uint64(group.Limit) + ROWOW_SKILLUNITTIMER_INTERVAL;
+            }
+            break;
+        }
+
+        case ROWOW_UNT_MOONLIT:
+        {
+            // Knockback out of area if affected char isn't in Moonlit effect
+            ROWOWStatusChangeEntry const* dancing = sc != nullptr ? sc->GetSCE(ROWOW_SC_DANCING) : nullptr;
+            if (dancing != nullptr && (dancing->Val1 & 0xFFFF) == ROWOW_SKILL_CG_MOONLIT)
+                break;
+            if (ss == bl) // Also needed to prevent infinite loop crash.
+                break;
+            SkillBlown(ss, bl, skill->Knockback[ROWOWSkill::GetLevelIndex(group.SkillLevel)], int8(UnitGetDir(bl)), ROWOW_BLOWN_NONE);
+            break;
+        }
 
         case ROWOW_UNT_WARP_WAITING:
         {
@@ -843,8 +1292,8 @@ int32 ROWOWMod::SkillUnitOnPlace(Map* map, ROWOWSkillUnitGroup& group, int32 ind
 
 int32 ROWOWMod::SkillUnitOnPlaceTimer(Map* map, ROWOWSkillUnitGroup& group, int32 index, Unit* bl, uint64 tick)
 {
-    // skill_unit_onplace_timer: each interval (the group's), what standing in the unit's reach does.  (The other jobs' units, the Storm
-    // Gust counter, Siren's Voice and Hovering come with them)
+    // skill_unit_onplace_timer: each interval (the group's), what standing in the unit's reach does: a trap goes off (and is spent for 1.5
+    // seconds), a song or dance does its part.  (The other jobs' units, Siren's Voice and Hovering come with them)
     ROWOWSkillUnit& unit = group.Units[index];
     if (bl->IsInWorld() == false || unit.IsAlive == false || bl->IsAlive() == false)
         return 0;
@@ -888,12 +1337,216 @@ int32 ROWOWMod::SkillUnitOnPlaceTimer(Map* map, ROWOWSkillUnitGroup& group, int3
             break;
 
         case ROWOW_UNT_DUMMYSKILL:
-            // (Star Gladiator's warmth, the Storm Gust counter, Desperado and the NPC skills come with their jobs.)  A Grand Cross cell hits
-            // as many times as its val1 (its caster too), and the unit timer takes the spent cell away
+            // (Star Gladiator's warmth, Desperado and the NPC skills come with their jobs.)  A Grand Cross cell hits as many times as its val1
+            // (its caster too), and the unit timer takes the spent cell away
+            if (skillID == ROWOW_SKILL_WZ_STORMGUST)
+            {
+                // SG counter does not reset per stormgust. IE: One hit from a SG and two hits from another will freeze you.
+                ROWOWStatusChange* tsc = bl->CustomData.GetDefault<ROWOWStatusChange>("ROWOWStatusChange");
+                tsc->SGCounter++; // SG hit counter.
+                if (SkillAttack(skill->AttackType, ss, ss, bl, skillID, group.SkillLevel, tick, 0, &unit) <= 0)
+                    tsc->SGCounter = 0; // Attack absorbed.
+                break;
+            }
             if ((skillID == ROWOW_SKILL_CR_GRANDCROSS || skillID == ROWOW_SKILL_NPC_GRANDDARKNESS) && BattleConfig.GxAllHit == 0)
                 unit.Val1--;
             SkillAttack(skill->AttackType, ss, ss, bl, skillID, group.SkillLevel, tick, 0, &unit);
             break;
+
+        case ROWOW_UNT_SANCTUARY:
+        {
+            ROWOWStatus const* tstatus = GetROStatus(bl);
+            if (BattleCheckUndead(tstatus->Race, tstatus->DefElement) == true || tstatus->Race == ROWOW_RACE_DEMON)
+            {
+                // Only damage enemies with offensive Sanctuary. [Skotlex]
+                if (BattleCheckTargetSkillUnit(group, map, bl, ROWOW_BCT_ENEMY) > 0 && SkillAttack(ROWOW_BF_MAGIC, ss, ss, bl, skillID, group.SkillLevel, tick, 0, &unit) != 0)
+                    group.Val1 -= 1; // Reduce the number of targets that can still be hit
+            }
+            else
+            {
+                // Heals the others standing in it, shown as the heal of the Sanctuary spell
+                int32 heal = SkillCalcHeal(ss, bl, skillID, group.SkillLevel, true);
+                if (bl->IsCreature() == true && tstatus->Class == ROWOW_CLASS_BATTLEFIELD)
+                    break;
+                if (bl->GetHealth() >= bl->GetMaxHealth())
+                    break;
+                if (StatusIsImmune(bl) != 0)
+                    heal = 0;
+                StatusHeal(bl, heal, 0, 0, ss, GetSkillSpellID(skillID, group.SkillLevel));
+            }
+            break;
+        }
+
+        case ROWOW_UNT_MAGNUS:
+        {
+            // Pre-renewal's hits only the undead and demons
+            ROWOWStatus const* tstatus = GetROStatus(bl);
+            if (BattleCheckUndead(tstatus->Race, tstatus->DefElement) == false && tstatus->Race != ROWOW_RACE_DEMON)
+                break;
+            SkillAttack(ROWOW_BF_MAGIC, ss, ss, bl, skillID, group.SkillLevel, tick, 0, &unit);
+            break;
+        }
+
+        case ROWOW_UNT_BASILICA:
+        {
+            // Each interval an enemy in it is pushed out (back from the way it faces), and anyone else not yet in its status gets it
+            int32 i = BattleCheckTargetSkillUnit(group, map, bl, ROWOW_BCT_ENEMY);
+            if (i > 0)
+            {
+                SkillBlown(ss, bl, skill->Knockback[ROWOWSkill::GetLevelIndex(group.SkillLevel)], int8(UnitGetDir(bl)), ROWOW_BLOWN_NONE, &unit);
+                break;
+            }
+            if (i <= 0 && GetSCE(bl, ROWOW_SC_BASILICA) == nullptr)
+                SCStart4(ss, bl, skill->StatusID, 100, 0, 0, group.GroupID, int32(ss->GetGUID().GetCounter()), group.Limit);
+            break;
+        }
+
+        case ROWOW_UNT_FIREPILLAR_WAITING:
+            // Someone stepped near: the pillar goes up (its active unit), and the waiting one goes
+            GetSkillUnitData(ss)->SkillZ = unit.Z; // The cell's ground (skillx and skilly's, here the unit's)
+            SkillUnitSetting(ss, group.SkillID, group.SkillLevel, unit.X, unit.Y, 1);
+            SkillDelUnit(map, group, index);
+            break;
+
+        case ROWOW_UNT_SKIDTRAP:
+        {
+            // Knockback away from position of user during placement [Playtester]
+            int32 blX = 0, blY = 0;
+            GetUnitCell(bl, blX, blY);
+            int32 srcX = group.Val1 >> 16, srcY = group.Val1 & 0xFFFF;
+            SkillBlown(ss, bl, skill->Knockback[ROWOWSkill::GetLevelIndex(group.SkillLevel)], int8(GetRODirection(float(srcX - blX), float(srcY - blY))),
+                ROWOW_BLOWN_NONE, &unit);
+            group.UnitID = ROWOW_UNT_USED_TRAPS;
+            ClifChangeTrapLook(map, group, index, bl);
+            group.Limit = int64(tick - group.Tick) + ROWOW_TRAP_USED_LIMIT;
+            // In pre-renewal, if target was a monster, it will unlock target and become idle (mob_unlocktarget)
+            if (Creature* md = bl->ToCreature(); md != nullptr && md->IsAIEnabled == true && md->IsInCombat() == true)
+                md->AI()->EnterEvadeMode(CreatureAI::EVADE_REASON_OTHER);
+            break;
+        }
+
+        case ROWOW_UNT_ANKLESNARE:
+        {
+            // It holds the first it catches (val2) for its time, less with AGI (a fifth for bosses), at least 3 + 0.03 a caster's level seconds; the
+            // caught are pulled onto its cell, and it stays as long as it holds them
+            if (group.Val2 != 0)
+                break;
+            int64 sec = SkillGetTime2(group.SkillID, group.SkillLevel);
+            ROWOWStatus const* sstatus = GetROStatus(ss);
+            ROWOWStatus const* tstatus = GetROStatus(bl);
+            int64 mintime = 30 * (int64(sstatus != nullptr ? sstatus->Level : 1) + 100);
+            if ((tstatus->Mode & ROWOW_MODE_STATUS_IMMUNE) != 0)
+                sec /= 5; // Bosses cannot activate Ankle Snare in renewal so we don't need this code
+            sec = std::max((sec * tstatus->Stats[ROWOW_STAT_AGI]) / -200 + sec, mintime);
+            if (StatusChangeStart(ss, bl, skill->StatusID, 10000, group.SkillLevel, group.GroupID, 0, 0, sec, ROWOW_SCSTART_NORATEDEF) == true)
+            {
+                if (ROWOWStatusChangeEntry const* ankle = GetSCE(bl, skill->StatusID); ankle != nullptr && ankle->TimerTime != 0)
+                    sec = int64(ankle->TimerTime) - int64(GetTick());
+                if (bl->IsCreature() == false || (tstatus->Mode & ROWOW_MODE_KNOCKBACK_IMMUNE) == 0) // unit_blown_immune
+                    UnitMovePos(bl, unit.X, unit.Y);
+                group.Val2 = int32(bl->GetGUID().GetCounter());
+                group.Val2GUID = bl->GetGUID();
+            }
+            else
+                sec = 3000; // Couldn't trap it?
+            ClifChangeTrapLook(map, group, index, bl);
+            group.Limit = int64(tick - group.Tick) + sec;
+            group.Interval = -1;
+            unit.Range = 0;
+            break;
+        }
+
+        case ROWOW_UNT_FLASHER:
+        {
+            // Flasher doesn't activate on plant bosses
+            ROWOWStatus const* tstatus = GetROStatus(bl);
+            if (bl->IsCreature() == true && tstatus->Class == ROWOW_CLASS_BOSS && tstatus->Race == ROWOW_RACE_PLANT)
+                break;
+            [[fallthrough]];
+        }
+        case ROWOW_UNT_LANDMINE:
+        case ROWOW_UNT_BLASTMINE:
+        case ROWOW_UNT_SHOCKWAVE:
+        case ROWOW_UNT_SANDMAN:
+        case ROWOW_UNT_FREEZINGTRAP:
+        case ROWOW_UNT_FIREPILLAR_ACTIVE:
+        case ROWOW_UNT_CLAYMORETRAP:
+        {
+            // A trap goes off: it hits what set it off, or (with a splash) everything around its cell, or around the one that set it off for
+            // Sandman and Freezing Trap (skill_trap_splash, each its attack), then stays a used trap for 1.5 s.  (Claymore Trap's blast also
+            // springs other traps in it: traps aren't attack targets here)
+            if (GetSCE(bl, ROWOW_SC__MANHOLE) != nullptr)
+                break;
+            int32 centerX = unit.X, centerY = unit.Y;
+            if (group.UnitID == ROWOW_UNT_SANDMAN || group.UnitID == ROWOW_UNT_FREEZINGTRAP)
+                GetUnitCell(bl, centerX, centerY); // These have their effect centered around the unit that triggered the trap
+            if (int32 splashRange = skill->SplashArea[ROWOWSkill::GetLevelIndex(group.SkillLevel)]; splashRange == 0)
+            {
+                // If no splash range, it only hits the unit that activated the trap
+                if (skill->NK[ROWOW_NK_NODAMAGE] == true)
+                    SkillAdditionalEffect(ss, bl, group.SkillID, group.SkillLevel, ROWOW_BF_MISC, ROWOW_ATK_DEF, tick);
+                else
+                    SkillAttack(skill->AttackType, ss, ss, bl, skillID, group.SkillLevel, tick, 0, &unit);
+            }
+            else
+            {
+                ROWOWSkillUnitGroup& trapGroup = group;
+                MapForEachInCellArea(map, bl->GetPhaseMask(), centerX - splashRange, centerY - splashRange, centerX + splashRange, centerY + splashRange,
+                    [this, map, &trapGroup, index, tick](Unit* target)
+                {
+                    return SkillTrapSplash(map, target, trapGroup, index, tick);
+                });
+            }
+            if (group.UnitID != ROWOW_UNT_FIREPILLAR_ACTIVE && (BattleConfig.MultiTriggerTrap == 0 || unit.Range >= 0))
+                ClifChangeTrapLook(map, group, index, bl);
+            group.Limit = int64(tick - group.Tick) + ROWOW_TRAP_USED_LIMIT;
+            if (BattleConfig.MultiTriggerTrap == 1)
+                unit.Range = -1; // Trap will still process all units on it and will then be disabled in the calling function
+            else
+                group.UnitID = ROWOW_UNT_USED_TRAPS; // Change ID so it does not invoke for each in area again
+            break;
+        }
+
+        case ROWOW_UNT_TALKIEBOX:
+            // Its message to those around, once, for 5 seconds
+            if (group.SrcGUID == bl->GetGUID())
+                break;
+            if (group.Val2 == 0)
+            {
+                ClifTalkieBox(map, unit, group.ValStr);
+                group.UnitID = ROWOW_UNT_USED_TRAPS;
+                ClifChangeTrapLook(map, group, index, bl);
+                group.Limit = int64(tick - group.Tick) + 5000;
+                group.Val2 = -1;
+            }
+            break;
+
+        case ROWOW_UNT_LULLABY:
+            if (ss == bl)
+                break;
+            SkillAdditionalEffect(ss, bl, group.SkillID, group.SkillLevel, ROWOW_BF_LONG | ROWOW_BF_SKILL | ROWOW_BF_MISC, ROWOW_ATK_DEF, tick);
+            break;
+
+        case ROWOW_UNT_UGLYDANCE: // Ugly Dance [Skotlex]
+            if (ss != bl)
+                SkillAdditionalEffect(ss, bl, group.SkillID, group.SkillLevel, ROWOW_BF_LONG | ROWOW_BF_SKILL | ROWOW_BF_MISC, ROWOW_ATK_DEF, tick);
+            break;
+
+        case ROWOW_UNT_DISSONANCE:
+            SkillAttack(ROWOW_BF_MISC, ss, ss, bl, group.SkillID, group.SkillLevel, tick, 0, &unit);
+            break;
+
+        case ROWOW_UNT_APPLEIDUN:
+        {
+            // Apple of Idun [Skotlex]: heals those in it each interval (not its performer, but with the Bard and Dancer spirit), shown as the
+            // heal of Heal
+            ROWOWStatusChangeEntry const* spirit = GetSCE(bl, ROWOW_SC_SPIRIT);
+            if (group.SrcGUID == bl->GetGUID() && (spirit == nullptr || spirit->Val2 != ROWOW_SKILL_SL_BARDDANCER))
+                break; // affects self only when soullinked
+            int32 heal = SkillCalcHeal(ss, bl, group.SkillID, group.SkillLevel, true);
+            StatusHeal(bl, heal, 0, 0, ss, GetSkillSpellID(ROWOW_SKILL_AL_HEAL, 1));
+            break;
+        }
 
         case ROWOW_UNT_GOSPEL:
         {
@@ -1015,7 +1668,7 @@ int32 ROWOWMod::SkillUnitOnPlaceTimer(Map* map, ROWOWSkillUnitGroup& group, int3
 
 int32 ROWOWMod::SkillUnitOnOut(ROWOWSkillUnitGroup& group, int32 /*index*/, Unit* bl, uint64 /*tick*/)
 {
-    // skill_unit_onout: what stepping out of the unit's cell does.  (The songs' and Basilica's cases come with their jobs)
+    // skill_unit_onout: what stepping out of the unit's cell does.  A performer stepping out of its own song keeps it (-1: no onleft)
     ROWOWSkill const* skill = GetSkill(group.SkillID);
     int32 type = skill != nullptr ? skill->StatusID : ROWOW_SC_NONE;
     ROWOWStatusChangeEntry const* sce = type != ROWOW_SC_NONE ? GetSCE(bl, type) : nullptr;
@@ -1028,23 +1681,118 @@ int32 ROWOWMod::SkillUnitOnOut(ROWOWSkillUnitGroup& group, int32 /*index*/, Unit
             if (sce != nullptr)
                 StatusChangeEnd(bl, type);
             break;
+        case ROWOW_UNT_BASILICA:
+            // Its caster keeps it (it ends with the group)
+            if (sce != nullptr && sce->Val4 != int32(bl->GetGUID().GetCounter()))
+                StatusChangeEnd(bl, type);
+            break;
+        case ROWOW_UNT_HERMODE: // Clear Hermode if the owner moved.
+            if (sce != nullptr && sce->Val3 == ROWOW_BCT_SELF && sce->Val4 == group.GroupID)
+                StatusChangeEnd(bl, type);
+            break;
+        case ROWOW_UNT_DISSONANCE:
+        case ROWOW_UNT_UGLYDANCE:
+        case ROWOW_UNT_WHISTLE:
+        case ROWOW_UNT_ASSASSINCROSS:
+        case ROWOW_UNT_POEMBRAGI:
+        case ROWOW_UNT_APPLEIDUN:
+        case ROWOW_UNT_HUMMING:
+        case ROWOW_UNT_DONTFORGETME:
+        case ROWOW_UNT_FORTUNEKISS:
+        case ROWOW_UNT_SERVICEFORYOU:
+        {
+            ROWOWStatusChangeEntry const* spirit = GetSCE(bl, ROWOW_SC_SPIRIT);
+            if (group.SrcGUID == bl->GetGUID() && (spirit == nullptr || spirit->Val2 != ROWOW_SKILL_SL_BARDDANCER))
+                return -1;
+            break;
+        }
     }
     return group.SkillID;
 }
 
-int32 ROWOWMod::SkillUnitOnLeft(uint16 skillID, Unit* bl, uint64 /*tick*/)
+int32 ROWOWMod::SkillUnitOnLeft(uint16 skillID, Unit* bl, uint64 tick)
 {
-    // skill_unit_onleft: what leaving every cell of a skill does (the char stepped out of its last one).  (The songs', ensembles' and the
-    // other jobs' cases come with them)
+    // skill_unit_onleft: what leaving every cell of a skill does (the char stepped out of its last one).  A performer stepping out of its own
+    // ensemble stops dancing it; a song's effect stays on a player for its Duration2 after (20 seconds), a monster's ends.  (The other jobs'
+    // cases come with them)
     ROWOWSkill const* skill = GetSkill(skillID);
     int32 type = skill != nullptr ? skill->StatusID : ROWOW_SC_NONE;
     ROWOWStatusChangeEntry const* sce = type != ROWOW_SC_NONE ? GetSCE(bl, type) : nullptr;
     switch (skillID)
     {
-        case ROWOW_SKILL_MG_SAFETYWALL:
-        case ROWOW_SKILL_AL_PNEUMA:
+        case ROWOW_SKILL_WZ_QUAGMIRE:
+            if (bl->IsCreature() == true)
+                break; // A monster keeps it for its time
             if (sce != nullptr)
                 StatusChangeEnd(bl, type);
+            break;
+        case ROWOW_SKILL_BD_LULLABY:
+        case ROWOW_SKILL_BD_RICHMANKIM:
+        case ROWOW_SKILL_BD_ETERNALCHAOS:
+        case ROWOW_SKILL_BD_DRUMBATTLEFIELD:
+        case ROWOW_SKILL_BD_RINGNIBELUNGEN:
+        case ROWOW_SKILL_BD_ROKISWEIL:
+        case ROWOW_SKILL_BD_INTOABYSS:
+        case ROWOW_SKILL_BD_SIEGFRIED:
+            // Check if you just stepped out of your ensemble skill to cancel dancing. [Skotlex]  We don't check for SC_LONGING because someone could
+            // always have knocked you back and out of the song/dance.  (rAthena's FIXME: it only checks that it's the same ensemble, not whose)
+            if (ROWOWStatusChangeEntry const* dancing = GetSCE(bl, ROWOW_SC_DANCING); dancing != nullptr && (dancing->Val1 & 0xFFFF) == skillID)
+                StatusChangeEnd(bl, ROWOW_SC_DANCING);
+            // Sleep effect of Lullaby doesn't end even if song ends
+            if (skillID == ROWOW_SKILL_BD_LULLABY)
+                break;
+            sce = type != ROWOW_SC_NONE ? GetSCE(bl, type) : nullptr;
+            [[fallthrough]];
+        case ROWOW_SKILL_CG_HERMODE:
+            if (sce != nullptr)
+                StatusChangeEnd(bl, type);
+            break;
+        case ROWOW_SKILL_BA_POEMBRAGI:
+        case ROWOW_SKILL_BA_WHISTLE:
+        case ROWOW_SKILL_BA_ASSASSINCROSS:
+        case ROWOW_SKILL_BA_APPLEIDUN:
+        case ROWOW_SKILL_DC_HUMMING:
+        case ROWOW_SKILL_DC_DONTFORGETME:
+        case ROWOW_SKILL_DC_FORTUNEKISS:
+        case ROWOW_SKILL_DC_SERVICEFORYOU:
+            if (bl->IsPlayer() == true && sce != nullptr && sce->Val4 == 0)
+            {
+                // NOTE: It'd be nice if we could get the skill_lv for a more accurate extra time, but alas... not possible on our current
+                // implementation.  The icon keeps showing it as endless (refresh_song_icon off)
+                ROWOWStatusChangeEntry* songSCE = GetStatusChange(bl)->GetSCE(type);
+                songSCE->Val4 = 1; // Store the fact that this is a "reduced" duration effect.
+                songSCE->TimerTime = tick + uint64(SkillGetTime2(skillID, 1));
+            }
+            // Non-players don't have lingering effects
+            else if (bl->IsPlayer() == false && sce != nullptr)
+                StatusChangeEnd(bl, type);
+            break;
+        case ROWOW_SKILL_MG_SAFETYWALL:
+        case ROWOW_SKILL_AL_PNEUMA:
+        case ROWOW_SKILL_SA_VOLCANO:
+        case ROWOW_SKILL_SA_DELUGE:
+        case ROWOW_SKILL_SA_VIOLENTGALE:
+        case ROWOW_SKILL_HW_GRAVITATION:
+            if (sce != nullptr)
+                StatusChangeEnd(bl, type);
+            break;
+        case ROWOW_SKILL_PF_FOGWALL:
+            if (sce != nullptr)
+            {
+                StatusChangeEnd(bl, type);
+                // Players get blind ended inmediately, others have it still for 30 secs. [Skotlex]
+                if (ROWOWStatusChange* sc = GetStatusChange(bl); sc != nullptr && sc->HasSCE(ROWOW_SC_BLIND) == true)
+                {
+                    if (bl->IsPlayer() == true)
+                        StatusChangeEnd(bl, ROWOW_SC_BLIND);
+                    else
+                    {
+                        ROWOWStatusChangeEntry* blind = sc->GetSCE(ROWOW_SC_BLIND);
+                        blind->TimerTime = tick + 30000;
+                        blind->EndTime = blind->TimerTime;
+                    }
+                }
+            }
             break;
     }
     return skillID;
@@ -1052,11 +1800,14 @@ int32 ROWOWMod::SkillUnitOnLeft(uint16 skillID, Unit* bl, uint64 /*tick*/)
 
 void ROWOWMod::SkillUnitEffect(Map* map, Unit* bl, ROWOWSkillUnitGroup& group, int32 index, uint64 tick, int32 flag)
 {
-    // skill_unit_effect: a unit cell placed (flag&1: onplace) or removed (onout, and flag&4 an onleft).  (The songs' dissonance switch,
-    // flag&8, comes with the Bard and Dancer)
+    // skill_unit_effect: a unit cell placed (flag&1: onplace) or removed (onout, and flag&4 an onleft).  A song cell where another song (or
+    // dance) overlaps it acts as Dissonance (or Ugly Dance) meanwhile, unless flag&8
     ROWOWSkillUnit const& unit = group.Units[index];
     if ((unit.IsAlive == false && (flag & 4) == 0) || bl->IsInWorld() == false)
         return;
+    bool dissonance = false;
+    if ((flag & 8) == 0)
+        dissonance = SkillDanceSwitch(group, index, false);
     // Target-type check.
     ROWOWStatus const* status = GetROStatus(bl);
     bool isTarget = status != nullptr && (group.BLFlag & GetBattleObjectType(*status)) != 0 && BattleCheckTargetSkillUnit(group, map, bl, group.TargetFlag) > 0;
@@ -1073,6 +1824,8 @@ void ROWOWMod::SkillUnitEffect(Map* map, Unit* bl, ROWOWSkillUnitGroup& group, i
     }
     else if ((flag & 4) != 0 && ((group.SongDance & 0x1) != 0 || (group.SrcGUID == bl->GetGUID() && (group.SongDance & 0x2) != 0)))
         SkillUnitOnLeft(skillID, bl, tick); // Ensemble check to terminate it.
+    if (dissonance == true)
+        SkillDanceSwitch(group, index, true);
 }
 
 void ROWOWMod::SkillUnitTimer(Map* map, uint32 /*diff*/)
@@ -1121,6 +1874,44 @@ void ROWOWMod::SkillUnitTimer(Map* map, uint32 /*diff*/)
                 // skill unit expired (inlined from skill_unit_onlimit())
                 switch (group->UnitID)
                 {
+                    case ROWOW_UNT_ICEWALL:
+                        unit.Val1 -= 50; // icewall loses 50 hp every second
+                        group->Limit = int64(tick) + group->Interval - int64(group->Tick);
+                        unit.Limit = group->Limit;
+                        if (unit.Val1 <= 0)
+                            SkillDelUnit(map, *group, index);
+                        break;
+                    case ROWOW_UNT_BLASTMINE:
+                    case ROWOW_UNT_GROUNDDRIFT_WIND:
+                    case ROWOW_UNT_GROUNDDRIFT_DARK:
+                    case ROWOW_UNT_GROUNDDRIFT_POISON:
+                    case ROWOW_UNT_GROUNDDRIFT_WATER:
+                    case ROWOW_UNT_GROUNDDRIFT_FIRE:
+                        group->UnitID = ROWOW_UNT_USED_TRAPS;
+                        group->Limit = int64(tick) + ROWOW_TRAP_USED_LIMIT - int64(group->Tick);
+                        unit.Limit = group->Limit;
+                        break;
+                    case ROWOW_UNT_ANKLESNARE:
+                        if (group->Val2 > 0)
+                        {
+                            // Used Trap doesn't return back to item
+                            SkillDelUnit(map, *group, index);
+                            break;
+                        }
+                        [[fallthrough]];
+                    case ROWOW_UNT_SKIDTRAP:
+                    case ROWOW_UNT_LANDMINE:
+                    case ROWOW_UNT_SHOCKWAVE:
+                    case ROWOW_UNT_SANDMAN:
+                    case ROWOW_UNT_FLASHER:
+                    case ROWOW_UNT_FREEZINGTRAP:
+                    case ROWOW_UNT_CLAYMORETRAP:
+                    case ROWOW_UNT_TALKIEBOX:
+                        // revert unit back into a trap (an unspent one, set by a player)
+                        if (unit.Val1 > 0)
+                            SkillTrapGiveBack(GetSkillUnitGroupSource(map, group->SrcGUID), *group);
+                        SkillDelUnit(map, *group, index);
+                        break;
                     case ROWOW_UNT_WARP_ACTIVE:
                     {
                         // warp portal opens (morph to a UNT_WARP_WAITING cell)
@@ -1142,24 +1933,64 @@ void ROWOWMod::SkillUnitTimer(Map* map, uint32 /*diff*/)
                         break;
                     }
                     default:
+                        if (group->Val2 == 1 && group->SkillID == ROWOW_SKILL_WZ_METEOR)
+                            break; // Deal damage before expiration
                         SkillDelUnit(map, *group, index);
                         break;
                 }
             }
-            // (Still active: the traps' and the other jobs' cases come with them)
+            else if (group->UnitID == ROWOW_UNT_BLASTMINE || group->UnitID == ROWOW_UNT_SKIDTRAP || group->UnitID == ROWOW_UNT_LANDMINE ||
+                group->UnitID == ROWOW_UNT_SHOCKWAVE || group->UnitID == ROWOW_UNT_SANDMAN || group->UnitID == ROWOW_UNT_FLASHER ||
+                group->UnitID == ROWOW_UNT_CLAYMORETRAP || group->UnitID == ROWOW_UNT_FREEZINGTRAP || group->UnitID == ROWOW_UNT_TALKIEBOX ||
+                group->UnitID == ROWOW_UNT_ANKLESNARE)
+            {
+                // skill unit is still active: a trap whose HP is gone (skill_unit_ondamaged) is spent
+                if (unit.Val1 <= 0)
+                {
+                    if (group->UnitID == ROWOW_UNT_ANKLESNARE && group->Val2 > 0)
+                        SkillDelUnit(map, *group, index);
+                    else
+                    {
+                        group->Limit = int64(tick) - int64(group->Tick) + ROWOW_TRAP_USED_LIMIT;
+                        group->UnitID = ROWOW_UNT_USED_TRAPS;
+                    }
+                }
+            }
+            else if (group->SkillID == ROWOW_SKILL_WZ_METEOR)
+            {
+                // skill unit is still active: a meteor waits for the interval before it expires, then starts dropping (its look on the cell);
+                // all meteors hit 700ms after the effect starts, regardless of their interval.  No damage until expiration.  (The other jobs'
+                // cases come with them)
+                if (group->Val2 == 0 && (age >= group->Limit - group->Interval || age >= unit.Limit - group->Interval))
+                {
+                    if (Unit* src = GetSkillUnitGroupSource(map, group->SrcGUID))
+                    {
+                        ClifSkillPosEffect(src, group->SkillID, group->SkillLevel, unit.X, unit.Y, unit.Z);
+                        group->Val2 = 1;
+                        group->Limit = group->Limit - group->Interval + 700;
+                    }
+                }
+                continue;
+            }
 
             // Don't continue if unit or even group is expired and has been deleted.
             if (unit.IsAlive == false || mapUnits->GroupsByID.find(group->GroupID) == mapUnits->GroupsByID.end())
                 continue;
+            bool dissonance = SkillDanceSwitch(*group, index, false);
             if (unit.Range >= 0 && group->Interval != -1)
             {
-                // skill_unit_timer_sub_onplace on every char in the unit's reach.  (Land Protector's cells come with the Sage)
+                // skill_unit_timer_sub_onplace on every char in the unit's reach
                 ROWOWSkillUnitGroup& unitGroup = *group;
                 MapForEachInCellArea(map, PHASEMASK_NORMAL, unit.X - unit.Range, unit.Y - unit.Range, unit.X + unit.Range, unit.Y + unit.Range,
                     [this, map, &unitGroup, index, tick](Unit* bl)
                 {
                     ROWOWStatus const* status = GetROStatus(bl);
                     if (unitGroup.Units[index].IsAlive == false || status == nullptr || (unitGroup.BLFlag & GetBattleObjectType(*status)) == 0)
+                        return 0;
+                    // AoE skills are ineffective on Land Protector (all but songs, traps and the skills that ignore it). [Skotlex]
+                    ROWOWSkill const* skill = GetSkill(unitGroup.SkillID);
+                    if (skill != nullptr && skill->Inf2[ROWOW_INF2_ISSONG] == false && skill->Inf2[ROWOW_INF2_ISTRAP] == false &&
+                        skill->Inf2[ROWOW_INF2_IGNORELANDPROTECTOR] == false && IsCellLandProtected(map, unitGroup.Units[index], bl) == true)
                         return 0;
                     if (BattleCheckTargetSkillUnit(unitGroup, map, bl, unitGroup.TargetFlag) <= 0)
                         return 0;
@@ -1168,9 +1999,17 @@ void ROWOWMod::SkillUnitTimer(Map* map, uint32 /*diff*/)
                 });
                 if (unit.Range == -1) // Unit disabled, but it should not be deleted yet.
                     group->UnitID = ROWOW_UNT_USED_TRAPS;
-                else if ((group->SkillID == ROWOW_SKILL_CR_GRANDCROSS || group->SkillID == ROWOW_SKILL_NPC_GRANDDARKNESS) && unit.Val1 <= 0)
-                    SkillDelUnit(map, *group, index); // (The meteor skills that go after one strike come with their jobs)
+                else if (group->UnitID == ROWOW_UNT_SANCTUARY && group->Val1 <= 0)
+                    SkillDelUnitGroup(map, group); // Its hits on the undead are spent
+                else if (group->SkillID == ROWOW_SKILL_WZ_METEOR || ((group->SkillID == ROWOW_SKILL_CR_GRANDCROSS || group->SkillID == ROWOW_SKILL_NPC_GRANDDARKNESS) &&
+                    unit.Val1 <= 0))
+                {
+                    SkillDelUnit(map, *group, index); // A meteor goes after its one strike
+                    continue;
+                }
             }
+            if (dissonance == true)
+                SkillDanceSwitch(*group, index, true);
         }
     }
 }
@@ -1189,11 +2028,23 @@ void ROWOWMod::SkillUnitMove(Unit* bl, uint64 tick, int32 flag, int32 cellX, int
         // skill_unit_move_sub
         if ((flag & 1) != 0 && group.SkillID == ROWOW_SKILL_PF_SPIDERWEB)
             return 0; // Fiberlock is never supposed to trigger on skill_unit_move. [Inkfish]
+        bool dissonance = SkillDanceSwitch(group, index, false);
         // Necessary in case the group is deleted after calling on_place/on_out [Skotlex]
         uint16 skillID = group.SkillID;
         ROWOWSkill const* skill = GetSkill(skillID);
         if (group.Interval != -1 && (skill == nullptr || skill->UnitFlags[ROWOW_UF_DUALMODE] == false) && skillID != ROWOW_SKILL_BD_LULLABY) // Lullaby is the exception, bugreport:411
-            return 0; // Non-dualmode unit skills with a timer don't trigger when walking, so just return
+        {
+            // Non-dualmode unit skills with a timer don't trigger when walking, so just return
+            if (dissonance == true)
+            {
+                SkillDanceSwitch(group, index, true);
+                // This activates the 20 seconds countdown from leaving the song/dance due to dissonance
+                int32 result = SkillUnitOnOut(group, index, bl, tick);
+                if (result > 0)
+                    SkillUnitOnLeft(uint16(result), bl, tick);
+            }
+            return 0;
+        }
 
         // Target-type check.
         ROWOWStatus const* status = GetROStatus(bl);
@@ -1213,6 +2064,8 @@ void ROWOWMod::SkillUnitMove(Unit* bl, uint64 tick, int32 flag, int32 cellX, int
                 if ((flag & 4) != 0)
                     SkillUnitOnLeft(skillID, bl, tick);
             }
+            if (dissonance == true)
+                SkillDanceSwitch(group, index, true);
             return 0;
         }
         if ((flag & 1) != 0)
@@ -1227,6 +2080,9 @@ void ROWOWMod::SkillUnitMove(Unit* bl, uint64 tick, int32 flag, int32 cellX, int
             if ((flag & 2) != 0 && result > 0) // Store this unit id.
                 skillUnitCell.push_back(skillID);
         }
+        // Currently it is safe because we know song/dance cells do not get deleted within them. [Skotlex]
+        if (dissonance == true)
+            SkillDanceSwitch(group, index, true);
         if ((flag & 4) != 0)
             SkillUnitOnLeft(skillID, bl, tick);
         return 1;
@@ -1273,10 +2129,36 @@ void ROWOWMod::UpdateSkillUnitMove(Unit* unit)
     }
     if (ud->SkillUnitCellX == x && ud->SkillUnitCellY == y)
         return;
+    // An Ice Wall cell is a wall (map_setgatcell 5): a char's own walk can't take it into or across one, so it goes back to the last cell
+    // before the wall, from where its next update goes on.  The server sees a walk a few cells at a time, so the cells between the last one and
+    // this are checked too (a longer jump, a teleport, isn't a walk)
+    int32 stepCount = std::max(std::abs(x - ud->SkillUnitCellX), std::abs(y - ud->SkillUnitCellY));
+    if (stepCount <= ROWOW_ICEWALL_WALK_CHECK_CELLS && MapGetCellIceWall(unit->GetMap(), ud->SkillUnitCellX, ud->SkillUnitCellY) == false)
+    {
+        int32 lastX = ud->SkillUnitCellX, lastY = ud->SkillUnitCellY;
+        for (int32 step = 1; step <= stepCount; step++)
+        {
+            int32 stepX = ud->SkillUnitCellX + int32(std::lround(double(x - ud->SkillUnitCellX) * step / stepCount));
+            int32 stepY = ud->SkillUnitCellY + int32(std::lround(double(y - ud->SkillUnitCellY) * step / stepCount));
+            if (MapGetCellIceWall(unit->GetMap(), stepX, stepY) == true)
+            {
+                UnitMovePos(unit, lastX, lastY);
+                return;
+            }
+            lastX = stepX;
+            lastY = stepY;
+        }
+    }
+    int32 dx = x - ud->SkillUnitCellX, dy = y - ud->SkillUnitCellY;
     SkillUnitMove(unit, tick, 2, ud->SkillUnitCellX, ud->SkillUnitCellY, skillUnitCell);
     ud->SkillUnitCellX = x;
     ud->SkillUnitCellY = y;
     SkillUnitMove(unit, tick, 3, x, y, skillUnitCell);
+    // A performer's song or dance goes along with it (map_moveblock)
+    if (ROWOWStatusChangeEntry const* dancing = GetSCE(unit, ROWOW_SC_DANCING))
+        SkillUnitMoveUnitGroup(unit->GetMap(), SkillID2Group(unit->GetMap(), dancing->Val2), dx, dy);
+    if (Player* sd = unit->ToPlayer()) // unit_walktoxy_timer's step
+        PCCellBasilica(sd);
 }
 
 int32 ROWOWMod::SkillCellOverlap(Map* map, ROWOWSkillUnitGroup& group, int32 index, uint16 skillID, int32& alive)
@@ -1518,4 +2400,317 @@ bool ROWOWMod::SkillPosMaxcountCheck(Unit* src, int32 x, int32 y, uint16 skillID
         }
     }
     return true;
+}
+
+namespace
+{
+    // The look of a song or dance cell, shown again after it moved or turned into Dissonance (or Ugly Dance) and back: its group's per-cell
+    // unit spell (Dissonance's or Ugly Dance's while it overlaps), for the time the group has left
+    void RefreshSkillUnitCellVisual(Map* map, ROWOWSkillUnitGroup& group, int32 index)
+    {
+        ROWOWSkillUnit& unit = group.Units[index];
+        RemoveSkillUnitVisual(map, unit.VisualGUID);
+        Unit* src = GetSkillUnitGroupSource(map, group.SrcGUID);
+        if (unit.IsAlive == false || unit.IsHidden == true || src == nullptr)
+            return;
+        uint16 lookSkillID = group.SkillID;
+        if ((group.SongDance & 0x1) != 0)
+            lookSkillID = (unit.Val2 & (1 << ROWOW_UF_ENSEMBLE)) == 0 ? uint16(unit.Val1) :
+                ((unit.Val2 & (1 << ROWOW_UF_SONG)) != 0 ? ROWOW_SKILL_BA_DISSONANCE : ROWOW_SKILL_DC_UGLYDANCE);
+        ROWOWSkill const* skill = ROWOW->GetSkill(lookSkillID);
+        if (skill == nullptr)
+            return;
+        size_t levelIndex = size_t(ROWOWSkill::GetLevelIndex(std::min<uint16>(group.SkillLevel, skill->MaxLevel)));
+        if (skill->UnitSpellIDsByLevel.size() <= levelIndex || skill->UnitSpellIDsByLevel[levelIndex] == 0 || skill->IsUnitSpellPerCellByLevel[levelIndex] == false)
+            return;
+        float x = 0, y = 0;
+        ROWOW->GetCellWorldPosition(map->GetId(), unit.X, unit.Y, x, y);
+        ROWOWMapGrid const* mapGrid = ROWOW->GetMapGrid(map->GetId());
+        int64 duration = std::min(group.Limit, unit.Limit) - (int64(ROWOWMod::GetTick()) - int64(group.Tick));
+        if (duration > 0)
+            unit.VisualGUID = CreateSkillUnitVisual(src, skill->UnitSpellIDsByLevel[levelIndex], x, y, unit.Z, (mapGrid != nullptr ? mapGrid->CellSize : ROWOW->CellSize) * 0.5f,
+                duration);
+    }
+
+    // map_moveblock for a skill unit: its cell (and the ground under it) changes, and its look goes along
+    void SkillUnitMoveBlock(Map* map, ROWOWMapSkillUnits* mapUnits, ROWOWSkillUnitGroup& group, int32 index, int32 x, int32 y)
+    {
+        ROWOWSkillUnit& unit = group.Units[index];
+        auto cellIter = mapUnits->UnitsByCell.find(GetCellKey(unit.X, unit.Y));
+        if (cellIter != mapUnits->UnitsByCell.end())
+        {
+            std::vector<std::pair<int32, int32>>& cellUnits = cellIter->second;
+            cellUnits.erase(std::remove(cellUnits.begin(), cellUnits.end(), std::make_pair(group.GroupID, index)), cellUnits.end());
+            if (cellUnits.empty() == true)
+                mapUnits->UnitsByCell.erase(cellIter);
+        }
+        float cellX = 0, cellY = 0;
+        ROWOW->GetCellWorldPosition(map->GetId(), x, y, cellX, cellY);
+        float cellZ = map->GetHeight(PHASEMASK_NORMAL, cellX, cellY, unit.Z + ROWOW_SKILL_CELL_GROUND_SEARCH_HEIGHT, true, ROWOW_SKILL_CELL_GROUND_SEARCH_DISTANCE);
+        if (cellZ > INVALID_HEIGHT)
+            unit.Z = cellZ;
+        unit.X = x;
+        unit.Y = y;
+        mapUnits->UnitsByCell[GetCellKey(x, y)].emplace_back(group.GroupID, index);
+        RefreshSkillUnitCellVisual(map, group, index);
+    }
+}
+
+int32 ROWOWMod::SkillTrapSplash(Map* map, Unit* bl, ROWOWSkillUnitGroup& group, int32 index, uint64 tick)
+{
+    // skill_trap_splash: what a trap that went off does to each char in its splash: Sandman's sleep, the others' attack (split among those
+    // around for a split skill), from the trap's cell.  (Claymore Trap springing the other traps in its blast needs traps as targets)
+    ROWOWSkillUnit const& unit = group.Units[index];
+    if (unit.IsAlive == false || bl->IsInWorld() == false)
+        return 0;
+    Unit* ss = GetSkillUnitGroupSource(map, group.SrcGUID);
+    ROWOWSkill const* skill = GetSkill(group.SkillID);
+    if (ss == nullptr || skill == nullptr || BattleCheckTargetSkillUnit(group, map, bl, group.TargetFlag) <= 0)
+        return 0;
+    switch (group.UnitID)
+    {
+        case ROWOW_UNT_SANDMAN:
+            SkillAdditionalEffect(ss, bl, group.SkillID, group.SkillLevel, ROWOW_BF_MISC, ROWOW_ATK_DEF, tick);
+            break;
+        default:
+        {
+            int32 splitCount = 0;
+            if (skill->NK[ROWOW_NK_SPLASHSPLIT] == true)
+            {
+                int32 splashArea = skill->SplashArea[ROWOWSkill::GetLevelIndex(group.SkillLevel)];
+                splitCount = std::max(1, MapForEachInCellArea(map, bl->GetPhaseMask(), unit.X - splashArea, unit.Y - splashArea, unit.X + splashArea,
+                    unit.Y + splashArea, [this, ss](Unit* splashTarget) { return BattleCheckTarget(ss, splashTarget, ROWOW_BCT_ENEMY) > 0 ? 1 : 0; }));
+            }
+            SkillAttack(skill->AttackType, ss, ss, bl, group.SkillID, group.SkillLevel, tick, splitCount, &unit);
+            break;
+        }
+    }
+    return 1;
+}
+
+void ROWOWMod::ClifChangeTrapLook(Map* map, ROWOWSkillUnitGroup& group, int32 index, Unit* target)
+{
+    // clif_changetraplook (UNT_USED_TRAPS): a trap went off.  Its spring look (the trap's spring spell, from the converter) plays on what set
+    // it off, and its look on the ground lasts only as long as the spent trap stays
+    ROWOWSkill const* skill = GetSkill(group.SkillID);
+    Unit* src = GetSkillUnitGroupSource(map, group.SrcGUID);
+    size_t levelIndex = size_t(ROWOWSkill::GetLevelIndex(group.SkillLevel));
+    if (DynamicObject* dynObj = group.Units[index].VisualGUID.IsEmpty() == false ? map->GetDynamicObject(group.Units[index].VisualGUID) : nullptr)
+        dynObj->SetDuration(ROWOW_TRAP_USED_LIMIT);
+    if (skill == nullptr || src == nullptr || target == nullptr || target->IsInWorld() == false || skill->SpringSpellIDsByLevel.size() <= levelIndex)
+        return;
+    if (SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(skill->SpringSpellIDsByLevel[levelIndex]))
+        src->CastSpell(target, spellInfo, TRIGGERED_FULL_MASK);
+}
+
+void ROWOWMod::ClifTalkieBox(Map* map, ROWOWSkillUnit const& unit, std::string const& message)
+{
+    // clif_talkiebox: a Talkie Box's message, shown to the players around it
+    MapForEachInCellArea(map, PHASEMASK_NORMAL, unit.X - BattleConfig.AreaSize, unit.Y - BattleConfig.AreaSize, unit.X + BattleConfig.AreaSize,
+        unit.Y + BattleConfig.AreaSize, [&message](Unit* bl)
+    {
+        if (Player* sd = bl->ToPlayer())
+            ChatHandler(sd->GetSession()).PSendSysMessage("Talkie Box: {}", message);
+        return 0;
+    });
+}
+
+bool ROWOWMod::SkillDanceSwitch(ROWOWSkillUnitGroup& group, int32 index, bool revert)
+{
+    // skill_dance_switch: a song or dance cell that overlaps another (val2's UF_ENSEMBLE bit) acts as Dissonance (two songs) or Ugly Dance (two
+    // dances), its group switched to that skill for the call; revert puts the original back (val1).  Whether it overlaps
+    if ((group.SongDance & 0x1) == 0)
+        return false; // Not a song or dance
+    ROWOWSkillUnit const& unit = group.Units[index];
+    bool overlap = (unit.Val2 & (1 << ROWOW_UF_ENSEMBLE)) != 0;
+    // No need to convert if there is no overlap.  But we still need to revert even if the cell is no longer overlapping
+    if (revert == false && overlap == false)
+        return false;
+    // Transform or restore the skill group depending on flag
+    uint16 skillID = 0;
+    if (revert == false && overlap == true)
+        skillID = (unit.Val2 & (1 << ROWOW_UF_SONG)) != 0 ? ROWOW_SKILL_BA_DISSONANCE : ROWOW_SKILL_DC_UGLYDANCE; // Transform
+    else
+        skillID = uint16(unit.Val1); // Restore (val1 contains original skill ID)
+    ROWOWSkill const* skill = GetSkill(skillID);
+    if (skill == nullptr)
+        return false;
+    group.SkillID = skillID;
+    group.UnitID = skill->UnitTypeID;
+    group.TargetFlag = skill->UnitTarget;
+    group.Interval = skill->UnitInterval;
+    return overlap;
+}
+
+int32 ROWOWMod::SkillDanceOverlap(Map* map, ROWOWSkillUnitGroup& group, int32 index, uint8 flag)
+{
+    // skill_dance_overlap: a song or dance cell placed (OVERLAP_SET) on the cell of another of the same kind (two songs, or two dances; a song
+    // and a dance are fine) marks both as overlapping, which then act as Dissonance or Ugly Dance (those on the cell get an onleft, the song's
+    // own effect leaving them); one removed (OVERLAP_REMOVE) takes the mark back, from the other too unless more still overlap
+    if ((group.SongDance & 0x1) == 0)
+        return 0;
+    ROWOWSkillUnit& unit = group.Units[index];
+    // skill_dance_overlap_revert: back to its original form and look
+    auto revertOverlap = [this, map](ROWOWSkillUnitGroup& revertGroup, int32 revertIndex)
+    {
+        revertGroup.Units[revertIndex].Val2 &= ~(1 << ROWOW_UF_ENSEMBLE); // Remove overlap signal
+        SkillDanceSwitch(revertGroup, revertIndex, true); // If the unit is removed because overlap dissonance killed the caster, we need to reset it here
+        RefreshSkillUnitCellVisual(map, revertGroup, revertIndex);
+    };
+    // skill_dance_overlap_sub: a unit on the same cell that meets the overlap criteria
+    auto overlapSub = [this, map, &group, index, &revertOverlap](ROWOWSkillUnitGroup& targetGroup, int32 targetIndex, uint8 subFlag)
+    {
+        if (&targetGroup == &group && targetIndex == index)
+            return 0;
+        if ((group.SongDance & 0x1) == 0 || (targetGroup.SongDance & 0x1) == 0)
+            return 0;
+        if ((targetGroup.Units[targetIndex].Val2 & group.Units[index].Val2 & ~(1 << ROWOW_UF_ENSEMBLE)) == 0) // They don't match (song + dance) is valid.
+            return 0;
+        if (subFlag == ROWOW_OVERLAP_COUNT) // Just want to count the unit, stop here
+            return 1;
+        // These action needs to happen for both target (0) and the src (1)
+        std::pair<ROWOWSkillUnitGroup*, int32> const overlappingUnits[2] = { std::make_pair(&targetGroup, targetIndex), std::make_pair(&group, index) };
+        for (std::pair<ROWOWSkillUnitGroup*, int32> const& overlapping : overlappingUnits)
+        {
+            ROWOWSkillUnitGroup& overlapGroup = *overlapping.first;
+            int32 overlapIndex = overlapping.second;
+            ROWOWSkillUnit& overlapUnit = overlapGroup.Units[overlapIndex];
+            if (subFlag == ROWOW_OVERLAP_SET && (overlapUnit.Val2 & (1 << ROWOW_UF_ENSEMBLE)) == 0)
+            {
+                // Set dissonance: add ensemble to signal this unit is overlapping, then trigger onleft event on all affected units on the cell
+                overlapUnit.Val2 |= (1 << ROWOW_UF_ENSEMBLE);
+                RefreshSkillUnitCellVisual(map, overlapGroup, overlapIndex);
+                MapForEachInCellArea(map, PHASEMASK_NORMAL, overlapUnit.X, overlapUnit.Y, overlapUnit.X, overlapUnit.Y, [this, map, &overlapGroup, overlapIndex](Unit* bl)
+                {
+                    SkillUnitEffect(map, bl, overlapGroup, overlapIndex, GetTick(), 4 | 8);
+                    return 0;
+                });
+            }
+            else if (subFlag == ROWOW_OVERLAP_REMOVE && (overlapUnit.Val2 & (1 << ROWOW_UF_ENSEMBLE)) != 0)
+            {
+                // Remove dissonance, then trigger onplace event on all affected units on the cell.  Don't do this for src as that unit is to be removed
+                revertOverlap(overlapGroup, overlapIndex);
+                if (&overlapGroup == &targetGroup && overlapIndex == targetIndex)
+                {
+                    MapForEachInCellArea(map, PHASEMASK_NORMAL, overlapUnit.X, overlapUnit.Y, overlapUnit.X, overlapUnit.Y, [this, map, &overlapGroup, overlapIndex](Unit* bl)
+                    {
+                        SkillUnitEffect(map, bl, overlapGroup, overlapIndex, GetTick(), 1 | 8);
+                        return 0;
+                    });
+                }
+            }
+        }
+        return 1;
+    };
+
+    if (flag == ROWOW_OVERLAP_REMOVE)
+    {
+        // Nothing to remove, this unit is not overlapped
+        if ((unit.Val2 & (1 << ROWOW_UF_ENSEMBLE)) == 0)
+            return 0;
+        // When the unit is removed, but there are more than one other skill unit that overlaps, dissonance is only removed from the unit that
+        // is removed and not the other units
+        int32 count = MapForEachSkillUnitInArea(map, unit.X, unit.Y, unit.X, unit.Y, [&overlapSub](ROWOWSkillUnitGroup& targetGroup, int32 targetIndex)
+        {
+            return overlapSub(targetGroup, targetIndex, ROWOW_OVERLAP_COUNT);
+        });
+        if (count > 1)
+        {
+            revertOverlap(group, index);
+            return count;
+        }
+    }
+    return MapForEachSkillUnitInArea(map, unit.X, unit.Y, unit.X, unit.Y, [&overlapSub, flag](ROWOWSkillUnitGroup& targetGroup, int32 targetIndex)
+    {
+        return overlapSub(targetGroup, targetIndex, flag);
+    });
+}
+
+void ROWOWMod::SkillUnitMoveUnitGroup(Map* map, std::shared_ptr<ROWOWSkillUnitGroup> group, int32 dx, int32 dy)
+{
+    // skill_unit_move_unit_group: a performer's song or dance moves with it (an ensemble stays).  Only the cells that end up off the old area
+    // move (a cell whose new spot another cell of the group held stays put, and the one leaving takes the free spot ahead), each getting the
+    // onout/onleft of what it leaves and the onplace of what it moves onto, and its Dissonance checked again
+    ROWOWMapSkillUnits* mapUnits = GetMapSkillUnits(map, false);
+    ROWOWSkill const* skill = group != nullptr ? GetSkill(group->SkillID) : nullptr;
+    if (mapUnits == nullptr || group == nullptr || skill == nullptr || group->Units.empty() == true || (dx == 0 && dy == 0))
+        return;
+    if (skill->UnitFlags[ROWOW_UF_ENSEMBLE] == true)
+        return; // Ensembles may not be moved around.
+    uint64 tick = GetTick();
+    int32 count = int32(group->Units.size());
+    // m_flag: 0 neither of the following (skill_unit_onplace & skill_unit_onout are needed); 1 the unit will move to a slot that had another unit
+    // of the same group (skill_unit_onplace not needed); 2 another unit from same group will end up positioned on this unit (skill_unit_onout
+    // not needed); 3 both 1+2
+    std::vector<int32> mFlag(size_t(count), 0);
+    for (int32 i = 0; i < count; i++)
+    {
+        ROWOWSkillUnit const& unit1 = group->Units[i];
+        if (unit1.IsAlive == false)
+            continue;
+        for (int32 j = 0; j < count; j++)
+        {
+            ROWOWSkillUnit const& unit2 = group->Units[j];
+            if (unit2.IsAlive == false)
+                continue;
+            if (unit1.X + dx == unit2.X && unit1.Y + dy == unit2.Y)
+                mFlag[i] |= 0x1;
+            if (unit1.X - dx == unit2.X && unit1.Y - dy == unit2.Y)
+                mFlag[i] |= 0x2;
+        }
+    }
+    int32 j = 0;
+    for (int32 i = 0; i < count; i++)
+    {
+        if (mapUnits->GroupsByID.find(group->GroupID) == mapUnits->GroupsByID.end())
+            return; // Deleted by what a cell did
+        ROWOWSkillUnit& unit1 = group->Units[i];
+        if (unit1.IsAlive == false)
+            continue;
+        if ((mFlag[i] & 0x2) == 0)
+        {
+            if ((group->SongDance & 0x1) != 0) // Cancel dissonance effect.
+                SkillDanceOverlap(map, *group, i, ROWOW_OVERLAP_REMOVE);
+            MapForEachInCellArea(map, PHASEMASK_NORMAL, unit1.X, unit1.Y, unit1.X, unit1.Y, [this, map, &group, i, tick](Unit* bl)
+            {
+                SkillUnitEffect(map, bl, *group, i, tick, 4);
+                return 0;
+            });
+        }
+        // Move Cell using "smart" criteria (avoid useless moving around)
+        switch (mFlag[i])
+        {
+            case 0:
+                // Cell moves independently, safely move it.
+                SkillUnitMoveBlock(map, mapUnits, *group, i, unit1.X + dx, unit1.Y + dy);
+                break;
+            case 1:
+                // Cell moves unto another cell, look for a replacement cell that won't collide and has no cell moving into it (flag == 2)
+                for (; j < count; j++)
+                {
+                    if (mFlag[j] != 2 || group->Units[j].IsAlive == false)
+                        continue;
+                    // Move to where this cell would had moved.
+                    ROWOWSkillUnit const& unit2 = group->Units[j];
+                    SkillUnitMoveBlock(map, mapUnits, *group, i, unit2.X + dx, unit2.Y + dy);
+                    j++; // Skip this cell as we have used it.
+                    break;
+                }
+                break;
+            case 2:
+            case 3:
+                break; // Don't move the cell as a cell will end on this tile anyway.
+        }
+        if ((mFlag[i] & 0x2) == 0)
+        {
+            // We only moved the cell in 0-1
+            if ((group->SongDance & 0x1) != 0) // Check for dissonance effect.
+                SkillDanceOverlap(map, *group, i, ROWOW_OVERLAP_SET);
+            MapForEachInCellArea(map, PHASEMASK_NORMAL, unit1.X, unit1.Y, unit1.X, unit1.Y, [this, map, &group, i, tick](Unit* bl)
+            {
+                SkillUnitEffect(map, bl, *group, i, tick, 1);
+                return 0;
+            });
+        }
+    }
 }

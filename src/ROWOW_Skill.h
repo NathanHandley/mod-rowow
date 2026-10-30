@@ -254,6 +254,28 @@ enum ROWOWRequireState : uint8
 #define ROWOW_MAX_SQUARE_LAYOUT                     7       // MAX_SQUARE_LAYOUT: the square layouts go up to 15x15
 #define ROWOW_SKILL_UNIT_GROUP_ID_START             1500    // skill_unit_group_newid starts at MAX_SKILL (group IDs never look like skill IDs)
 #define ROWOW_UNIT_NOCONSUME_AMMO                   0x02    // UNIT_NOCONSUME_AMMO: a skill_unitsetting flag (the group doesn't use up the ammo)
+#define ROWOW_ICEWALL_WALK_CHECK_CELLS              10      // The most cells apart two of a walk's positions the server sees can be (Ice Wall's crossing check)
+
+// Timer skills (skill.hpp): a skill's later hits, queued on its caster (Jupitel Thunder's and Water Ball's hits, Double Casting's bolt)
+#define ROWOW_TIMERSKILL_INTERVAL                   150     // TIMERSKILL_INTERVAL: ms between a timer skill's hits
+#define ROWOW_MAX_SKILLTIMERSKILL                   50      // MAX_SKILLTIMERSKILL: the timer skills a unit can have queued
+
+// A Monk's Spirit Spheres (pc.hpp) and a Priest's partners (skill_check_pc_partner)
+#define ROWOW_MAX_SPIRITBALL                        15      // MAX_SPIRITBALL: the most Spirit Spheres a player can have
+#define ROWOW_MAX_PARTY                             12      // MAX_PARTY: the most partners a partner search keeps
+
+// A Hunter's traps and a Bard's or Dancer's songs (skill.hpp, item.hpp)
+#define ROWOW_ITEMID_TRAP                           1065    // ITEMID_TRAP: Booby Trap, what a trap is made of and gives back
+#define ROWOW_ITEMID_TRAP_ALLOY                     7940    // ITEMID_TRAP_ALLOY: Special Alloy Trap (a Ranger's, with Research Trap)
+#define ROWOW_TRAP_USED_LIMIT                       1500    // How long a sprung trap stays (as UNT_USED_TRAPS) before it goes
+
+// e_dance_overlap: what skill_dance_overlap does with the song or dance units on a cell
+enum ROWOWDanceOverlap : uint8
+{
+    ROWOW_OVERLAP_REMOVE = 0, // OVERLAP_REMOVE: the unit goes; the units it turned into Dissonance turn back
+    ROWOW_OVERLAP_SET, // OVERLAP_SET: a song and a dance on one cell turn into Dissonance (or Ugly Dance)
+    ROWOW_OVERLAP_COUNT, // OVERLAP_COUNT: only count the units that overlap
+};
 
 // What a skill level needs and uses up (rAthena's s_skill_condition, skill_get_requirement)
 struct ROWOWSkillCondition
@@ -288,6 +310,22 @@ struct ROWOWSkillUnitGroupTickset
     int32 ID = 0;
 };
 
+// skill_timerskill: a hit (or other later part) of a skill queued on its caster for a tick, at a target or (no target) a cell of its map.
+// type is the skill's own value (the attack type, or the hit's number)
+struct ROWOWSkillTimerSkill
+{
+    uint32 ID = 0; // Which queued entry the caster's event is for (rAthena's timer id)
+    uint64 Tick = 0;
+    ObjectGuid TargetGUID;
+    uint16 SkillID = 0;
+    uint16 SkillLevel = 0;
+    uint32 MapID = 0;
+    int32 X = 0;
+    int32 Y = 0;
+    int32 Type = 0;
+    int32 Flag = 0;
+};
+
 // A unit's skill use (rAthena's unit_data parts): when it may act again, the skill it's casting, its skill cooldowns, its ground skill
 // unit groups and the unit groups' ticks on it.  Kept on the unit as "ROWOWSkillUnitData"; only the unit's own map thread touches it
 struct ROWOWSkillUnitData : public DataMap::Base
@@ -298,6 +336,7 @@ struct ROWOWSkillUnitData : public DataMap::Base
     ObjectGuid SkillTargetGUID; // skilltarget
     float SkillZ = 0; // The ground height of a ground skill's spot (skillx and skilly are its cell), which its units are placed at
     bool IsSkillCastCancel = false; // state.skillcastcancel: damage stops the cast
+    bool IsSkillTimer = false; // skilltimer: a cast with a cast time is running (Free Cast's slowness)
     std::unordered_map<uint16, uint64> CooldownEndTimesBySkillID; // blockskill (skill_blockpc_start): when each skill can be used again
     ROWOWSkillAreaTemp AreaTemp;
     std::vector<int32> SkillUnitGroupIDs; // skillunits: its ground skills' unit groups (on its map, the only one they can be on)
@@ -311,6 +350,21 @@ struct ROWOWSkillUnitData : public DataMap::Base
     bool IsAutoCast = false; // state.autocast: an autospell is being cast (it costs no SP)
     std::vector<uint32> AutoSpellLocks; // The bAutoSpellOnSkill autospells going (their lock), by trigger skill << 16 | skill
     std::vector<ObjectGuid> BowlingTargetGUIDs; // bowling_db: the units its Bowling Bash in progress has hit (kept per caster, not global)
+    std::vector<ROWOWSkillTimerSkill> TimerSkills; // skilltimerskill: its timer skills waiting for their tick (each an event on the unit)
+    uint32 NextTimerSkillID = 0;
+    uint16 SkillIDOld = 0; // sd->skill_id_old and skill_lv_old: the skill whose cast Cast Cancel stopped
+    uint16 SkillLevelOld = 0;
+    uint16 SkillItemID = 0; // sd->skillitem and skillitemlv: a skill it may cast once without knowing it (Abracadabra's pick), at that level
+    uint16 SkillItemLevel = 0;
+    bool IsAbraFlag = false; // state.abra_flag: the skill item is Abracadabra's (its requirements aren't checked or paid)
+    bool IsSkillLookCast = false; // A skill spell is being cast only for its look (clif_skill_poseffect, clif_skill_nodamage): the engine did the rest
+    std::vector<uint64> SpiritBallEndTimes; // spirit_timer: when each of a player's Spirit Spheres (spiritball, their count) goes, soonest first
+    int32 SpiritBallOld = 0; // spiritball_old: the spheres it had when a skill that uses them started (Throw Spirit Sphere, Asura Strike)
+    std::vector<ObjectGuid> PartnerGUIDs; // skill_check_pc_partner's p_sd: the partners its last search found (kept per caster, not global)
+    uint16 SkillIDDance = 0; // sd->skill_id_dance and skill_lv_dance: its last song or dance, which Encore performs again
+    uint16 SkillLevelDance = 0;
+    uint16 EncoreSkillID = 0; // The dance Encore starts for it (unit_skilluse_id from the server, not a client request: no after-cast delay check)
+    std::string Message; // sd->message: what its next Talkie Box says (clif_parse_UseSkillToPosMoreInfo's text, here `.ro message`)
 };
 
 // skill_unit: one cell of a ground skill (a Fire Wall's cell, a Safety Wall, a trap), at an RO cell of its group's map
@@ -345,6 +399,7 @@ struct ROWOWSkillUnitGroup
     int32 Val2 = 0;
     int32 Val3 = 0;
     std::string ValStr; // Talkie Box's and Graffiti's message
+    ObjectGuid Val2GUID; // val2 when it holds a unit (the one Spider Web caught)
     uint16 UnitID = 0; // ROWOW_UNT_*
     int32 LinkGroupID = 0; // A group deleted with it
     int32 AliveCount = 0;
@@ -464,6 +519,13 @@ struct ROWOWSkill
 
     // Clamps a level into the per-level arrays (skill_get_lv)
     static int32 GetLevelIndex(uint16 level) { return level == 0 ? 0 : (level > ROWOW_MAX_SKILL_LEVEL ? ROWOW_MAX_SKILL_LEVEL - 1 : level - 1); }
+};
+
+// A skill Abracadabra can cast (abra_db's s_skill_abra_db), and its chance (in 10000) at each of Abracadabra's levels
+struct ROWOWAbraSkill
+{
+    uint16 SkillID = 0;
+    int32 Per[ROWOW_MAX_SKILL_LEVEL] = { };
 };
 
 // e_scs_flag: the states a status puts its unit in (status.yml's States), and the conditional ones the status code decides
@@ -608,6 +670,7 @@ enum ROWOWStatusFlag : uint8
 #define ROWOW_OPTION_SIGHT                          0x00000001
 #define ROWOW_OPTION_HIDE                           0x00000002
 #define ROWOW_OPTION_CLOAK                          0x00000004
+#define ROWOW_OPTION_FALCON                         0x00000010  // A Hunter's falcon, kept with the identity (status.option)
 #define ROWOW_OPTION_RIDING                         0x00000020  // A Knight's or Crusader's Peco, kept with the identity (status.option)
 #define ROWOW_OPTION_RUWACH                         0x00002000
 #define ROWOW_OPTION_CHASEWALK                      0x00004000
@@ -736,6 +799,7 @@ struct ROWOWStatusChange : public DataMap::Base
     bool IsPassiveDamage = false; // A status_zap is being dealt (passive damage, status_damage's flag&1)
     int32 CloakCellX = 0; // The cell Cloaking last checked its wall at
     int32 CloakCellY = 0;
+    int32 SGCounter = 0; // sg_counter: the Storm Gust hits it took since its last freeze (any Storm Gust's: the third freezes)
 
     ROWOWStatusChangeEntry* GetSCE(int32 type)
     {

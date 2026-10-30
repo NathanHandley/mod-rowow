@@ -52,6 +52,7 @@ public:
         ROWOW->LoadItemScriptData();
         ROWOW->LoadBonusData();
         ROWOW->LoadSkillData(); // After the items, whose names the skills' item costs use
+        ROWOW->LoadAbraData();
         ROWOW->LoadSkillUnitData();
         ROWOW->LoadStatusChangeData(); // After the skills, whose durations the statuses take, and the script commands their scripts use
     }

@@ -34,17 +34,25 @@ class ROWOW_SkillSpellScript : public SpellScript
     PrepareSpellScript(ROWOW_SkillSpellScript);
 
     // The skill and level this spell is, cast by an RO combatant, and the unit it's used on (the caster for self and ground skills: rAthena
-    // never trusts the client's target for a self skill)
+    // never trusts the client's target for a self skill).  A cast for the skill's look alone (clif_skill_poseffect, clif_skill_nodamage) is
+    // none: the engine already did what it shows
     bool GetSkillCast(Unit*& casterOut, Unit*& targetOut, uint16& skillIDOut, uint16& skillLevelOut)
     {
         casterOut = GetCaster();
         if (ROWOW->IsEnabled == false || casterOut == nullptr || ROWOW->IsROCombatant(casterOut) == false ||
             ROWOW->GetSkillOfSpell(GetSpellInfo()->Id, skillIDOut, skillLevelOut) == false)
             return false;
+        ROWOWSkillUnitData const* ud = casterOut->CustomData.Get<ROWOWSkillUnitData>("ROWOWSkillUnitData");
+        if (ud != nullptr && ud->IsSkillLookCast == true)
+            return false;
         ROWOWSkill const* skill = ROWOW->GetSkill(skillIDOut);
         targetOut = GetExplTargetUnit();
+        Unit* pickedTarget = targetOut;
         if (targetOut == nullptr || skill == nullptr || (skill->Inf & (ROWOW_INF_SELF_SKILL | ROWOW_INF_GROUND_SKILL)) != 0)
             targetOut = casterOut;
+        // A combo goes at what the caster attacks (or the unit it picked), which a self combo skill (Raging Quadruple Blow) needs
+        if (skill != nullptr && (skill->Inf & ROWOW_INF_GROUND_SKILL) == 0)
+            targetOut = ROWOW->UnitSkillTarget(casterOut, targetOut, pickedTarget, skillIDOut);
         return true;
     }
 

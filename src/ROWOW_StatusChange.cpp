@@ -1607,7 +1607,7 @@ bool ROWOWMod::StatusChangeStartValues(Unit* src, Unit* bl, int32 type, int32& v
             // combo's walk delay has no WoW counterpart; the attack delay is the swing timer)
             if (val3 == 0 || val3 == 2)
             {
-                tick += 300;
+                tick += 300 * BattleConfig.ComboDelayRate / 100;
                 if (Player* comboPlayer = bl->ToPlayer())
                     comboPlayer->setAttackTimer(BASE_ATTACK, std::max<uint32>(comboPlayer->getAttackTimer(BASE_ATTACK), uint32(std::max(0, tick))));
             }
@@ -1869,7 +1869,7 @@ bool ROWOWMod::StatusChangeStartValues(Unit* src, Unit* bl, int32 type, int32& v
                 val3 = 0;
             break;
 
-        /* The Bard's and Dancer's songs: their values come from their ground units (R6.5); the icon shows them as endless */
+        /* The Bard's and Dancer's songs: their values come from their ground units (skill_unitsetting); the icon shows them as endless */
         case ROWOW_SC_APPLEIDUN:
         {
             Player* srcPlayer = src != nullptr ? src->ToPlayer() : nullptr;
@@ -1911,6 +1911,42 @@ bool ROWOWMod::StatusChangeEnd(Unit* bl, int32 type, bool isTimer)
         return false;
     if (isTimer == false && type == ROWOW_SC_ENDURE && sce->Val4 != 0)
         return false; // Do not end infinite endure.
+    if (isTimer == false && type == ROWOW_SC_SPIDERWEB)
+    {
+        // Delete the unit group first to expire found in the status change (the webs are val2-4): the status stays while another web holds it
+        uint64 tick = GetTick();
+        std::shared_ptr<ROWOWSkillUnitGroup> group;
+        int32 pos = 1;
+        if (sce->Val2 != 0 && (group = SkillID2Group(bl->GetMap(), sce->Val2)) == nullptr)
+            sce->Val2 = 0;
+        for (int32 i = 2; i <= 3; i++)
+        {
+            int32& groupID = i == 2 ? sce->Val3 : sce->Val4;
+            if (groupID == 0)
+                continue;
+            std::shared_ptr<ROWOWSkillUnitGroup> group2 = SkillID2Group(bl->GetMap(), groupID);
+            if (group2 == nullptr)
+                groupID = 0;
+            else if (group == nullptr || (group->Limit - int64(tick - group->Tick)) > (group2->Limit - int64(tick - group2->Tick)))
+            {
+                group = group2;
+                pos = i;
+            }
+        }
+        if (pos == 1)
+            sce->Val2 = 0;
+        else if (pos == 2)
+            sce->Val3 = 0;
+        else
+            sce->Val4 = 0;
+        if (group != nullptr)
+            SkillDelUnitGroup(bl->GetMap(), group);
+        sce = sc->GetSCE(type);
+        if (sce == nullptr)
+            return true;
+        if (bl->IsAlive() == true && (sce->Val2 != 0 || sce->Val3 != 0 || sce->Val4 != 0))
+            return false; // Don't end the status change yet as there are still unit groups associated with it
+    }
 
     // Store a copy, if access is required later
     int32 val1 = sce->Val1;
@@ -1969,7 +2005,45 @@ bool ROWOWMod::StatusChangeEnd(Unit* bl, int32 type, bool isTimer)
             break;
         case ROWOW_SC_MARIONETTE:
         case ROWOW_SC_MARIONETTE2: // Marionette target
-            // (Ending the partner's comes with the Clown's Marionette Control, R6.5)
+            if (val1 != 0 && bl->IsInWorld() == true)
+            {
+                // Check for partner and end their marionette status as well
+                int32 type2 = type == ROWOW_SC_MARIONETTE ? ROWOW_SC_MARIONETTE2 : ROWOW_SC_MARIONETTE;
+                Unit* pbl = MapID2BL(bl, val1);
+                ROWOWStatusChange* sc2 = pbl != nullptr ? GetStatusChange(pbl) : nullptr;
+                if (ROWOWStatusChangeEntry* sce2 = sc2 != nullptr ? sc2->GetSCE(type2) : nullptr)
+                {
+                    sce2->Val1 = 0;
+                    StatusChangeEnd(pbl, type2);
+                }
+            }
+            break;
+        case ROWOW_SC_DANCING:
+            if (bl->IsInWorld() == false)
+                break;
+            // End status on partner as well (an ensemble's: val4 names it, and the partner's names this one back; Wand of Hermode's val4 is its
+            // group, which a player's id here could match, so the partner must name this one too)
+            if (val4 != 0 && val4 != ROWOW_BCT_SELF)
+            {
+                Player* dsd = ObjectAccessor::GetPlayer(bl->GetMap(), ObjectGuid::Create<HighGuid::Player>(uint32(val4)));
+                ROWOWStatusChange* dsc = dsd != nullptr ? GetStatusChange(dsd) : nullptr;
+                if (ROWOWStatusChangeEntry* dsce = dsc != nullptr ? dsc->GetSCE(ROWOW_SC_DANCING) : nullptr; dsce != nullptr &&
+                    dsce->Val4 == int32(bl->GetGUID().GetCounter()))
+                {
+                    // This will prevent recursive loops.
+                    dsce->Val2 = 0;
+                    dsce->Val4 = ROWOW_BCT_SELF;
+                    StatusChangeEnd(dsd, ROWOW_SC_DANCING);
+                }
+            }
+            // Erase associated land skill
+            if (val2 != 0)
+                if (std::shared_ptr<ROWOWSkillUnitGroup> group = SkillID2Group(bl->GetMap(), val2))
+                    SkillDelUnitGroup(bl->GetMap(), group);
+            break;
+        case ROWOW_SC_HERMODE:
+            if (val3 == ROWOW_BCT_SELF)
+                SkillClearUnitGroup(bl);
             break;
         case ROWOW_SC_CHANGE:
             if (isTimer == false)
@@ -2012,6 +2086,26 @@ bool ROWOWMod::StatusChangeEnd(Unit* bl, int32 type, bool isTimer)
                 // Clear the group.
                 if (std::shared_ptr<ROWOWSkillUnitGroup> group = SkillID2Group(bl->GetMap(), val3))
                     SkillDelUnitGroup(bl->GetMap(), group);
+            }
+            break;
+        case ROWOW_SC_BASILICA: // Clear the skill area. [Skotlex]
+            if (val3 != 0 && val4 == int32(bl->GetGUID().GetCounter()) && bl->IsInWorld() == true)
+            {
+                if (std::shared_ptr<ROWOWSkillUnitGroup> group = SkillID2Group(bl->GetMap(), val3))
+                    SkillDelUnitGroup(bl->GetMap(), group);
+            }
+            break;
+        case ROWOW_SC_BLADESTOP:
+            if (val4 != 0 && bl->IsInWorld() == true)
+            {
+                // Stop the status for the other guy of bladestop as well
+                Unit* tbl = MapID2BL(bl, val4);
+                ROWOWStatusChange* tsc = tbl != nullptr ? GetStatusChange(tbl) : nullptr;
+                if (ROWOWStatusChangeEntry* tsce = tsc != nullptr ? tsc->GetSCE(ROWOW_SC_BLADESTOP) : nullptr)
+                {
+                    tsce->Val4 = 0;
+                    StatusChangeEnd(tbl, ROWOW_SC_BLADESTOP);
+                }
             }
             break;
     }
@@ -2177,7 +2271,7 @@ void ROWOWMod::StatusChangeTimer(Unit* bl, int32 type, uint64 tick)
         case ROWOW_SC_RUWACH:
         case ROWOW_SC_SIGHTBLASTER:
         {
-            // Each 20 ms, the units around are revealed (status_change_timer_sub).  (Revealing traps comes with the traps, R6.5)
+            // Each 20 ms, the units around are revealed (status_change_timer_sub), and the hidden traps (skill_reveal_trap_inarea)
             ROWOWStatusChangeEntry sceCopy = *sce;
             Unit* src = bl;
             MapForEachInRange(bl, sceCopy.Val3, [this, src, &sceCopy, type, tick](Unit* target)
@@ -2185,6 +2279,12 @@ void ROWOWMod::StatusChangeTimer(Unit* bl, int32 type, uint64 tick)
                 StatusChangeTimerSub(target, src, &sceCopy, type, tick);
                 return 0;
             });
+            if (type != ROWOW_SC_SIGHTBLASTER)
+            {
+                int32 x = 0, y = 0;
+                GetUnitCell(bl, x, y);
+                SkillRevealTrapInArea(bl, sceCopy.Val3, x, y);
+            }
             sce = sc->GetSCE(type);
             if (sce == nullptr)
                 return;
@@ -2289,11 +2389,111 @@ void ROWOWMod::StatusChangeTimer(Unit* bl, int32 type, uint64 tick)
             break;
 
         case ROWOW_SC_DANCING:
-            // SP consumption by time of dancing skills.  (The dances' SP upkeep comes with the Bard and Dancer, R6.5)
+        {
+            // SP consumption by time of dancing skills: 1 SP every few seconds by the dance (Moonlight Petals 4 a level every 10), tripled under
+            // Longing for Freedom; it ends when the SP runs out
+            int32 s = 0;
+            int32 sp = 1;
             if (--sce->Val3 <= 0)
                 break;
+            switch (sce->Val1 & 0xFFFF)
+            {
+                case ROWOW_SKILL_BD_RICHMANKIM:
+                case ROWOW_SKILL_BD_DRUMBATTLEFIELD:
+                case ROWOW_SKILL_BD_RINGNIBELUNGEN:
+                case ROWOW_SKILL_BD_SIEGFRIED:
+                case ROWOW_SKILL_BA_DISSONANCE:
+                case ROWOW_SKILL_BA_ASSASSINCROSS:
+                case ROWOW_SKILL_DC_UGLYDANCE:
+                    s = 3;
+                    break;
+                case ROWOW_SKILL_BD_LULLABY:
+                case ROWOW_SKILL_BD_ETERNALCHAOS:
+                case ROWOW_SKILL_BD_ROKISWEIL:
+                case ROWOW_SKILL_DC_FORTUNEKISS:
+                    s = 4;
+                    break;
+                case ROWOW_SKILL_CG_HERMODE:
+                case ROWOW_SKILL_BD_INTOABYSS:
+                case ROWOW_SKILL_BA_WHISTLE:
+                case ROWOW_SKILL_DC_HUMMING:
+                case ROWOW_SKILL_BA_POEMBRAGI:
+                case ROWOW_SKILL_DC_SERVICEFORYOU:
+                    s = 5;
+                    break;
+                case ROWOW_SKILL_BA_APPLEIDUN:
+                    s = 6;
+                    break;
+                case ROWOW_SKILL_CG_MOONLIT:
+                    // Moonlit's cost is 4sp*skill_lv [Skotlex]
+                    sp = 4 * (sce->Val1 >> 16);
+                    // Upkeep is also every 10 secs.
+                    [[fallthrough]];
+                case ROWOW_SKILL_DC_DONTFORGETME:
+                    s = 10;
+                    break;
+            }
+            if (s != 0 && sce->Val3 % s == 0)
+            {
+                if (sc->HasSCE(ROWOW_SC_LONGING) == true)
+                    sp *= 3;
+                if (StatusCharge(bl, 0, sp) == false)
+                    break;
+                // If no more SP left, the effect ends immediately
+                if (bl->GetPower(POWER_MANA) == 0)
+                    break;
+            }
             scTimerNext(1000 + tick);
             return;
+        }
+
+        case ROWOW_SC_WHISTLE:
+        case ROWOW_SC_ASSNCROS:
+        case ROWOW_SC_POEMBRAGI:
+        case ROWOW_SC_APPLEIDUN:
+        case ROWOW_SC_HUMMING:
+        case ROWOW_SC_DONTFORGETME:
+        case ROWOW_SC_FORTUNE:
+        case ROWOW_SC_SERVICE4U:
+            if (BattleConfig.RefreshSong == 0 && bl->IsAlive() == true)
+            {
+                // Most songs have no interval, but they can expire while the character is still standing in the area of effect.  We need to
+                // make sure to restore the duration here if that's the case
+                ROWOWStatusChangeDB const* scdb = GetStatusChangeDB(type);
+                if (scdb == nullptr)
+                    break;
+                int32 x = 0, y = 0, index = -1;
+                GetUnitCell(bl, x, y);
+                std::shared_ptr<ROWOWSkillUnitGroup> group = MapFindSkillUnitOnCell(bl, x, y, scdb->SkillID, 1, index);
+                // No longer in area
+                if (group == nullptr || group->Units[index].IsAlive == false)
+                    break;
+                // Dissonance marker is set
+                if ((group->Units[index].Val2 & (1 << ROWOW_UF_ENSEMBLE)) != 0)
+                    break;
+                // Standing in the area, but cannot affect self
+                ROWOWStatusChangeEntry const* spirit = sc->GetSCE(ROWOW_SC_SPIRIT);
+                if (group->SrcGUID == bl->GetGUID() && (spirit == nullptr || spirit->Val2 != ROWOW_SKILL_SL_BARDDANCER))
+                    break;
+                // Restore pseudo-infinite duration
+                sce->Val4 = 0;
+                scTimerNext(uint64(group->Units[index].Limit) + tick);
+                return;
+            }
+            break;
+
+        case ROWOW_SC_MARIONETTE:
+        case ROWOW_SC_MARIONETTE2:
+        {
+            // Lasts on while the two stay within 7 cells of each other
+            Unit* pbl = MapID2BL(bl, sce->Val1);
+            if (pbl != nullptr && DistanceBL(bl, pbl) <= 7)
+            {
+                scTimerNext(1000 + tick);
+                return;
+            }
+            break;
+        }
 
         case ROWOW_SC_BERSERK:
             // 5% every 10 seconds [DracoRPG]

@@ -123,6 +123,13 @@ struct ROWOWStealState : public DataMap::Base
     bool IsStealCoinFlag = false;
 };
 
+// A monster's Soul Exhale state (mob_data's state.soul_change_flag): a Professor already took its SP.  Kept on the creature as
+// "ROWOWSoulChangeState" for one life; only its map's thread touches it
+struct ROWOWSoulChangeState : public DataMap::Base
+{
+    bool IsSoulChangeFlag = false;
+};
+
 // A copy of one Ragnarok WorldData table, the rAthena pre-renewal data the RO rules read (from a mod_rowow_db_* table, which the converter
 // replaces whole).  Rows are in rAthena's load order and every cell is text, empty for none.  A cell is a scalar, a map ("Key=Value,..."),
 // a list of maps ("Key=Value,...;Key=Value,...;") or a list of scalars ("A;B;"), escaped as the converter's RoWorldDataTable does
@@ -180,9 +187,18 @@ struct ROWOWDataTable
 
 // rAthena's job IDs (e_job in mmo.hpp)
 #define ROWOW_JOB_NOVICE                            0
+#define ROWOW_JOB_ACOLYTE                           4
 #define ROWOW_JOB_THIEF                             6
+#define ROWOW_JOB_MONK                              15
+#define ROWOW_JOB_BARD                              19
+#define ROWOW_JOB_DANCER                            20
+#define ROWOW_JOB_GUNSLINGER                        24
 #define ROWOW_JOB_NINJA                             25
 #define ROWOW_JOB_NOVICE_HIGH                       4001
+#define ROWOW_JOB_ACOLYTE_HIGH                      4005
+#define ROWOW_JOB_CHAMPION                          4016
+#define ROWOW_JOB_CLOWN                             4020
+#define ROWOW_JOB_GYPSY                             4021
 #define ROWOW_JOB_UPPER_START                       4001    // Novice_High, the first transcendent job
 #define ROWOW_JOB_UPPER_END                         4022    // Paladin2, the last
 
@@ -621,6 +637,18 @@ struct ROWOWBattleConfig
     int32 BowlingBashArea = 0; // bowling_bash_area: 0 the gutter lines (40x40 squares), 1 without the demi-gutter bug, else a square around the caster
     int32 GxAllHit = 0; // gx_allhit: Grand Cross hits every target in each cell (else each cell hits three times in all)
     int32 SkillEightpathSameCell = 1; // skill_eightpath_same_cell: a path skill (Brandish Spear) also hits on the caster's own cell
+    int32 LandProtectorBehavior = 0; // land_protector_behavior: a magic unit fails on Land Protector by the unit's cell (0) or the target's (1)
+    int32 DispelSong = 0; // dispel_song: Dispell also ends the songs on a target still in their area
+    int32 ComboDelayRate = 100; // combo_delay_rate: the percent of 300 ms a combo's window lasts past its skill's after-cast delay
+    int32 FingerOffensiveType = 0; // finger_offensive_type: 0 Throw Spirit Sphere's spheres hit as one attack, 1 one after another
+    int32 PlayerSkillPartnerCheck = 1; // player_skill_partner_check: the skills that need partners (B.S. Sacramenti) look for them
+    int32 ResurrectionExp = 0; // resurrection_exp: exp the reviver gets from a higher level player revived (in 10000)
+    int32 ExpCostRedemptio = 1; // exp_cost_redemptio: the percent of a level's exp Redemptio needs and costs
+    int32 ExpCostRedemptioLimit = 5; // exp_cost_redemptio_limit: the players it revives for the cost to be none
+    int32 TrapsSetting = 0; // traps_setting: hidden traps (UF_HIDDENTRAP) are hidden nowhere (0), on the PvP maps (1) or everywhere (2)
+    int32 MultiTriggerTrap = 0; // multi_trigger_trap: a trap that goes off hits everything on it before it's spent
+    int32 SkillRemoveTrapType = 0; // skill_removetrap_type: Remove Trap gives back the trap (0) or every item it was made of (1)
+    int32 RefreshSong = 0; // refresh_song: a song's effect on someone who stepped out is renewed on stepping back in, not by its timer
 };
 
 // A skill of a job's skill tree (skill_tree.yml's s_skill_tree_entry)
@@ -1163,6 +1191,7 @@ public:
     bool PCCheckBaseLevelUp(Player* player); // pc_checkbaselevelup
     bool PCCheckJobLevelUp(Player* player); // pc_checkjoblevelup
     void PCDeadPenalty(Player* player); // The exp penalty part of pc_dead
+    void PCLostExp(Player* player, uint64 baseExp, uint64 jobExp); // pc_lostexp
 
     // An RO monster's exp (mob.cpp): who hurt it how much (mob_log_damage), and its exp shared out to them when it dies (mob_dead)
     void MobLogDamage(Creature* creature, Unit* attacker, uint32 damage);
@@ -1188,6 +1217,7 @@ public:
     static bool BattleCheckUndead(int32 race, int32 element); // battle_check_undead
     bool IsSkillUsingArrow(Unit const* src, uint16 skillID) const; // is_skill_using_arrow (sd->state.arrow_atk: a bow or gun's normal attack, or a skill using ammo)
     int64 BattleAttrFix(Unit* src, Unit* target, int64 damage, int32 atkElement, int32 defElement, int32 defElementLevel, int32 flag); // battle_attr_fix (either unit may be null)
+    int32 BattleGetSpiritBallDamage(ROWOWDamage const& wd, Unit const* src, uint16 skillID) const; // battle_get_spiritball_damage
     float GetAutoAttackExtraRange(Player* player, Unit const* victim) const; // How much further than melee range the form's weapon reaches
     static uint32 GetWeaponHitSoundSpellID(uint8 weaponType); // The spell that plays RO's hit sound of a weapon type on its caster
 
@@ -1295,6 +1325,7 @@ public:
     uint32 GetSkillSpellID(uint16 skillID, uint16 skillLevel) const; // 0 when the level has no spell
     static uint64 GetTick(); // gettick: game time in ms
     ROWOWSkillUnitData* GetSkillUnitData(Unit* unit) const; // unit_bl2ud
+    Unit* MapID2BL(Unit* origin, int32 id) const; // map_id2bl for an id a status keeps (a GUID's counter), near the origin
     void GetUnitCell(Unit const* unit, int32& xOut, int32& yOut) const; // The RO cell a unit stands on
     void GetWorldCell(uint32 mapID, float worldX, float worldY, int32& xOut, int32& yOut) const;
     int32 DistanceBL(Unit const* src, Unit const* target) const; // distance_bl, in cells
@@ -1324,6 +1355,8 @@ public:
         ROWOWSkillUnit const* dsrcUnit = nullptr); // skill_attack (dsrcUnit: a ground skill's unit is the damage's source, dsrc being its caster)
     void SkillAttackBlow(Unit* src, Unit* dsrc, Unit* target, uint8 blewcount, uint16 skillID, uint16 skillLevel, int64 damage, uint64 tick, int32 flag,
         ROWOWSkillUnit const* dsrcUnit = nullptr); // skill_attack_blow
+    static int32 SkillIsCombo(uint16 skillID); // skill_is_combo: 1 a combo skill, 2 one that auto-targets even with a target set, 0 none
+    void SkillCombo(Unit* src, Unit* dsrc, Unit* bl, uint16 skillID, uint16 skillLevel, uint64 tick); // skill_combo: the combo window a hit opens
     int32 SkillBlown(Unit* src, Unit* target, int32 count, int8 dir, int32 flag, ROWOWSkillUnit const* srcUnit = nullptr); // skill_blown, in RO cells (from a unit's cell)
     bool UnitMovePos(Unit* bl, int32 x, int32 y); // skill_check_unit_movepos and unit_movepos: the unit slides onto an RO cell at once
     void BattleConsumeAmmo(Player* sd, uint16 skillID, uint16 skillLevel); // battle_consume_ammo: a normal attack's or skill's ammo
@@ -1342,10 +1375,13 @@ public:
     // The cast as ROWOW_SkillSpellScript drives it: unit_skilluse_id2/unit_skilluse_pos2 when it starts (the cast time comes from the core's
     // cast time hook), then skill_castend_id/skill_castend_pos when it ends.  Damage taken stops it (unit_skillcastcancel)
     SpellCastResult UnitSkillUse(Unit* src, Unit* target, WorldLocation const* dest, uint16 skillID, uint16 skillLevel);
+    Unit* UnitSkillTarget(Unit* src, Unit* target, Unit* pickedTarget, uint16 skillID); // unit_skilluse_id2's target: a combo's (auto-target), Blade Stop's
+    int32 UnitSkillCastTimeFix(Unit* src, Unit* target, uint16 skillID, uint16 skillLevel, int32 casttime); // unit_skilluse_id2's cast time switch (-1: instant)
     int32 UnitSkillCastTime(Unit* src, Unit* target, uint16 skillID, uint16 skillLevel); // The cast time, and the delays set at cast begin
     SpellCastResult SkillCastEndCheck(Unit* src, Unit* target, WorldLocation const* dest, uint16 skillID, uint16 skillLevel);
     void SkillCastEnd(Unit* src, Unit* target, WorldLocation const* dest, uint16 skillID, uint16 skillLevel);
     void UnitSkillCastCancel(Unit* bl, int32 type); // unit_skillcastcancel
+    void UpdateSkillCastMove(Player* player); // A walk during a cast stops it, but with Free Cast (unit_walktoxy's check), from the player's update
     void SendSkillDelayToClient(Unit* unit, uint16 skillID) const; // The after-cast delay and the skill's cooldown, on the action bars
 
     // Ground skill units (ROWOW_SkillUnit.cpp): the port of rAthena's skill units (skill.cpp's skill_unitsetting, skill_initunitgroup,
@@ -1465,6 +1501,68 @@ public:
     Unit* BattleCheckDevotion(Unit* bl) const; // battle_check_devotion: the Crusader who takes reflected damage (devotion_rdamage), or null
     void BattleFixDamage(Unit* src, Unit* target, int64 damage, uint16 skillID); // battle_fix_damage: the damage alone, shown on the target
 
+    // Timer skills (skill_addtimerskill, skill_timerskill, skill_cleartimerskill): a skill's later hits, each an event on its caster that runs in
+    // the caster's update (Jupitel Thunder's and Water Ball's hits, Double Casting's second bolt)
+    int32 SkillAddTimerSkill(Unit* src, uint64 tick, ObjectGuid targetGUID, int32 x, int32 y, uint16 skillID, uint16 skillLevel, int32 type, int32 flag);
+    void SkillTimerSkill(Unit* src, uint32 timerSkillID); // skill_timerskill
+    void SkillClearTimerSkill(Unit* src); // skill_cleartimerskill
+
+    // The Mage line's supporting systems (ROWOW_SkillSupport.cpp): Abracadabra's abra_db and its skill item, Hindsight's spell menu, the
+    // Elemental Converter list, Sense's monster window, Mystical Amplification's toggle, the elemental fields, the cells Ice Wall and Land
+    // Protector change, and a skill's look shown alone.  All of it runs in the caster's map thread
+    std::vector<ROWOWAbraSkill> AbraSkills; // abra_db (startup)
+    void LoadAbraData(); // abra_db, after LoadSkillData
+    bool SkillCastAbraSkill(Unit* src, uint16 skillID, uint16 skillLevel); // Abracadabra's pick cast (a player's as its skill item, clif_item_skill)
+    bool MobClassChange(Creature* md, uint32 mobID); // mob_class_change
+    uint32 MobGetRandomID(std::string const& groupName, bool isDBRate) const; // mob_get_random_id (RMF_DB_RATE), by mob_summon group
+    uint32 GetMobCreatureEntry(uint32 mobID) const; // The RO creature template of a monster (mob_db Id), 0 for none
+    void SkillToggleMagicPower(Unit* bl, uint16 skillID); // skill_toggle_magicpower
+    void ClifAutospell(Player* sd, uint16 skillLevel); // clif_autospell: Hindsight's spell menu (ROWOWAUTOSPELL)
+    int32 SkillAutospell(Player* sd, uint16 skillID); // skill_autospell: the spell picked
+    void ClifElementalConverterList(Player* sd); // clif_elementalconverter_list (ROWOWCONVERTER)
+    void ClifSkillEstimation(Player* sd, Creature* creature); // clif_skill_estimation: Sense's monster window, as system messages
+    std::shared_ptr<ROWOWSkillUnitGroup> SkillLocateElementField(Unit* bl); // skill_locate_element_field
+    int32 SkillClearGroup(Unit* bl, int32 flag); // skill_clear_group
+    std::shared_ptr<ROWOWSkillUnitGroup> MapFindSkillUnitOnCell(Unit* target, int32 x, int32 y, uint16 skillID, int32 flag, int32& indexOut); // map_find_skill_unit_oncell
+    bool MapGetCellLandProtector(Map* map, int32 x, int32 y) const; // map_getcell(CELL_CHKLANDPROTECTOR)
+    bool MapGetCellIceWall(Map* map, int32 x, int32 y) const; // map_getcell(CELL_CHKICEWALL): an Ice Wall cell can't be walked on
+    void ClifSkillPosEffect(Unit* src, uint16 skillID, uint16 skillLevel, int32 x, int32 y, float z); // clif_skill_poseffect: the skill's look on a cell
+    void ClifSkillNoDamage(Unit* src, Unit* target, uint16 skillID, uint16 skillLevel); // clif_skill_nodamage: the skill's look on a unit
+    bool SkillCheckConditionSCRequired(Player* sd, uint16 skillID, ROWOWSkillCondition const& require); // skill_check_condition_sc_required
+    int64 StatusPercentChange(Unit* src, Unit* target, int8 hpRate, int8 spRate, uint8 flag); // status_percent_change (0 heal, 1 damage, 2 damage not killing)
+    void StatusSetSP(Unit* bl, uint32 sp); // status_set_sp
+    void StatusKill(Unit* bl); // status_kill
+
+    // The Acolyte line's supporting systems (ROWOW_SkillSupport.cpp): a player's Spirit Spheres (pc_addspiritball, pc_delspiritball and their
+    // timers, shown by the RO_Identity addon, ROWOWSPHERES), reviving (status_revive), the partners a Priest's B.S. Sacramenti needs
+    // (skill_check_pc_partner), and Basilica's cells (pc_cell_basilica, in ROWOW_SkillUnit.cpp).  All of it runs in the player's own map thread
+    int32 PCGetSpiritBall(Unit const* unit) const; // sd->spiritball: a player's Spirit Spheres, 0 for a monster
+    void PCAddSpiritBall(Player* sd, int64 interval, int32 max); // pc_addspiritball
+    void PCDelSpiritBall(Player* sd, int32 count, int32 type); // pc_delspiritball (type 1: the client isn't told)
+    void UpdateSpiritBalls(Player* sd); // pc_spiritball_timer as the spheres run out, from the player's update
+    void SendSpiritBallsToClient(Player* sd); // clif_spiritball (ROWOWSPHERES)
+    bool StatusRevive(Unit* bl, uint8 perHP, uint8 perSP); // status_revive (with pc_revive for a player)
+    bool MapGetCellBasilica(Map* map, int32 x, int32 y) const; // map_getcell(CELL_CHKBASILICA)
+    void PCCellBasilica(Player* sd); // pc_cell_basilica: SC_BASILICA while the player stands on a Basilica cell
+    int32 SkillCheckPCPartner(Player* sd, uint16 skillID, uint16& skillLevel, int32 range, int32 castFlag); // skill_check_pc_partner
+    void SkillExtremityFistEnd(Unit* src, Unit* target, uint16 skillLevel); // What Asura Strike leaves its user with, hit or failed
+
+    // The Archer line's supporting systems (ROWOW_SkillSupport.cpp and ROWOW_SkillUnit.cpp): a Hunter's falcon (status.option, kept with the
+    // identity), the traps' revealing, springing and the item they give back, and the songs and dances: the unit group that follows its
+    // performer (skill_unit_move_unit_group), Dissonance where a song and a dance meet (skill_dance_overlap, skill_dance_switch), and the
+    // ensembles' partner (skill_check_pc_partner).  All of it runs in the map thread of the units involved
+    bool PCIsBardDancer(Unit const* unit) const; // (class_&MAPID_SECONDMASK) == MAPID_BARDDANCER: a Bard, Dancer, Clown or Gypsy in the form
+    bool PCIsFalcon(Unit const* unit) const; // pc_isfalcon
+    void PCSetFalcon(Player* player, bool isFalcon); // pc_setfalcon, with pc_setoption's EFST_FALCON message
+    void SkillRevealTrapInArea(Unit* src, int32 range, int32 x, int32 y); // skill_reveal_trap_inarea
+    int32 SkillTrapSplash(Map* map, Unit* bl, ROWOWSkillUnitGroup& group, int32 index, uint64 tick); // skill_trap_splash
+    void ClifChangeTrapLook(Map* map, ROWOWSkillUnitGroup& group, int32 index, Unit* target); // clif_changetraplook (UNT_USED_TRAPS): the trap's spring look on what set it off
+    void SkillTrapGiveBack(Unit* src, ROWOWSkillUnitGroup const& group); // The trap item an expired or removed trap leaves (map_addflooritem / pc_additem)
+    int32 SkillDanceOverlap(Map* map, ROWOWSkillUnitGroup& group, int32 index, uint8 flag); // skill_dance_overlap
+    bool SkillDanceSwitch(ROWOWSkillUnitGroup& group, int32 index, bool revert); // skill_dance_switch
+    void SkillUnitMoveUnitGroup(Map* map, std::shared_ptr<ROWOWSkillUnitGroup> group, int32 dx, int32 dy); // skill_unit_move_unit_group
+    void ClifTalkieBox(Map* map, ROWOWSkillUnit const& unit, std::string const& message); // clif_talkiebox: the trap's message to those around it
+
     // Merchant prices (pc_modifybuyvalue, pc_modifysellvalue)
     int32 PCModifyBuyValue(Player const* player, int32 origValue) const;
     int32 PCModifySellValue(Player const* player, int32 origValue) const;
@@ -1498,6 +1596,7 @@ public:
     bool StatusCheckVisibility(Unit const* src, Unit const* target) const; // status_check_visibility (hiding, cloaking)
     void SendStatusChangesToClient(Unit* unit); // The marker auras for every status (after a form change or a respawn)
     void StatusChangeTimerSub(Unit* bl, Unit* src, ROWOWStatusChangeEntry const* sce, int32 type, uint64 tick); // status_change_timer_sub
+    void StatusChangeClearBuffs(Unit* bl, uint8 type); // status_change_clear_buffs
 
     // The status calculation of statuses (ROWOW_StatusCalc.cpp): status_calc_bl_ and status_calc_bl_main with the status_calc_* of each
     // value, the hp and sp bonuses of statuses, regen rates and the WoW speed that follows the RO walk speed
@@ -1505,7 +1604,7 @@ public:
     void StatusCalcBLMain(Unit const* unit, ROWOWStatus const& baseStatus, ROWOWStatusChange const* sc, ROWOWStatus& status) const; // status_calc_bl_main (SCB_ALL)
     int32 StatusGetHPBonus(ROWOWStatusChange const* sc, int32 type) const; // status_get_hpbonus
     int32 StatusGetSPBonus(ROWOWStatusChange const* sc, int32 type) const; // status_get_spbonus
-    void StatusCalcRegenRate(ROWOWStatusChange const* sc, ROWOWStatus& status) const; // status_calc_regen_rate
+    void StatusCalcRegenRate(Player const* sd, ROWOWStatusChange const* sc, ROWOWStatus& status) const; // status_calc_regen_rate
     void ApplyROSpeed(Unit* unit, uint8 moveType, float& speed) const; // The unit's RO walk speed on its WoW speed (OnUnitUpdateSpeed)
     static int32 StatusCalcAttackElement(ROWOWStatusChange const* sc, int32 element); // status_calc_attack_element (status_get_attack_sc_element with 0)
     ROWOWStatus const* GetROBaseStatus(Unit const* unit) const; // status_get_base_status: a player's base status, a monster's mob_db one
@@ -1542,7 +1641,6 @@ private:
     bool StatusChangeStartPostDelay(Unit* src, Unit* bl, int32 type, int32 val1, int32 val2, int32 val3, int32 val4, int32 tick, uint8 flag); // status_change_start_post_delay
     bool StatusChangeStartValues(Unit* src, Unit* bl, int32 type, int32& val1, int32& val2, int32& val3, int32& val4, int32& tick, int32& tickTime,
         uint8 flag); // status_change_start_post_delay's switch of each status's values
-    void StatusChangeClearBuffs(Unit* bl, uint8 type); // status_change_clear_buffs
     void StatusChangeStartDevoted(Unit* src, Player* sd, int32 type, int32 val1, int32 val2, int32 val3, int32 val4, int64 tick, uint8 flag); // A Crusader's status passed on to its devoted
     void StatusChangeTimer(Unit* bl, int32 type, uint64 tick); // status_change_timer
     void StatusCalcState(Unit* bl, ROWOWStatusChange& sc, ROWOWStatusChangeDB const& scdb, bool start); // status_calc_state

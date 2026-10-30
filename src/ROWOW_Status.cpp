@@ -308,6 +308,18 @@ void ROWOWMod::LoadStatusData()
         readValue("bowling_bash_area", BattleConfig.BowlingBashArea);
         readValue("gx_allhit", BattleConfig.GxAllHit);
         readValue("skill_eightpath_same_cell", BattleConfig.SkillEightpathSameCell);
+        readValue("land_protector_behavior", BattleConfig.LandProtectorBehavior);
+        readValue("dispel_song", BattleConfig.DispelSong);
+        readValue("combo_delay_rate", BattleConfig.ComboDelayRate);
+        readValue("finger_offensive_type", BattleConfig.FingerOffensiveType);
+        readValue("player_skill_partner_check", BattleConfig.PlayerSkillPartnerCheck);
+        readValue("resurrection_exp", BattleConfig.ResurrectionExp);
+        readValue("exp_cost_redemptio", BattleConfig.ExpCostRedemptio);
+        readValue("exp_cost_redemptio_limit", BattleConfig.ExpCostRedemptioLimit);
+        readValue("traps_setting", BattleConfig.TrapsSetting);
+        readValue("multi_trigger_trap", BattleConfig.MultiTriggerTrap);
+        readValue("skill_removetrap_type", BattleConfig.SkillRemoveTrapType);
+        readValue("refresh_song", BattleConfig.RefreshSong);
         BattleConfig.MultiLevelUp = multiLevelUp != 0;
         BattleConfig.MaxAspdAmotion = (2000 - maxAspd * 10) * 2; // As battle.cpp converts it after loading
     }
@@ -1209,12 +1221,21 @@ void ROWOWMod::PCDeadPenalty(Player* player)
     }
     if (basePenalty == 0 && jobPenalty == 0)
         return;
+    PCLostExp(player, basePenalty, jobPenalty);
+}
 
-    // pc_lostexp
-    identity->BaseExp -= uint32(basePenalty);
-    identity->JobExp -= uint32(jobPenalty);
+void ROWOWMod::PCLostExp(Player* player, uint64 baseExp, uint64 jobExp)
+{
+    // pc_lostexp: never more than the exp held
+    ROWOWIdentity* identity = GetIdentity(player);
+    baseExp = std::min<uint64>(identity->BaseExp, baseExp);
+    jobExp = std::min<uint64>(identity->JobExp, jobExp);
+    if (baseExp == 0 && jobExp == 0)
+        return;
+    identity->BaseExp -= uint32(baseExp);
+    identity->JobExp -= uint32(jobExp);
     player->SetUInt32Value(PLAYER_XP, identity->BaseExp);
-    ChatHandler(player->GetSession()).PSendSysMessage("You lost {} base experience and {} job experience.", basePenalty, jobPenalty);
+    ChatHandler(player->GetSession()).PSendSysMessage("You lost {} base experience and {} job experience.", baseExp, jobExp);
     SendROStatusToClient(player);
 }
 

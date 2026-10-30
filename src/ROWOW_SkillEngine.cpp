@@ -156,6 +156,24 @@ ROWOWSkillUnitData* ROWOWMod::GetSkillUnitData(Unit* unit) const
     return unit->CustomData.GetDefault<ROWOWSkillUnitData>("ROWOWSkillUnitData");
 }
 
+Unit* ROWOWMod::MapID2BL(Unit* origin, int32 id) const
+{
+    // map_id2bl for a unit's id kept in a status's value (its GUID's counter): a player on the origin's map, else an RO combatant within the
+    // area around the origin (the partner of a Blade Stop, the target of a combo), or null
+    if (id == 0 || origin->IsInWorld() == false)
+        return nullptr;
+    if (Player* player = ObjectAccessor::GetPlayer(origin->GetMap(), ObjectGuid::Create<HighGuid::Player>(uint32(id))))
+        return player;
+    Unit* found = nullptr;
+    MapForEachInRange(origin, BattleConfig.AreaSize, [id, &found](Unit* bl)
+    {
+        if (found == nullptr && bl->IsPlayer() == false && int32(bl->GetGUID().GetCounter()) == id)
+            found = bl;
+        return 0;
+    });
+    return found;
+}
+
 void ROWOWMod::GetWorldCell(uint32 mapID, float worldX, float worldY, int32& xOut, int32& yOut) const
 {
     // RO's x runs against WoW's Y and RO's y along WoW's X; off the RO maps the cells are laid from the map's origin
@@ -321,8 +339,8 @@ int32 ROWOWMod::BattleCheckTarget(Unit const* src, Unit const* target, int32 fla
 bool ROWOWMod::StatusCheckSkillUse(Unit const* src, Unit const* target, uint16 skillID, int32 flag) const
 {
     // status_check_skilluse: whether the caster can use a skill (0 a normal attack) now, and on the target.  flag 0: the cast starts; 1: it
-    // ends; 2: a target of an area.  A target must be in the world, and alive past the cast's start (the castend and area checks).  (The
-    // item skills, the wings, don't come through here)
+    // ends; 2: a target of an area.  A target must be in the world, and alive past the cast's start (the castend and area checks) but for the
+    // skills that revive (rAthena leaves death to skill.cpp).  (The item skills, the wings, don't come through here)
     ROWOWStatus const* status = src != nullptr ? GetROStatus(src) : nullptr;
     if (src != nullptr)
     {
@@ -353,6 +371,15 @@ bool ROWOWMod::StatusCheckSkillUse(Unit const* src, Unit const* target, uint16 s
 
     if (skillID == ROWOW_SKILL_PA_PRESSURE && flag != 0 && tsc != nullptr && (tsc->Option & ROWOW_OPTION_HIDE) != 0)
         return false; // Gloria Avoids pretty much everything....
+    if (skillID == ROWOW_SKILL_AL_TELEPORT && src != nullptr && (mode & ROWOW_MODE_STATUS_IMMUNE) == 0)
+    {
+        // Should fail when used on top of Land Protector [Skotlex] (but cast as a skill item)
+        int32 x = 0, y = 0;
+        GetUnitCell(src, x, y);
+        ROWOWSkillUnitData const* ud = src->CustomData.Get<ROWOWSkillUnitData>("ROWOWSkillUnitData");
+        if (MapGetCellLandProtector(src->GetMap(), x, y) == true && (src->IsPlayer() == false || ud == nullptr || ud->SkillItemID != skillID))
+            return false;
+    }
 
     if (sc != nullptr)
     {
@@ -431,7 +458,7 @@ bool ROWOWMod::StatusCheckSkillUse(Unit const* src, Unit const* target, uint16 s
 
     if (target == nullptr || target == src) // No further checking needed.
         return true;
-    if (target->IsInWorld() == false || (flag != 0 && target->IsAlive() == false))
+    if (target->IsInWorld() == false || (flag != 0 && target->IsAlive() == false && skillID != ROWOW_SKILL_ALL_RESURRECTION && skillID != ROWOW_SKILL_PR_REDEMPTIO))
         return false;
 
     if (tsc != nullptr)
@@ -701,8 +728,10 @@ SpellCastResult ROWOWMod::UnitSkillUse(Unit* src, Unit* target, WorldLocation co
     uint64 tick = GetTick();
     if (sd != nullptr)
     {
-        // never trust client
-        if (PCCheckSkill(sd, skillID) < skillLevel)
+        // never trust client: a skill item (Abracadabra's pick) is cast at its own level, other skills only as learned
+        if (ud->SkillItemID == skillID)
+            skillLevel = ud->SkillItemLevel;
+        else if (PCCheckSkill(sd, skillID) < skillLevel)
             return SPELL_FAILED_NOT_KNOWN;
 
         // skill_isNotOk: the skill's cooldown (blockskill)
@@ -713,11 +742,39 @@ SpellCastResult ROWOWMod::UnitSkillUse(Unit* src, Unit* target, WorldLocation co
             return SPELL_FAILED_DONT_REPORT;
         }
 
-        // canact_tick: no skill before the after-cast delay ends
-        if (tick < ud->CanActTime)
+        // canact_tick: no skill before the after-cast delay ends, but a skill item and the dance Encore starts (not a client's request).
+        // While a cast runs only Cast Cancel can be used, which remembers the skill it stops (skill_id_old)
+        if (ud->SkillID != 0 && skillID == ROWOW_SKILL_SA_CASTCANCEL)
+        {
+            ud->SkillIDOld = ud->SkillID;
+            ud->SkillLevelOld = ud->SkillLevel;
+        }
+        else if (tick < ud->CanActTime && ud->SkillItemID != skillID && ud->EncoreSkillID != skillID)
         {
             ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_SKILLINTERVAL);
             return SPELL_FAILED_DONT_REPORT;
+        }
+
+        // Record the status of the previous skill
+        switch (skillID)
+        {
+            case ROWOW_SKILL_BD_ENCORE:
+                // Prevent using the dance skill if you no longer have the skill in your tree.
+                if (ud->SkillIDDance == 0 || PCCheckSkill(sd, ud->SkillIDDance) <= 0)
+                {
+                    ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_LEVEL);
+                    return SPELL_FAILED_DONT_REPORT;
+                }
+                ud->SkillIDOld = skillID;
+                break;
+            case ROWOW_SKILL_BA_PANGVOICE:
+            case ROWOW_SKILL_DC_WINKCHARM:
+                if (GetROStatus(target) != nullptr && GetROStatus(target)->Class == ROWOW_CLASS_BOSS)
+                {
+                    ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_TOTARGET);
+                    return SPELL_FAILED_DONT_REPORT;
+                }
+                break;
         }
     }
     if (skill->Inf2[ROWOW_INF2_NOTARGETSELF] == true && src == target)
@@ -733,6 +790,13 @@ SpellCastResult ROWOWMod::UnitSkillUse(Unit* src, Unit* target, WorldLocation co
         ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_LEVEL);
         return SPELL_FAILED_DONT_REPORT;
     }
+    if (skillID == ROWOW_SKILL_ALL_RESURRECTION)
+    {
+        // Resurrection is cast on the dead, or (offensively) on the undead
+        ROWOWStatus const* tstatus = GetROStatus(target);
+        if (tstatus == nullptr || (BattleCheckUndead(tstatus->Race, tstatus->DefElement) == false && target->IsAlive() == true))
+            return SPELL_FAILED_TARGET_NOT_DEAD; // Can't cast on non-dead characters.
+    }
     if (sd != nullptr && skillID == ROWOW_SKILL_MG_FIREWALL && dest != nullptr)
     {
         // Special check for Firewall only (unit_skilluse_pos2)
@@ -742,30 +806,79 @@ SpellCastResult ROWOWMod::UnitSkillUse(Unit* src, Unit* target, WorldLocation co
             return SPELL_FAILED_DONT_REPORT;
     }
 
+    // A cast holds a player still, but with Free Cast (unit_walktoxy refuses a walk while the skill timer runs): a walking player can't start
+    // one.  (The skill spells don't stop on WoW's movement; UpdateSkillCastMove stops them)
+    int32 casttime = UnitSkillCastTimeFix(src, target, skillID, skillLevel, SkillCastFix(src, skillID, skillLevel));
+    if (sd != nullptr && sd->isMoving() == true && PCCheckSkill(sd, ROWOW_SKILL_SA_FREECAST) <= 0 && casttime > 0)
+        return SPELL_FAILED_MOVING;
+
     // Any action ends the invincibility after arriving (pc_delinvincibletimer)
     if (sd != nullptr)
         PCDelInvincibleTimer(sd);
 
     // An instant skill ends at once (skill_castend_id from unit_skilluse_id2), so its castend checks are part of starting it
-    if (SkillCastFix(src, skillID, skillLevel) <= 0)
+    if (casttime <= 0)
         return SkillCastEndCheck(src, target, dest, skillID, skillLevel);
     return SPELL_CAST_OK;
 }
 
-int32 ROWOWMod::UnitSkillCastTime(Unit* src, Unit* target, uint16 skillID, uint16 skillLevel)
+Unit* ROWOWMod::UnitSkillTarget(Unit* src, Unit* target, Unit* pickedTarget, uint16 skillID)
 {
-    // The rest of unit_skilluse_id2: the cast time (skill_castfix, its skill switch, then skill_castfix_sc), the attack and act delays set at
-    // cast begin, the cast's cancel flag, and the skill remembered as the one being cast.  A non-combo skill stops the normal attack.  (The
-    // other jobs' cases of the cast time switch come with them)
+    // unit_skilluse_id2's target: a combo skill used in its combo goes at the combo's target (val2) or, as it auto-targets (val2 0), at what the
+    // caster attacks (ud->target: the unit it swings at, else the one the player picked, the spell's own target); a self skill that can't
+    // target itself (a combo's) at that too; Chain Combo under Blade Stop at the blade's other holder.  (A combo whose castbegin isn't met falls
+    // to the same target, and castbegin refuses it after)
     ROWOWSkill const* skill = GetSkill(skillID);
-    ROWOWSkillUnitData* ud = GetSkillUnitData(src);
-    uint64 tick = GetTick();
-    int32 levelIndex = ROWOWSkill::GetLevelIndex(skillLevel);
-    src->AttackStop();
-    ud->IsSkillCastCancel = skill != nullptr && skill->IsCastCancel == true;
-    int32 casttime = SkillCastFix(src, skillID, skillLevel, true);
+    if (skill == nullptr)
+        return target;
+    ROWOWStatusChange const* sc = GetStatusChange(static_cast<Unit const*>(src));
+    if (sc != nullptr && sc->IsEmpty() == true)
+        sc = nullptr; // Unneeded
+    Unit* attackTarget = src->GetVictim();
+    if (attackTarget == nullptr && pickedTarget != src)
+        attackTarget = pickedTarget;
+    ROWOWStatusChangeEntry const* combo = sc != nullptr ? sc->GetSCE(ROWOW_SC_COMBO) : nullptr;
+    if (combo != nullptr && SkillIsCombo(skillID) != 0)
+    {
+        // temp: used to signal combo-skills right now.
+        if (combo->Val2 != 0)
+            target = MapID2BL(src, combo->Val2);
+        else if (target == src || attackTarget != nullptr)
+            target = attackTarget;
+        if ((skill->Inf & ROWOW_INF_SELF_SKILL) != 0 && skill->NK[ROWOW_NK_NODAMAGE] == true) // exploit fix
+            target = src;
+    }
+    else if (target == src && (skill->Inf & ROWOW_INF_SELF_SKILL) != 0 && skill->Inf2[ROWOW_INF2_NOTARGETSELF] == true)
+        target = attackTarget; // Auto-select target. [Skotlex]
+
+    // Check for skills that auto-select target
+    if (src->IsPlayer() == true && skillID == ROWOW_SKILL_MO_CHAINCOMBO && sc != nullptr)
+        if (ROWOWStatusChangeEntry const* bladeStop = sc->GetSCE(ROWOW_SC_BLADESTOP))
+            target = MapID2BL(src, bladeStop->Val4);
+    return target != nullptr ? target : src;
+}
+
+int32 ROWOWMod::UnitSkillCastTimeFix(Unit* src, Unit* target, uint16 skillID, uint16 skillLevel, int32 casttime)
+{
+    // unit_skilluse_id2's cast time switch, on skill_castfix's time: -1 casts at once
+    ROWOWStatusChange const* sc = GetStatusChange(static_cast<Unit const*>(src));
     switch (skillID)
     {
+        case ROWOW_SKILL_MO_FINGEROFFENSIVE:
+            // Each sphere thrown takes its own cast time
+            if (src->IsPlayer() == true)
+                casttime += casttime * std::min<int32>(skillLevel, PCGetSpiritBall(src));
+            break;
+        case ROWOW_SKILL_MO_EXTREMITYFIST:
+            // At once from Combo Finish or Chain Crush Combo
+            if (ROWOWStatusChangeEntry const* combo = sc != nullptr ? sc->GetSCE(ROWOW_SC_COMBO) : nullptr; combo != nullptr &&
+                (combo->Val1 == ROWOW_SKILL_MO_COMBOFINISH || combo->Val1 == ROWOW_SKILL_CH_CHAINCRUSH))
+                casttime = -1;
+            break;
+        case ROWOW_SKILL_HP_BASILICA:
+            if (sc != nullptr && sc->HasSCE(ROWOW_SC_BASILICA) == true)
+                casttime = -1; // No Casting time on basilica cancel
+            break;
         case ROWOW_SKILL_KN_CHARGEATK:
         {
             // Range 0-3: 500ms, Range 4-6: 1000ms, Range 7+: 1500ms (distance_math_bl: the straight distance in cells)
@@ -777,7 +890,28 @@ int32 ROWOWMod::UnitSkillCastTime(Unit* src, Unit* target, uint16 skillID, uint1
             break;
         }
     }
+    return casttime;
+}
+
+int32 ROWOWMod::UnitSkillCastTime(Unit* src, Unit* target, uint16 skillID, uint16 skillLevel)
+{
+    // The rest of unit_skilluse_id2: the cast time (skill_castfix, its skill switch, then skill_castfix_sc), the attack and act delays set at
+    // cast begin, the cast's cancel flag, and the skill remembered as the one being cast.  A non-combo skill stops the normal attack (a combo
+    // goes on swinging at its target)
+    ROWOWSkill const* skill = GetSkill(skillID);
+    ROWOWSkillUnitData* ud = GetSkillUnitData(src);
+    uint64 tick = GetTick();
+    int32 levelIndex = ROWOWSkill::GetLevelIndex(skillLevel);
+    bool isCombo = (GetSCE(src, ROWOW_SC_COMBO) != nullptr && SkillIsCombo(skillID) != 0) ||
+        (skill != nullptr && (skill->Inf & ROWOW_INF_SELF_SKILL) != 0 && skill->Inf2[ROWOW_INF2_NOTARGETSELF] == true);
+    if (isCombo == false) // Stop attack on non-combo skills [Skotlex]
+        src->AttackStop();
+    ud->IsSkillCastCancel = skill != nullptr && skill->IsCastCancel == true;
+    int32 casttime = UnitSkillCastTimeFix(src, target, skillID, skillLevel, SkillCastFix(src, skillID, skillLevel, true));
     casttime = SkillCastFixSC(src, casttime, uint8(skill != nullptr ? skill->CastTimeFlags : 0));
+
+    // SC_MAGICPOWER needs to switch states at start of cast
+    SkillToggleMagicPower(src, skillID);
     if (casttime <= 0)
         ud->IsSkillCastCancel = false;
     ud->SkillID = skillID;
@@ -792,6 +926,11 @@ int32 ROWOWMod::UnitSkillCastTime(Unit* src, Unit* target, uint16 skillID, uint1
     // Using a skill ends Cloaking, unless the cloak check type lets it stay (val4&4: monster_cloak_check_type 4)
     if (ROWOWStatusChangeEntry const* sce = GetSCE(src, ROWOW_SC_CLOAKING); sce != nullptr && (sce->Val4 & 4) == 0 && skillID != ROWOW_SKILL_AS_CLOAKING)
         StatusChangeEnd(src, ROWOW_SC_CLOAKING);
+
+    // Free Cast: the caster walks and attacks slower while it casts (status_calc_speed and status_calc_bl_main's skilltimer check)
+    ud->IsSkillTimer = casttime > 0;
+    if (casttime > 0 && src->IsPlayer() == true && PCCheckSkill(src, ROWOW_SKILL_SA_FREECAST) > 0)
+        StatusCalcBL(src, std::bitset<ROWOW_SCB_MAX>().set(ROWOW_SCB_SPEED).set(ROWOW_SCB_ASPD));
     return casttime;
 }
 
@@ -801,14 +940,27 @@ SpellCastResult ROWOWMod::SkillCastEndCheck(Unit* src, Unit* target, WorldLocati
     // skill_castend_pos's for a ground skill (skill_pos_maxcount_check at its spot).  A failure ends the cast with no after-cast delay
     ROWOWSkill const* skill = GetSkill(skillID);
     Player* sd = src->ToPlayer();
-    auto fail = [this, src, sd, skillID](int32 cause)
+    auto fail = [this, src, &target, sd, skillID, skillLevel](int32 cause)
     {
         if (sd != nullptr)
             ClifSkillFail(sd, skillID, cause);
+        // When Asura fails... (except when it fails from Wall of Fog): its SP and spheres are spent all the same, and the Monk moves toward the
+        // target anyway
+        if (skillID == ROWOW_SKILL_MO_EXTREMITYFIST && sd != nullptr && GetSCE(src, ROWOW_SC_FOGWALL) == nullptr)
+        {
+            SkillConsumeRequirement(sd, skillID, skillLevel, 1);
+            SkillExtremityFistEnd(src, target != nullptr && target->IsInWorld() == true && target->GetMap() == src->GetMap() ? target : nullptr, skillLevel);
+        }
         ROWOWSkillUnitData* ud = GetSkillUnitData(src);
+        bool wasSkillTimer = ud->IsSkillTimer;
+        ud->IsSkillTimer = false;
         ud->CanActTime = GetTick();
         ud->SkillID = 0;
         ud->SkillLevel = 0;
+        ud->SkillItemID = 0;
+        ud->SkillItemLevel = 0;
+        if (wasSkillTimer == true && sd != nullptr && PCCheckSkill(sd, ROWOW_SKILL_SA_FREECAST) > 0)
+            StatusCalcBL(sd, std::bitset<ROWOW_SCB_MAX>().set(ROWOW_SCB_SPEED).set(ROWOW_SCB_ASPD)); // restore original walk speed
         return SPELL_FAILED_DONT_REPORT;
     };
     if (skill == nullptr || src->IsAlive() == false)
@@ -832,6 +984,7 @@ SpellCastResult ROWOWMod::SkillCastEndCheck(Unit* src, Unit* target, WorldLocati
     else
     {
         // skill_castend_id_check.  (The other jobs' cases of its switch come with their skills)
+        bool isTargetChecked = false; // A case returned -1: the skill's target rules aren't checked
         if (src != target && target->IsCreature() == true && GetROStatus(target) != nullptr && (GetROStatus(target)->Mode & ROWOW_MODE_SKILL_IMMUNE) != 0 &&
             SkillGetCastType(skillID) == ROWOW_CAST_NODAMAGE)
             return fail(ROWOW_USESKILL_FAIL_MAX); // Don't show a skill fail message (NoDamage type doesn't consume requirements)
@@ -845,6 +998,38 @@ SpellCastResult ROWOWMod::SkillCastEndCheck(Unit* src, Unit* target, WorldLocati
                     return fail(ROWOW_USESKILL_FAIL);
                 break;
             }
+            case ROWOW_SKILL_PF_SOULBURN:
+                // Only works on players
+                if (target->IsPlayer() == false)
+                    return fail(ROWOW_USESKILL_FAIL_LEVEL);
+                break;
+            case ROWOW_SKILL_PR_TURNUNDEAD:
+            {
+                ROWOWStatus const* tstatus = GetROStatus(target);
+                if (tstatus == nullptr || BattleCheckUndead(tstatus->Race, tstatus->DefElement) == false)
+                    return fail(ROWOW_USESKILL_FAIL_MAX);
+                break;
+            }
+            case ROWOW_SKILL_DC_WINKCHARM:
+                // Charms only demons, demi-humans and angels
+                switch (GetROStatus(target) != nullptr ? GetROStatus(target)->Race : -1)
+                {
+                    case ROWOW_RACE_DEMON:
+                    case ROWOW_RACE_DEMIHUMAN:
+                    case ROWOW_RACE_ANGEL:
+                    case ROWOW_RACE_PLAYER_HUMAN:
+                    case ROWOW_RACE_PLAYER_DORAM:
+                        break;
+                    default:
+                        return fail(ROWOW_USESKILL_FAIL_LEVEL);
+                }
+                break;
+            case ROWOW_SKILL_PR_LEXDIVINA:
+                // If it's not an enemy, and not silenced, you can't use the skill on them. [Skotlex]
+                if (BattleCheckTarget(src, target, ROWOW_BCT_ENEMY) <= 0 && GetSCE(target, ROWOW_SC_SILENCE) == nullptr)
+                    return fail(ROWOW_USESKILL_FAIL_LEVEL);
+                isTargetChecked = true; // Works on silenced allies
+                break;
         }
         int32 inf = 0;
         if ((skill->Inf & ROWOW_INF_ATTACK_SKILL) != 0 || ((skill->Inf & ROWOW_INF_SELF_SKILL) != 0 && skill->Inf2[ROWOW_INF2_NOTARGETSELF] == true)) // Casted through combo.
@@ -856,9 +1041,11 @@ SpellCastResult ROWOWMod::SkillCastEndCheck(Unit* src, Unit* target, WorldLocati
             inf |= (skill->Inf2[ROWOW_INF2_PARTYONLY] == true ? ROWOW_BCT_PARTY : 0) | (skill->Inf2[ROWOW_INF2_GUILDONLY] == true ? ROWOW_BCT_GUILD : 0);
             inf &= ~ROWOW_BCT_NEUTRAL; // Remove neutral targets (but allow enemy if skill is designed to be so)
         }
-        if (inf != 0 && BattleCheckTarget(src, target, inf) <= 0)
+        if (isTargetChecked == false && inf != 0 && BattleCheckTarget(src, target, inf) <= 0)
             return fail(ROWOW_USESKILL_FAIL_LEVEL);
-        // (Fog Wall's 75% failure of offensive skills, status)
+        // Fogwall makes all offensive-type targetted skills fail at 75%
+        if ((inf & ROWOW_BCT_ENEMY) != 0 && GetSCE(target, ROWOW_SC_FOGWALL) != nullptr && urand(0, 99) < 75)
+            return fail(ROWOW_USESKILL_FAIL_LEVEL);
     }
     if (StatusCheckSkillUse(src, target, skillID, 1) == false)
         return fail(ROWOW_USESKILL_FAIL_MAX);
@@ -879,6 +1066,12 @@ void ROWOWMod::SkillCastEnd(Unit* src, Unit* target, WorldLocation const* dest, 
     uint64 tick = GetTick();
     if (target == nullptr)
         target = src;
+    if (ud->IsSkillTimer == true && skillID != ROWOW_SKILL_SA_CASTCANCEL)
+    {
+        ud->IsSkillTimer = false;
+        if (sd != nullptr && PCCheckSkill(sd, ROWOW_SKILL_SA_FREECAST) > 0)
+            StatusCalcBL(sd, std::bitset<ROWOW_SCB_MAX>().set(ROWOW_SCB_SPEED).set(ROWOW_SCB_ASPD)); // restore original walk speed
+    }
     if (sd != nullptr)
         SkillConsumeRequirement(sd, skillID, skillLevel, 1);
 
@@ -925,8 +1118,25 @@ void ROWOWMod::SkillCastEnd(Unit* src, Unit* target, WorldLocation const* dest, 
     }
     // (unit_set_walkdelay: WoW's movement isn't held after a cast)
 
-    if (SkillGetCastType(skillID) == ROWOW_CAST_GROUND)
+    if (skillID == ROWOW_SKILL_PF_SPIDERWEB)
     {
+        // These should become skill_castend_pos: Spider Web goes on a random cell its splash away from the target (its own cell when none)
+        int32 targetX = 0, targetY = 0;
+        GetUnitCell(target, targetX, targetY);
+        int32 splash = skill->SplashArea[ROWOWSkill::GetLevelIndex(skillLevel)];
+        int32 x = targetX + splash, y = targetY + splash;
+        if (splash != 0 && MapRandomDir(target, x, y) == false)
+        {
+            x = targetX;
+            y = targetY;
+        }
+        ud->SkillZ = target->GetPositionZ();
+        SkillCastendPos2(src, x, y, skillID, skillLevel, tick, 0);
+    }
+    else if (SkillGetCastType(skillID) == ROWOW_CAST_GROUND || (skill->Inf & ROWOW_INF_TRAP_SKILL) != 0)
+    {
+        // A ground skill at its spot.  A skill aimed at a trap (Remove Trap, Spring Trap) is cast at the trap's cell too: a WoW client can't
+        // pick a skill unit (rAthena's BL_SKILL target), so the skill takes the trap on the cell it's cast at
         int32 x = 0, y = 0;
         if (dest != nullptr)
             GetWorldCell(src->GetMapId(), dest->GetPositionX(), dest->GetPositionY(), x, y);
@@ -939,8 +1149,17 @@ void ROWOWMod::SkillCastEnd(Unit* src, Unit* target, WorldLocation const* dest, 
         SkillCastendNoDamageID(src, target, skillID, skillLevel, tick, 0);
     else
         SkillCastendDamageID(src, target, skillID, skillLevel, tick, 0);
+
+    // A song started while performing keeps Adaptation from ending it for 3 seconds (skill_blockpc_start)
+    if (sd != nullptr && skill->Inf2[ROWOW_INF2_ISSONG] == true && GetSCE(src, ROWOW_SC_DANCING) != nullptr)
+        ud->CooldownEndTimesBySkillID[ROWOW_SKILL_BD_ADAPTATION] = tick + 3000;
     ud->SkillID = 0;
     ud->SkillLevel = 0;
+    if (sd != nullptr && skillID != ROWOW_SKILL_SA_ABRACADABRA) // they just set the data so leave it as it is.[Inkfish]
+    {
+        ud->SkillItemID = 0;
+        ud->SkillItemLevel = 0;
+    }
 }
 
 void ROWOWMod::UnitSkillCastCancel(Unit* bl, int32 type)
@@ -965,18 +1184,33 @@ void ROWOWMod::UnitSkillCastCancel(Unit* bl, int32 type)
     ud->CanActTime = GetTick();
     ud->SkillID = 0;
     ud->SkillLevel = 0;
+    ud->IsSkillTimer = false;
     bl->InterruptSpell(CURRENT_GENERIC_SPELL, false, false);
+    if (bl->IsPlayer() == true && PCCheckSkill(bl, ROWOW_SKILL_SA_FREECAST) > 0)
+        StatusCalcBL(bl, std::bitset<ROWOW_SCB_MAX>().set(ROWOW_SCB_SPEED).set(ROWOW_SCB_ASPD)); // restore original walk speed
+}
+
+void ROWOWMod::UpdateSkillCastMove(Player* player)
+{
+    // unit_walktoxy: a player's walk while its skill timer runs is refused but with Free Cast.  A WoW client walks anyway, so walking stops
+    // the cast, from the player's update
+    ROWOWSkillUnitData const* ud = player->CustomData.Get<ROWOWSkillUnitData>("ROWOWSkillUnitData");
+    if (ud == nullptr || ud->IsSkillTimer == false || player->isMoving() == false || PCCheckSkill(player, ROWOW_SKILL_SA_FREECAST) > 0)
+        return;
+    UnitSkillCastCancel(player, 0);
 }
 
 ROWOWSkillCondition ROWOWMod::SkillGetRequirement(Player* sd, uint16 skillID, uint16 skillLevel) const
 {
-    // skill_get_requirement: what a skill level needs and uses up, with the bonuses and statuses that change it.  (Encore, the soul linker
-    // spirits, Kaina, the Monk combo costs and the gemstone savers of the Mistress card come with their jobs and statuses)
+    // skill_get_requirement: what a skill level needs and uses up, with the bonuses and statuses that change it; Encore's dance costs half.
+    // (The soul linker spirits and Kaina come with their jobs)
     ROWOWSkillCondition req;
     ROWOWSkill const* skill = GetSkill(skillID);
     ROWOWStatus const* status = GetROStatus(sd);
     if (sd == nullptr || skill == nullptr || status == nullptr)
         return req;
+    if (GetSkillUnitData(sd)->SkillItemID == skillID)
+        return req; // Item skills and Hocus-Pocus don't have requirements.[Inkfish]
     skillLevel = uint16(std::clamp<int32>(skillLevel, 1, ROWOW_MAX_SKILL_LEVEL));
     int32 levelIndex = skillLevel - 1;
 
@@ -988,6 +1222,9 @@ ROWOWSkillCondition ROWOWMod::SkillGetRequirement(Player* sd, uint16 skillID, ui
         req.HP += int32(sd->GetMaxHealth()) * (-hpRate) / 100;
 
     req.SP = skill->SPCost[levelIndex];
+    ROWOWSkillUnitData const* ud = GetSkillUnitData(sd);
+    if (ud->SkillIDOld == ROWOW_SKILL_BD_ENCORE && skillID == ud->SkillIDDance)
+        req.SP /= 2;
     int32 spRate = skill->SPRateCost[levelIndex];
     if (spRate > 0)
         req.SP += int32(sd->GetPower(POWER_MANA)) * spRate / 100;
@@ -1035,12 +1272,43 @@ ROWOWSkillCondition ROWOWMod::SkillGetRequirement(Player* sd, uint16 skillID, ui
         itemIndex++;
     }
 
-    // Check for cost reductions due to skills & SCs.  (The rest of the switch come with their jobs, R6.5)
+    // Check for cost reductions due to skills & SCs.  (The other jobs' cases come with them)
+    ROWOWStatusChange const* sc = GetStatusChange(static_cast<Unit const*>(sd));
     switch (skillID)
     {
         case ROWOW_SKILL_MC_MAMMONITE:
             if (PCCheckSkill(sd, ROWOW_SKILL_BS_UNFAIRLYTRICK) > 0)
                 req.Zeny -= req.Zeny * 10 / 100;
+            break;
+        case ROWOW_SKILL_MO_CHAINCOMBO:
+        case ROWOW_SKILL_MO_COMBOFINISH:
+        case ROWOW_SKILL_CH_TIGERFIST:
+        case ROWOW_SKILL_CH_CHAINCRUSH:
+            if (ROWOWStatusChangeEntry const* spirit = sc != nullptr ? sc->GetSCE(ROWOW_SC_SPIRIT) : nullptr; spirit != nullptr && spirit->Val2 == ROWOW_SKILL_SL_MONK)
+                req.SP = 2; // Monk Spirit makes monk/champion combo skills cost 2 SP regardless of original cost
+            break;
+        case ROWOW_SKILL_MO_BODYRELOCATION:
+            if (sc != nullptr && sc->HasSCE(ROWOW_SC_EXPLOSIONSPIRITS) == true)
+                req.SpiritBall = 0;
+            break;
+        case ROWOW_SKILL_MO_EXTREMITYFIST:
+            if (sc != nullptr)
+            {
+                if (sc->HasSCE(ROWOW_SC_BLADESTOP) == true)
+                    req.SpiritBall--;
+                else if (ROWOWStatusChangeEntry const* combo = sc->GetSCE(ROWOW_SC_COMBO))
+                {
+                    switch (combo->Val1)
+                    {
+                        case ROWOW_SKILL_MO_COMBOFINISH:
+                            req.SpiritBall = 4;
+                            break;
+                        case ROWOW_SKILL_CH_CHAINCRUSH: // It should consume whatever is left as long as it's at least 1.
+                            req.SpiritBall = PCGetSpiritBall(sd) != 0 ? PCGetSpiritBall(sd) : 1;
+                            break;
+                    }
+                }
+            }
             break;
     }
     return req;
@@ -1048,11 +1316,233 @@ ROWOWSkillCondition ROWOWMod::SkillGetRequirement(Player* sd, uint16 skillID, ui
 
 bool ROWOWMod::SkillCheckConditionCastBegin(Player* sd, uint16 skillID, uint16 skillLevel)
 {
-    // skill_check_condition_castbegin: the state, statuses, equipment, HP, weapon, SP, zeny and spheres a skill needs to start.  GM rights
-    // don't skip it here.  (The skill-specific checks of its switch come with their skills, R6.5; falcons, water cells and the status
-    // requirements come with their systems)
+    // skill_check_condition_castbegin: the state, statuses, equipment, HP, weapon, SP, zeny and spheres a skill needs to start; an item's
+    // skill (Abracadabra's pick) needs nothing.  GM rights don't skip it here.  (The other jobs' checks of its switch come with them; water
+    // cells come with their system)
+    ROWOWSkillUnitData* ud = GetSkillUnitData(sd);
+    if (ud->SkillItemID == skillID)
+    {
+        ud->IsAbraFlag = false; // Hocus-Pocus was used. [Inkfish]
+        return true;
+    }
     ROWOWSkillCondition require = SkillGetRequirement(sd, skillID, skillLevel);
     ROWOWStatus const* status = GetROStatus(sd);
+
+    // An ensemble needs its partner beside the performer
+    ROWOWSkill const* skill = GetSkill(skillID);
+    if (skill != nullptr && skill->Inf2[ROWOW_INF2_ISENSEMBLE] == true)
+    {
+        uint16 partnerLevel = skillLevel;
+        if (SkillCheckPCPartner(sd, skillID, partnerLevel, 1, 0) < 1)
+        {
+            ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_LEVEL);
+            return false;
+        }
+    }
+
+    // The checks of the skills themselves.  (The other jobs' cases of its switch come with them)
+    switch (skillID)
+    {
+        case ROWOW_SKILL_BD_ADAPTATION:
+        {
+            // Only while performing, and not in its last moments (rAthena's own check of the time left: val3>>16 of the seconds left, which is
+            // always 0, so only a dance shorter than Adaptation's Duration2 refuses it)
+            ROWOWStatusChangeEntry const* dancing = GetSCE(sd, ROWOW_SC_DANCING);
+            if (dancing == nullptr)
+            {
+                ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_LEVEL);
+                return false;
+            }
+            int64 time = 1000 * int64(dancing->Val3 >> 16);
+            if (SkillGetTime(uint16(dancing->Val1 & 0xFFFF), uint16(dancing->Val1 >> 16)) - time < SkillGetTime2(skillID, skillLevel))
+            {
+                ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_LEVEL);
+                return false;
+            }
+            break;
+        }
+        case ROWOW_SKILL_HT_POWER:
+        {
+            // Beast Strafing only right after Double Strafe (its combo)
+            ROWOWStatusChangeEntry const* combo = GetSCE(sd, ROWOW_SC_COMBO);
+            if (combo == nullptr || combo->Val1 != ROWOW_SKILL_AC_DOUBLE)
+                return false;
+            break;
+        }
+        case ROWOW_SKILL_CG_HERMODE:
+        {
+            // Wand of Hermode only near a warp (npc_check_areanpc's warps, here the map's teleport area triggers)
+            int32 sdX = 0, sdY = 0;
+            GetUnitCell(sd, sdX, sdY);
+            int32 range = skill->SplashArea[ROWOWSkill::GetLevelIndex(skillLevel)];
+            bool isNearWarp = false;
+            for (auto const& teleportByTriggerID : sObjectMgr->GetAllAreaTriggerTeleports())
+            {
+                AreaTrigger const* areaTrigger = sObjectMgr->GetAreaTrigger(teleportByTriggerID.first);
+                if (areaTrigger == nullptr || areaTrigger->map != sd->GetMapId())
+                    continue;
+                int32 warpX = 0, warpY = 0;
+                GetWorldCell(sd->GetMapId(), areaTrigger->x, areaTrigger->y, warpX, warpY);
+                int32 warpReach = int32(std::max({ areaTrigger->radius, areaTrigger->length / 2.0f, areaTrigger->width / 2.0f }) / CellSize);
+                if (std::max(std::abs(warpX - sdX), std::abs(warpY - sdY)) <= range + warpReach)
+                {
+                    isNearWarp = true;
+                    break;
+                }
+            }
+            if (isNearWarp == false)
+            {
+                ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_LEVEL);
+                return false;
+            }
+            break;
+        }
+        case ROWOW_SKILL_CG_MOONLIT:
+        {
+            // Check there's no wall in the range+1 area around the caster. [Skotlex]
+            int32 range = skill->SplashArea[ROWOWSkill::GetLevelIndex(skillLevel)] + 1;
+            int32 size = range * 2 + 1;
+            int32 sdX = 0, sdY = 0;
+            GetUnitCell(sd, sdX, sdY);
+            ROWOWMapGrid const* mapGrid = GetMapGrid(sd->GetMapId());
+            for (int32 i = 0; mapGrid != nullptr && i < size * size; i++)
+            {
+                int32 x = sdX + (i % size - range);
+                int32 y = sdY + (i / size - range);
+                if ((x != sdX || y != sdY) && IsCellNoPass(sd, *mapGrid, x, y) == true)
+                {
+                    ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_LEVEL);
+                    return false;
+                }
+            }
+            break;
+        }
+        case ROWOW_SKILL_SA_CASTCANCEL:
+            if (ud->SkillID == 0)
+            {
+                ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_LEVEL);
+                return false;
+            }
+            break;
+        case ROWOW_SKILL_PF_HPCONVERSION:
+            if (sd->GetPower(POWER_MANA) >= sd->GetMaxPower(POWER_MANA))
+                return false; // Unusable when at full SP.
+            break;
+        case ROWOW_SKILL_MO_CALLSPIRITS:
+            if (PCGetSpiritBall(sd) >= skillLevel)
+            {
+                ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_LEVEL);
+                return false;
+            }
+            break;
+        case ROWOW_SKILL_MO_FINGEROFFENSIVE:
+            // Throws the spheres there are, up to the level's
+            if (PCGetSpiritBall(sd) > 0 && PCGetSpiritBall(sd) < require.SpiritBall)
+                ud->SpiritBallOld = require.SpiritBall = PCGetSpiritBall(sd);
+            else
+                ud->SpiritBallOld = require.SpiritBall;
+            break;
+        case ROWOW_SKILL_MO_CHAINCOMBO:
+        {
+            ROWOWStatusChange const* sc = GetStatusChange(static_cast<Unit const*>(sd));
+            if (sc == nullptr)
+                return false;
+            if (sc->HasSCE(ROWOW_SC_BLADESTOP) == true)
+                break;
+            if (ROWOWStatusChangeEntry const* combo = sc->GetSCE(ROWOW_SC_COMBO); combo != nullptr && combo->Val1 == ROWOW_SKILL_MO_TRIPLEATTACK)
+                break;
+            return false;
+        }
+        case ROWOW_SKILL_MO_COMBOFINISH:
+        {
+            ROWOWStatusChangeEntry const* combo = GetSCE(sd, ROWOW_SC_COMBO);
+            if (combo == nullptr || combo->Val1 != ROWOW_SKILL_MO_CHAINCOMBO)
+                return false;
+            break;
+        }
+        case ROWOW_SKILL_CH_TIGERFIST:
+        {
+            // In Pre-Renewal Tiger Fist can be used after Combo Finish or after Chain Crush Combo
+            ROWOWStatusChangeEntry const* combo = GetSCE(sd, ROWOW_SC_COMBO);
+            if (combo == nullptr || (combo->Val1 != ROWOW_SKILL_MO_COMBOFINISH && combo->Val1 != ROWOW_SKILL_CH_CHAINCRUSH))
+                return false;
+            break;
+        }
+        case ROWOW_SKILL_CH_CHAINCRUSH:
+        {
+            ROWOWStatusChangeEntry const* combo = GetSCE(sd, ROWOW_SC_COMBO);
+            if (combo == nullptr || (combo->Val1 != ROWOW_SKILL_MO_COMBOFINISH && combo->Val1 != ROWOW_SKILL_CH_TIGERFIST))
+                return false;
+            break;
+        }
+        case ROWOW_SKILL_MO_EXTREMITYFIST:
+        {
+            ROWOWStatusChange const* sc = GetStatusChange(static_cast<Unit const*>(sd));
+            if (sc != nullptr && sc->HasSCE(ROWOW_SC_BLADESTOP) == true)
+                break;
+            if (ROWOWStatusChangeEntry const* combo = sc != nullptr ? sc->GetSCE(ROWOW_SC_COMBO) : nullptr)
+            {
+                if (combo->Val1 != ROWOW_SKILL_MO_COMBOFINISH && combo->Val1 != ROWOW_SKILL_CH_CHAINCRUSH)
+                    return false;
+            }
+            else if (sd->HasUnitState(UNIT_STATE_ROOT) == true || (sc != nullptr && sc->Cant.Move == true))
+            {
+                // Placed here as ST_MOVE_ENABLE should not apply if rooted or on a combo. [Skotlex]
+                ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_LEVEL);
+                return false;
+            }
+            ud->SpiritBallOld = PCGetSpiritBall(sd);
+            break;
+        }
+        case ROWOW_SKILL_PR_BENEDICTIO:
+        {
+            uint16 partnerLevel = skillLevel;
+            if (SkillCheckPCPartner(sd, skillID, partnerLevel, 1, 0) < 2)
+            {
+                ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_LEVEL);
+                return false;
+            }
+            break;
+        }
+        case ROWOW_SKILL_PR_REDEMPTIO:
+        {
+            // Needs exp_cost_redemptio percent of the level's exp
+            ROWOWIdentity const* identity = GetIdentity(sd);
+            uint64 exp = PCNextBaseExp(*identity);
+            if (BattleConfig.ExpCostRedemptio != 0 && exp > 0 && uint64(identity->BaseExp) * 100 / exp < uint64(BattleConfig.ExpCostRedemptio))
+            {
+                ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_LEVEL); // Not enough exp.
+                return false;
+            }
+            break;
+        }
+        case ROWOW_SKILL_HP_BASILICA:
+            if (GetSCE(sd, ROWOW_SC_BASILICA) == nullptr)
+            {
+                // When castbegin, needs 7x7 clear area (no walls, and no one but the caster)
+                int32 range = SkillGetUnitLayoutType(skillID, skillLevel) + 1;
+                int32 size = range * 2 + 1;
+                int32 sdX = 0, sdY = 0;
+                GetUnitCell(sd, sdX, sdY);
+                ROWOWMapGrid const* mapGrid = GetMapGrid(sd->GetMapId());
+                for (int32 i = 0; mapGrid != nullptr && i < size * size; i++)
+                {
+                    int32 x = sdX + (i % size - range);
+                    int32 y = sdY + (i / size - range);
+                    if ((x != sdX || y != sdY) && IsCellNoPass(sd, *mapGrid, x, y) == true)
+                    {
+                        ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL);
+                        return false;
+                    }
+                }
+                if (MapForEachInRange(sd, range, [sd](Unit* bl) { return bl != sd && (bl->IsPlayer() == true || bl->IsAlive() == true) ? 1 : 0; }) > 0) // skill_count_wos
+                {
+                    ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL);
+                    return false;
+                }
+            }
+            break;
+    }
 
     // check state required
     switch (require.State)
@@ -1071,6 +1561,13 @@ bool ROWOWMod::SkillCheckConditionCastBegin(Player* sd, uint16 skillID, uint16 s
         case ROWOW_ST_PECO:
             // A Peco (pc_isriding; ST_RIDING's dragon is a third job's)
             if (PCIsRiding(sd) == false)
+            {
+                ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_LEVEL);
+                return false;
+            }
+            break;
+        case ROWOW_ST_FALCON:
+            if (PCIsFalcon(sd) == false)
             {
                 ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_LEVEL);
                 return false;
@@ -1098,6 +1595,10 @@ bool ROWOWMod::SkillCheckConditionCastBegin(Player* sd, uint16 skillID, uint16 s
             }
             break;
     }
+
+    // check the status required (Sight Rasher's is checked later, in skill_check_condition_castend)
+    if (skillID != ROWOW_SKILL_WZ_SIGHTRASHER && SkillCheckConditionSCRequired(sd, skillID, require) == false)
+        return false;
 
     // Check for equipped item(s)
     for (uint32 itemID : require.EquipItemIDs)
@@ -1131,9 +1632,9 @@ bool ROWOWMod::SkillCheckConditionCastBegin(Player* sd, uint16 skillID, uint16 s
         ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_MONEY);
         return false;
     }
-    if (require.SpiritBall > 0)
+    if (require.SpiritBall > 0 && PCGetSpiritBall(sd) < require.SpiritBall)
     {
-        // (Spirit spheres come with the Monk, R6.5: until then a skill needing them can't start)
+        // Skills that require spirit spheres
         ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_SPIRITS, require.SpiritBall);
         return false;
     }
@@ -1142,8 +1643,15 @@ bool ROWOWMod::SkillCheckConditionCastBegin(Player* sd, uint16 skillID, uint16 s
 
 bool ROWOWMod::SkillCheckConditionCastEnd(Player* sd, uint16 skillID, uint16 skillLevel)
 {
-    // skill_check_condition_castend: HP, weapon, ammo and items, checked when the cast ends.  (The summon counts of its switch come with
-    // their skills, R6.5)
+    // skill_check_condition_castend: HP, weapon, ammo, items and Sight Rasher's status, checked when the cast ends, and what B.S. Sacramenti's
+    // partners give.  (The summon counts of its switch come with their skills)
+    if (GetSkillUnitData(sd)->SkillItemID == skillID)
+        return true; // Casting finished (Item skill or Hocus-Pocus)
+
+    // perform skill-specific checks (and actions)
+    if (skillID == ROWOW_SKILL_PR_BENEDICTIO)
+        SkillCheckPCPartner(sd, skillID, skillLevel, 1, 1);
+
     ROWOWSkillCondition require = SkillGetRequirement(sd, skillID, skillLevel);
     ROWOWStatus const* status = GetROStatus(sd);
     if (require.HP > 0 && int32(sd->GetHealth()) <= require.HP)
@@ -1195,18 +1703,23 @@ bool ROWOWMod::SkillCheckConditionCastEnd(Player* sd, uint16 skillID, uint16 ski
             return false;
         }
     }
+    // check the status required
+    if (skillID == ROWOW_SKILL_WZ_SIGHTRASHER && SkillCheckConditionSCRequired(sd, skillID, require) == false)
+        return false;
     return true;
 }
 
 void ROWOWMod::SkillConsumeRequirement(Player* sd, uint16 skillID, uint16 skillLevel, int16 type)
 {
-    // skill_consume_requirement: type&1 the HP, SP and zeny when the cast ends, type&2 the items once the skill went off.  SP is the form's
-    // mana, and zeny its money.  (Spirit spheres come with the Monk, R6.5)
+    // skill_consume_requirement: type&1 the HP, SP, spheres and zeny when the cast ends, type&2 the items once the skill went off.  SP is the
+    // form's mana, and zeny its money
     ROWOWSkillCondition require = SkillGetRequirement(sd, skillID, skillLevel);
     if ((type & 1) != 0)
     {
+        ROWOWSkillUnitData* ud = GetSkillUnitData(sd);
         switch (skillID)
         {
+            case ROWOW_SKILL_CG_TAROTCARD: // TarotCard will consume sp in skill_cast_nodamage_id [Inkfish]
             case ROWOW_SKILL_MC_IDENTIFY:
             case ROWOW_SKILL_SM_AUTOBERSERK:
             case ROWOW_SKILL_BD_ADAPTATION:
@@ -1217,9 +1730,16 @@ void ROWOWMod::SkillConsumeRequirement(Player* sd, uint16 skillID, uint16 skillL
                 if (ROWOWStatusChangeEntry const* spirit = GetSCE(sd, ROWOW_SC_SPIRIT); spirit != nullptr && spirit->Val2 == ROWOW_SKILL_SL_PRIEST)
                     require.SP *= 5;
                 break;
+            case ROWOW_SKILL_MO_KITRANSLATION:
+                // Spiritual Bestowment only uses spirit sphere when giving it to someone
+                require.SpiritBall = 0;
+                [[fallthrough]];
             default:
-                if (GetSkillUnitData(sd)->IsAutoCast == true)
+                if (ud->IsAutoCast == true)
                     require.SP = 0; // An autospell costs no SP
+                // Need to remove remembered Encore skill to prevent permanent halving of SP cost
+                if (ud->SkillIDOld == ROWOW_SKILL_BD_ENCORE && skillID == ud->SkillIDDance)
+                    ud->SkillIDOld = 0;
                 break;
         }
 
@@ -1230,6 +1750,8 @@ void ROWOWMod::SkillConsumeRequirement(Player* sd, uint16 skillID, uint16 skillL
             sd->SetHealth(sd->GetHealth() > uint32(require.HP) ? sd->GetHealth() - uint32(require.HP) : 1);
         if (require.SP > 0)
             sd->SetPower(POWER_MANA, sd->GetPower(POWER_MANA) > uint32(require.SP) ? sd->GetPower(POWER_MANA) - uint32(require.SP) : 0);
+        if (require.SpiritBall > 0) // Skills that require spirit spheres to use
+            PCDelSpiritBall(sd, require.SpiritBall, 0);
         if (require.Zeny > 0)
             sd->ModifyMoney(-std::min<int32>(require.Zeny, int32(std::min<uint32>(sd->GetMoney(), INT32_MAX))));
     }
@@ -1557,8 +2079,9 @@ int64 ROWOWMod::SkillAttack(int32 attackType, Unit* src, Unit* dsrc, Unit* bl, u
     // skill_attack: one skill hit on one target, worked out (battle_calc_attack), delivered after the attack motion (battle_delay_damage),
     // then the knockback.  flag&0xFFF goes to battle_calc_attack (the targets of a split skill, Magnum Break's distance), flag&4 skips the
     // knockback, and the SD_ flags are how the hit shows.  A ground skill's unit (dsrcUnit) is the damage's source as rAthena's BL_SKILL dsrc:
-    // its hits aren't delayed and knock back from its cell.  A devoted target's Crusader takes the hit.  (Magic reflection, Magic Rod, Kaite
-    // and the other statuses that turn a hit, Plagiarism's copy, the combos and the post-damage skills of its switches come with them)
+    // its hits aren't delayed and knock back from its cell.  A devoted target's Crusader takes the hit, Magic Rod takes in a spell, a Monk's
+    // hit opens its combo (skill_combo), and Double Casting may cast a bolt again.  (Magic reflection, Kaite and the other statuses that turn a
+    // hit, Plagiarism's copy and the other jobs' post-damage skills of its switches come with them)
     if (skillID > 0 && skillLevel == 0)
         return 0;
     ROWOWStatus const* tstatus = GetROStatus(bl);
@@ -1579,13 +2102,38 @@ int64 ROWOWMod::SkillAttack(int32 attackType, Unit* src, Unit* dsrc, Unit* bl, u
             return 0;
     }
 
+    // When Gravitational Field is active, damage can only be dealt by Gravitational Field and Autospells
+    ROWOWSkillUnitData const* sud = GetSkillUnitData(src);
+    if (ROWOWStatusChangeEntry const* gravitation = src->IsPlayer() == true ? GetSCE(src, ROWOW_SC_GRAVITATION) : nullptr; gravitation != nullptr &&
+        gravitation->Val3 == ROWOW_BCT_SELF && skillID != ROWOW_SKILL_HW_GRAVITATION && sud->IsAutoCast == false)
+        return 0;
+
     ROWOWDamage dmg = BattleCalcAttack(attackType, src, bl, skillID, skillLevel, flag & 0xFFF);
 
     // If the damage source is a unit, the damage is not delayed
     if (isUnitSource == true)
         dmg.AMotion = 0;
+
+    // Magic Rod takes in a magic skill cast at its user (not a ground skill's unit): no damage, and SP back from the skill's cost.  (Magic
+    // reflection, the Maya card's bMagicDamageReturn and Kaite, comes with the item bonuses and the Soul Linker)
+    if ((dmg.Flag & ROWOW_BF_MAGIC) != 0 && isUnitSource == false)
+    {
+        if (ROWOWStatusChangeEntry const* magicRod = GetSCE(bl, ROWOW_SC_MAGICROD))
+        {
+            ROWOWSkill const* castSkill = GetSkill(skillID);
+            int32 sp = castSkill != nullptr ? castSkill->SPCost[ROWOWSkill::GetLevelIndex(skillLevel)] : 0;
+            ClifSkillNoDamage(bl, bl, ROWOW_SKILL_SA_MAGICROD, uint16(magicRod->Val1));
+            dmg.Damage = 0;
+            dmg.Damage2 = 0;
+            dmg.DmgLv = ROWOW_ATK_MISS; // This will prevent skill additional effect from taking effect. [Skotlex]
+            sp = sp * magicRod->Val2 / 100;
+            if (skillID == ROWOW_SKILL_WZ_WATERBALL && skillLevel > 1)
+                sp = sp / ((skillLevel | 1) * (skillLevel | 1)); // Estimate SP cost of a single water-ball
+            StatusHeal(bl, 0, sp, 2, bl, 0);
+        }
+    }
     int64 damage = dmg.Damage + dmg.Damage2;
-    if (damage < dmg.Div)
+    if (damage < dmg.Div && skillID != ROWOW_SKILL_CH_PALMSTRIKE)
         dmg.BlewCount = 0; // only pushback when it hit for other
 
     // Blessing and Increase AGI on someone who's undead from Change Undead (a player; the skill class makes the attack) do 1 damage
@@ -1601,6 +2149,9 @@ int64 ROWOWMod::SkillAttack(int32 attackType, Unit* src, Unit* dsrc, Unit* bl, u
     ROWOWStatusChange const* tsc = GetStatusChange(static_cast<Unit const*>(bl));
     if (tsc != nullptr && tsc->IsEmpty() == true)
         tsc = nullptr;
+
+    // combo handling
+    SkillCombo(src, isUnitSource == true ? nullptr : dsrc, bl, skillID, skillLevel, tick);
 
     // Instant damage
     if (dmg.AMotion == 0)
@@ -1645,15 +2196,29 @@ int64 ROWOWMod::SkillAttack(int32 attackType, Unit* src, Unit* dsrc, Unit* bl, u
         if (Player* sd = src->ToPlayer())
             SkillOnSkillUsage(sd, bl, skillID, tick);
     // (battle_drain, the drain bonuses of weapon skills, come with the deferred drain bonuses)
+
+    // Double Casting: a chance of the same bolt again (flag&2 keeps the second from casting a third)
+    if ((flag & 2) == 0)
+    {
+        switch (skillID)
+        {
+            case ROWOW_SKILL_MG_COLDBOLT:
+            case ROWOW_SKILL_MG_FIREBOLT:
+            case ROWOW_SKILL_MG_LIGHTNINGBOLT:
+                if (ROWOWStatusChangeEntry const* sce = GetSCE(src, ROWOW_SC_DOUBLECAST); sce != nullptr && int32(urand(0, 99)) < sce->Val2)
+                    SkillAddTimerSkill(src, tick + uint64(dmg.AMotion), bl->GetGUID(), 0, 0, skillID, skillLevel, ROWOW_BF_MAGIC, flag | 2);
+                break;
+        }
+    }
     return damage;
 }
 
-void ROWOWMod::SkillAttackBlow(Unit* src, Unit* dsrc, Unit* target, uint8 blewcount, uint16 skillID, uint16 /*skillLevel*/, int64 /*damage*/, uint64 /*tick*/,
+void ROWOWMod::SkillAttackBlow(Unit* src, Unit* dsrc, Unit* target, uint8 blewcount, uint16 skillID, uint16 /*skillLevel*/, int64 damage, uint64 /*tick*/,
     int32 /*flag*/, ROWOWSkillUnit const* dsrcUnit)
 {
     // skill_attack_blow: knockback the target on skill_attack.  Only knockback if it's still alive, otherwise a "ghost" is left behind.
-    // [Skotlex]  Reflected spells do not bounce back (src == dsrc since it only happens for direct skills).  (Knuckle Arrow's and the third
-    // jobs' cases come with them)
+    // [Skotlex]  Reflected spells do not bounce back (src == dsrc since it only happens for direct skills).  Phantasmic Arrow doesn't push
+    // what it kills.  (Knuckle Arrow's and the third jobs' cases come with them)
     if (blewcount == 0 || (target == dsrc && dsrcUnit == nullptr) || target->IsAlive() == false)
         return;
     int8 dir = -1; // Default direction
@@ -1689,6 +2254,10 @@ void ROWOWMod::SkillAttackBlow(Unit* src, Unit* dsrc, Unit* target, uint8 blewco
             dir = int8((srcX == targetX && srcY == targetY) ? UnitGetDir(target) : GetRODirection(float(srcX - targetX), float(srcY - targetY)));
             break;
         }
+        case ROWOW_SKILL_HT_PHANTASMIC: // issue #1378
+            if (int64(target->GetHealth()) - damage <= 0)
+                return;
+            break;
     }
     SkillBlown(dsrc, target, blewcount, dir, ROWOW_BLOWN_NONE, dsrcUnit);
 }
@@ -1699,6 +2268,8 @@ bool ROWOWMod::IsCellNoPass(Unit const* unit, ROWOWMapGrid const& mapGrid, int32
     // step to (a wall or a cliff), or something solid stands between (the same rules as a monster's cell path)
     float x = mapGrid.GetCellCenterWorldX(cellY);
     float y = mapGrid.GetCellCenterWorldY(cellX);
+    if (MapGetCellIceWall(unit->GetMap(), cellX, cellY) == true)
+        return true; // An Ice Wall cell is a wall
     float distance = std::sqrt((x - unit->GetPositionX()) * (x - unit->GetPositionX()) + (y - unit->GetPositionY()) * (y - unit->GetPositionY()));
     float unitZ = unit->GetPositionZ();
     float groundZ = unit->GetMap()->GetHeight(unit->GetPhaseMask(), x, y, unitZ + ConfigMoveMaxRisePerStep * distance + 0.5f, true, ConfigMoveFloorSearchDistance);
@@ -1848,6 +2419,10 @@ int32 ROWOWMod::SkillBlown(Unit* src, Unit* target, int32 count, int8 dir, int32
         float nextZ = map->GetHeight(target->GetPhaseMask(), nextX, nextY, z + KnockbackMaxStepHeight + 0.5f, true, KnockbackMaxStepHeight * 2.0f + 1.0f);
         if (nextZ <= INVALID_HEIGHT || std::fabs(nextZ - z) > KnockbackMaxStepHeight)
             break;
+        int32 nextCellX = 0, nextCellY = 0;
+        GetWorldCell(target->GetMapId(), nextX, nextY, nextCellX, nextCellY);
+        if (MapGetCellIceWall(map, nextCellX, nextCellY) == true)
+            break; // An Ice Wall stops it like a wall
         if (map->isInLineOfSight(x, y, z + ROWOW_MOVE_LINE_OF_SIGHT_HEIGHT, nextX, nextY, nextZ + ROWOW_MOVE_LINE_OF_SIGHT_HEIGHT, target->GetPhaseMask(),
             LINEOFSIGHT_CHECK_VMAP, VMAP::ModelIgnoreFlags::Nothing) == false)
             break;
@@ -1871,6 +2446,8 @@ bool ROWOWMod::UnitMovePos(Unit* bl, int32 x, int32 y)
     float cellX = 0, cellY = 0;
     GetCellWorldPosition(bl->GetMapId(), x, y, cellX, cellY);
     Map* map = bl->GetMap();
+    if (MapGetCellIceWall(map, x, y) == true)
+        return false; // An Ice Wall's cell can't be stood on
     float z = map->GetHeight(bl->GetPhaseMask(), cellX, cellY, bl->GetPositionZ() + ROWOW_SKILL_CELL_GROUND_SEARCH_HEIGHT, true, ROWOW_SKILL_CELL_GROUND_SEARCH_DISTANCE);
     if (z <= INVALID_HEIGHT || map->isInLineOfSight(bl->GetPositionX(), bl->GetPositionY(), bl->GetPositionZ() + ROWOW_MOVE_LINE_OF_SIGHT_HEIGHT, cellX, cellY,
         z + ROWOW_MOVE_LINE_OF_SIGHT_HEIGHT, bl->GetPhaseMask(), LINEOFSIGHT_CHECK_VMAP, VMAP::ModelIgnoreFlags::Nothing) == false)
@@ -1884,7 +2461,7 @@ int32 ROWOWMod::SkillAdditionalEffect(Unit* src, Unit* bl, uint16 skillID, uint1
 {
     // skill_additional_effect: what a hit does past its damage: the statuses the attacker's items give (bAddEff, bAddEffOnSkill, which go
     // through even when the damage was blocked), the skill's own, Enchant Poison's and Enchant Deadly Poison's on a normal attack, equipment
-    // breaking and the autospells.  (Blitz Beat's and Gank's normal attack triggers and the Taekwon stances come with their jobs)
+    // breaking, the autospells and a falcon's Blitz Beat.  (Gank's normal attack trigger and the Taekwon stances come with their jobs)
     if (skillID > 0 && skillLevel == 0)
         return 0; // don't forget auto attacks! - celest
     if (dmgLv < ROWOW_ATK_BLOCK) // Don't apply effect if miss.
@@ -1938,6 +2515,23 @@ int32 ROWOWMod::SkillAdditionalEffect(Unit* src, Unit* bl, uint16 skillID, uint1
         impl->ApplyAdditionalEffects(src, bl, skillLevel, tick, attackType, dmgLv);
 
     // Normal attacks (no skill used); a normal attack that is a skill is splash damage. [Inkfish]
+    if (skillID == 0 && (attackType & ROWOW_BF_SKILL) == 0)
+    {
+        // Automatic trigger of Blitz Beat: a Hunter with its falcon and a bow, LUK/3 in 100 (+0.1), at the level its job level allows (1 a
+        // ten levels), its damage split among the targets (SD_LEVEL).  Its look is the skill's own (clif_skill_damage), the falcon flying
+        // at the target.  (Gank's steal comes with the Rogue)
+        if (Player* sd = src->ToPlayer())
+        {
+            int32 skill = PCCheckSkill(sd, ROWOW_SKILL_HT_BLITZBEAT);
+            if (PCIsFalcon(sd) == true && sstatus->WeaponType == ROWOW_WEAPON_TYPE_BOW && skill > 0 && int32(urand(0, 999)) <= sstatus->Stats[ROWOW_STAT_LUK] * 10 / 3 + 1)
+            {
+                int32 rate = (int32(GetIdentity(sd)->JobLevel) + 9) / 10;
+                uint16 blitzLevel = uint16(skill < rate ? skill : rate);
+                ClifSkillNoDamage(src, bl, ROWOW_SKILL_HT_BLITZBEAT, blitzLevel);
+                SkillCastendDamageID(src, bl, ROWOW_SKILL_HT_BLITZBEAT, blitzLevel, tick, ROWOW_SD_LEVEL);
+            }
+        }
+    }
     if (skillID == 0 && (attackType & ROWOW_BF_SKILL) == 0 && sc != nullptr)
     {
         // Enchant Poison gives a chance to poison attacked enemies (don't use sc_start since chance comes in 1/10000 rate)
@@ -2001,7 +2595,7 @@ int32 ROWOWMod::SkillAdditionalEffect(Unit* src, Unit* bl, uint16 skillID, uint1
 int32 ROWOWMod::SkillCounterAdditionalEffect(Unit* src, Unit* bl, uint16 skillID, uint16 skillLevel, int32 attackType, uint64 tick)
 {
     // skill_counter_additional_effect: what being hit does to the attacker (the statuses the target's items give when hit, bAddEffWhenHit),
-    // what a kill gives it, the counter autospells and the autobonuses.  (Soul Drain comes with the Wizard)
+    // what a kill gives it (Soul Drain, the gain bonuses), the counter autospells and the autobonuses
     if (skillID > 0 && skillLevel == 0)
         return 0; // don't forget auto attacks! - celest
     ROWOWStatus const* dstStatus = GetROStatus(bl);
@@ -2026,8 +2620,20 @@ int32 ROWOWMod::SkillCounterAdditionalEffect(Unit* src, Unit* bl, uint16 skillID
     if (ROWOWSkillImpl const* impl = GetSkillImpl(skillID))
         impl->ApplyCounterAdditionalEffects(src, bl, skillLevel, tick, attackType);
 
-    // HP and SP gained on a kill
+    // Soul Drain should only work on targetted spells [Skotlex]: a magic skill's kill gives SP back by the monster's level
     Player* sd = src->ToPlayer();
+    ROWOWSkill const* skill = GetSkill(skillID);
+    int32 rate = 0;
+    if (sd != nullptr && skill != nullptr && (attackType & ROWOW_BF_MAGIC) != 0 && bl->IsAlive() == false &&
+        (skill->Inf & (ROWOW_INF_GROUND_SKILL | ROWOW_INF_SELF_SKILL)) == 0 && (rate = PCCheckSkill(sd, ROWOW_SKILL_HW_SOULDRAIN)) > 0)
+    {
+        if (sd->IsSitState() == true)
+            sd->SetStandState(UNIT_STAND_STATE_STAND); // Character stuck in attacking animation while 'sitting' fix. [Skotlex]
+        if (ROWOWStatus const* tstatus = GetROStatus(bl))
+            StatusHeal(src, 0, int64(tstatus->Level) * (95 + 15 * rate) / 100, 2, src, 0);
+    }
+
+    // HP and SP gained on a kill
     if (sd != nullptr && bl->IsAlive() == false)
     {
         int32 sp = 0, hp = 0;
@@ -2264,6 +2870,267 @@ bool ROWOWMod::BattleCheckComa(Unit const* src, Unit const* target, int32 attack
         }
     }
     return rate > 0 && int32(urand(0, 9999)) < rate;
+}
+
+int32 ROWOWMod::SkillAddTimerSkill(Unit* src, uint64 tick, ObjectGuid targetGUID, int32 x, int32 y, uint16 skillID, uint16 skillLevel, int32 type, int32 flag)
+{
+    // skill_addtimerskill: queued on the caster and run by an event of the caster's at the tick, so in its own update; 1 when it has no room
+    if (src->IsInWorld() == false)
+        return 0;
+    ROWOWSkillUnitData* ud = GetSkillUnitData(src);
+    if (ud->TimerSkills.size() >= ROWOW_MAX_SKILLTIMERSKILL)
+        return 1;
+    ROWOWSkillTimerSkill timerSkill;
+    timerSkill.ID = ++ud->NextTimerSkillID;
+    timerSkill.Tick = tick;
+    timerSkill.TargetGUID = targetGUID;
+    timerSkill.SkillID = skillID;
+    timerSkill.SkillLevel = skillLevel;
+    timerSkill.MapID = src->GetMapId();
+    timerSkill.X = x;
+    timerSkill.Y = y;
+    timerSkill.Type = type;
+    timerSkill.Flag = flag;
+    ud->TimerSkills.push_back(timerSkill);
+    uint32 timerSkillID = timerSkill.ID;
+    src->m_Events.AddEventAtOffset([this, src, timerSkillID]()
+    {
+        SkillTimerSkill(src, timerSkillID);
+    }, Milliseconds(std::max<int64>(1, int64(tick) - int64(GetTick()))));
+    return 0;
+}
+
+void ROWOWMod::SkillTimerSkill(Unit* src, uint32 timerSkillID)
+{
+    // skill_timerskill: a queued part of a skill, if it's still queued (skill_cleartimerskill drops them), the caster and its target are on
+    // one map, the caster is alive and the target too (but for Water Ball's, which go on).  Jupitel Thunder's hit, Water Ball's balls (each
+    // uses up one of its cells while the target lives), Frost Joker's and Scream's effect around where they were used, Lex Divina's silence
+    // and Status Recovery's blindness on the undead (type their rate), Raging Palm Strike's hit, and the default: the skill's attack again
+    // (Double Casting's bolt).  (No pre-renewal skill queues one on a cell)
+    ROWOWSkillUnitData* ud = GetSkillUnitData(src);
+    auto timerSkillIter = std::find_if(ud->TimerSkills.begin(), ud->TimerSkills.end(), [timerSkillID](ROWOWSkillTimerSkill const& timerSkill)
+    {
+        return timerSkill.ID == timerSkillID;
+    });
+    if (timerSkillIter == ud->TimerSkills.end())
+        return;
+    ROWOWSkillTimerSkill skl = *timerSkillIter;
+    ud->TimerSkills.erase(timerSkillIter);
+    if (src->IsInWorld() == false || skl.TargetGUID.IsEmpty() == true)
+        return; // Source not on Map
+    Unit* target = ObjectAccessor::GetUnit(*src, skl.TargetGUID);
+    if (target == nullptr || target->IsInWorld() == false || src->GetMap() != target->GetMap())
+        return; // Target offline, not on Map, or on another map
+    if (src->IsAlive() == false)
+        return; // Caster is Dead
+    if (target->IsAlive() == false && skl.SkillID != ROWOW_SKILL_WZ_WATERBALL)
+        return;
+    uint64 tick = GetTick();
+    switch (skl.SkillID)
+    {
+        case ROWOW_SKILL_WZ_WATERBALL:
+        case ROWOW_SKILL_WZ_JUPITEL:
+        {
+            // Get the next waterball cell to consume
+            std::shared_ptr<ROWOWSkillUnitGroup> unitGroup;
+            int32 unitIndex = -1;
+            if (skl.SkillID == ROWOW_SKILL_WZ_WATERBALL)
+            {
+                ROWOWSkillUnitLayout const* layout = SkillGetUnitLayout(skl.SkillID, skl.SkillLevel, src, skl.X, skl.Y);
+                for (int32 i = skl.Type; i >= 0 && i < int32(layout->Cells.size()); i++)
+                {
+                    unitGroup = MapFindSkillUnitOnCell(src, skl.X + layout->Cells[i].first, skl.Y + layout->Cells[i].second, ROWOW_SKILL_WZ_WATERBALL, 0, unitIndex);
+                    if (unitGroup != nullptr)
+                        break;
+                }
+            }
+            // Official behaviour is to hit as long as there is a line of sight, regardless of distance
+            if (skl.Type > 0 && target->IsAlive() == true && src->IsWithinLOSInMap(target) == true)
+            {
+                // Apply canact delay here to prevent hacks (unlimited casting)
+                if (ROWOWStatus const* status = GetROStatus(src))
+                    ud->CanActTime = std::max<uint64>(tick + uint64(status->AttackMotion), ud->CanActTime);
+                SkillAttack(ROWOW_BF_MAGIC, src, src, target, skl.SkillID, skl.SkillLevel, tick, skl.Flag);
+            }
+            if (unitGroup != nullptr && target->IsAlive() == true && src->IsAlive() == true)
+            {
+                // Consume unit for next waterball.  (The timer goes on until the target dies, even with no line of sight now)
+                SkillDelUnit(src->GetMap(), *unitGroup, unitIndex);
+                SkillAddTimerSkill(src, tick + ROWOW_TIMERSKILL_INTERVAL, skl.TargetGUID, skl.X, skl.Y, skl.SkillID, skl.SkillLevel, skl.Type + 1, skl.Flag);
+            }
+            break;
+        }
+        case ROWOW_SKILL_BA_FROSTJOKER:
+        case ROWOW_SKILL_DC_SCREAM:
+        {
+            // skill_frostjoke_scream on everyone around (enemies and the party alike, the caster aside), but the invisible
+            ROWOWSkill const* skill = GetSkill(skl.SkillID);
+            int32 range = skill != nullptr ? skill->SplashArea[ROWOWSkill::GetLevelIndex(skl.SkillLevel)] : 0;
+            MapForEachInArea(src, skl.X - range, skl.Y - range, skl.X + range, skl.Y + range, [this, src, &skl, tick](Unit* bl)
+            {
+                if (src == bl || bl->IsAlive() == false)
+                    return 0;
+                // It has been reported that Scream/Joke works the same regardless of woe-setting. [Skotlex]
+                if (BattleCheckTarget(src, bl, ROWOW_BCT_ENEMY | ROWOW_BCT_PARTY) > 0)
+                    SkillAdditionalEffect(src, bl, skl.SkillID, skl.SkillLevel, ROWOW_BF_MISC, ROWOW_ATK_DEF, tick);
+                return 0;
+            });
+            break;
+        }
+        case ROWOW_SKILL_PR_LEXDIVINA:
+            if (src->IsPlayer() == false)
+            {
+                // Monsters use the default duration when casting Lex Divina
+                SCStart(src, target, ROWOW_SC_SILENCE, skl.Type, skl.SkillLevel, SkillGetTime2(StatusDBGetSkill(ROWOW_SC_SILENCE), 1));
+                break;
+            }
+            SCStart(src, target, ROWOW_SC_SILENCE, skl.Type, skl.SkillLevel, SkillGetTime2(skl.SkillID, skl.SkillLevel));
+            break;
+        case ROWOW_SKILL_PR_STRECOVERY:
+            SCStart(src, target, ROWOW_SC_BLIND, skl.Type, skl.SkillLevel, SkillGetTime2(skl.SkillID, skl.SkillLevel));
+            break;
+        case ROWOW_SKILL_CH_PALMSTRIKE:
+        {
+            // A hidden target or caster isn't hit, only pushed back
+            ROWOWStatusChange const* tsc = GetStatusChange(static_cast<Unit const*>(target));
+            ROWOWStatusChange const* sc = GetStatusChange(static_cast<Unit const*>(src));
+            if ((tsc != nullptr && (tsc->Option & ROWOW_OPTION_HIDE) != 0) || (sc != nullptr && (sc->Option & ROWOW_OPTION_HIDE) != 0))
+            {
+                ROWOWSkill const* skill = GetSkill(skl.SkillID);
+                SkillBlown(src, target, skill != nullptr ? skill->Knockback[ROWOWSkill::GetLevelIndex(skl.SkillLevel)] : 0, -1, ROWOW_BLOWN_NONE);
+                break;
+            }
+            SkillAttack(skl.Type, src, src, target, skl.SkillID, skl.SkillLevel, tick, skl.Flag);
+            break;
+        }
+        default:
+            SkillAttack(skl.Type, src, src, target, skl.SkillID, skl.SkillLevel, tick, skl.Flag);
+            break;
+    }
+}
+
+int32 ROWOWMod::SkillIsCombo(uint16 skillID)
+{
+    // skill_is_combo: 1 a normal combo, 2 one that prioritizes auto-target even if val2 is set (no pre-renewal skill)
+    switch (skillID)
+    {
+        case ROWOW_SKILL_MO_CHAINCOMBO:
+        case ROWOW_SKILL_MO_COMBOFINISH:
+        case ROWOW_SKILL_CH_TIGERFIST:
+        case ROWOW_SKILL_CH_CHAINCRUSH:
+        case ROWOW_SKILL_MO_EXTREMITYFIST:
+        case ROWOW_SKILL_TK_TURNKICK:
+        case ROWOW_SKILL_TK_STORMKICK:
+        case ROWOW_SKILL_TK_DOWNKICK:
+        case ROWOW_SKILL_TK_COUNTER:
+        case ROWOW_SKILL_TK_JUMPKICK:
+        case ROWOW_SKILL_HT_POWER:
+            return 1;
+    }
+    return 0;
+}
+
+void ROWOWMod::SkillCombo(Unit* src, Unit* dsrc, Unit* bl, uint16 skillID, uint16 /*skillLevel*/, uint64 tick)
+{
+    // skill_combo: a skill hit ends the combo it was used in (but a ground skill's unit's), then a Monk's or Champion's skill opens the next
+    // window when the next skill is learned and the spheres it needs are there: SC_COMBO from the after-cast delay's end (canact_tick, never
+    // less than the attack motion), val1 the skill, val2 0 (the next skill auto-targets).  The window's 300 ms are SC_COMBO's own.  A Hunter's
+    // Double Strafe opens Beast Strafing for 2 seconds.  (The Taekwon kicks' combos come with the Taekwon)
+    int64 duration = 0; // Set to duration the user can use a combo skill or 1 for aftercast delay of pre-skill
+    int32 nodelay = 0; // Set to 1 for no walk/attack delay, set to 2 for no walk delay
+    int32 targetID = int32(bl->GetGUID().GetCounter()); // Set to 0 if combo skill should not autotarget
+
+    // End previous combo state after skill is invoked
+    if (GetSCE(src, ROWOW_SC_COMBO) != nullptr && src == dsrc) // Ground skills are exceptions. [Inkfish]
+        StatusChangeEnd(src, ROWOW_SC_COMBO);
+
+    // start new combo
+    if (Player* sd = src->ToPlayer())
+    {
+        // player only
+        int32 spheres = PCGetSpiritBall(sd);
+        bool hasFury = GetSCE(sd, ROWOW_SC_EXPLOSIONSPIRITS) != nullptr;
+        switch (skillID)
+        {
+            case ROWOW_SKILL_MO_TRIPLEATTACK:
+                if (PCCheckSkill(sd, ROWOW_SKILL_MO_CHAINCOMBO) > 0)
+                {
+                    duration = 1;
+                    targetID = 0; // Will target current auto-target instead
+                }
+                break;
+            case ROWOW_SKILL_MO_CHAINCOMBO:
+                if (PCCheckSkill(sd, ROWOW_SKILL_MO_COMBOFINISH) > 0 && spheres >= 1)
+                {
+                    duration = 1;
+                    targetID = 0; // Will target current auto-target instead
+                }
+                break;
+            case ROWOW_SKILL_MO_COMBOFINISH:
+                if (PCCheckSkill(sd, ROWOW_SKILL_CH_TIGERFIST) > 0 && spheres >= 1)
+                {
+                    duration = 1;
+                    targetID = 0; // Will target current auto-target instead
+                }
+                else if (PCCheckSkill(sd, ROWOW_SKILL_CH_CHAINCRUSH) > 0 && spheres >= 2)
+                {
+                    duration = 1;
+                    targetID = 0;
+                }
+                else if (PCCheckSkill(sd, ROWOW_SKILL_MO_EXTREMITYFIST) > 0 && spheres >= 4 && hasFury == true)
+                {
+                    duration = 1;
+                    targetID = 0;
+                }
+                break;
+            case ROWOW_SKILL_CH_TIGERFIST:
+                if (PCCheckSkill(sd, ROWOW_SKILL_CH_CHAINCRUSH) > 0 && spheres >= 2)
+                {
+                    duration = 1;
+                    targetID = 0; // Will target current auto-target instead
+                }
+                break;
+            case ROWOW_SKILL_CH_CHAINCRUSH:
+                if (PCCheckSkill(sd, ROWOW_SKILL_MO_EXTREMITYFIST) > 0 && spheres >= 1 && hasFury == true)
+                {
+                    duration = 1;
+                    targetID = 0; // Will target current auto-target instead
+                }
+                else if (PCCheckSkill(sd, ROWOW_SKILL_CH_TIGERFIST) > 0 && spheres >= 1)
+                {
+                    duration = 1;
+                    targetID = 0;
+                }
+                break;
+            case ROWOW_SKILL_AC_DOUBLE:
+                // Double Strafe opens Beast Strafing for 2 seconds
+                if (PCCheckSkill(sd, ROWOW_SKILL_HT_POWER) > 0)
+                {
+                    duration = 2000;
+                    nodelay = 1; // Neither gives walk nor attack delay
+                    targetID = 0; // Does not need to be used on previous target
+                }
+                break;
+        }
+    }
+
+    if (duration != 0)
+    {
+        // Possible to chain
+        ROWOWSkillUnitData const* ud = GetSkillUnitData(src);
+        if (src->IsPlayer() == true && duration == 1)
+            duration = int64(ud->CanActTime) - int64(tick); // Auto calc duration
+        ROWOWStatus const* status = GetROStatus(src);
+        duration = std::max<int64>(status != nullptr ? status->AttackMotion : 0, duration); // Never less than aMotion
+        SCStart4(src, src, ROWOW_SC_COMBO, 100, skillID, targetID, nodelay, 0, duration);
+    }
+}
+
+void ROWOWMod::SkillClearTimerSkill(Unit* src)
+{
+    // skill_cleartimerskill: the caster's queued timer skills are dropped (it died or left its map); their events find nothing to run
+    if (ROWOWSkillUnitData* ud = src->CustomData.Get<ROWOWSkillUnitData>("ROWOWSkillUnitData"))
+        ud->TimerSkills.clear();
 }
 
 void ROWOWStatusSkillImpl::CastendNoDamageID(Unit* src, Unit* target, uint16 skillLevel, uint64 /*tick*/, int32& /*flag*/) const

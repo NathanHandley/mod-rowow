@@ -825,9 +825,11 @@ void ROWOWMod::PCJobChange(Player* player, uint16 jobID)
     }
     RefreshROForm(player);
 
-    // Remove peco/cart: the new job keeps them only with Riding and Pushcart.  (The falcon comes with the Hunter)
+    // Remove peco/cart/falcon: the new job keeps them only with Riding, Pushcart and Falconry Mastery
     if (PCCheckSkill(*identity, ROWOW_SKILL_KN_RIDING) == 0)
         PCSetRiding(player, false);
+    if (PCCheckSkill(*identity, ROWOW_SKILL_HT_FALCON) == 0)
+        PCSetFalcon(player, false);
     if (PCIsCartOn(player) == true && PCCheckSkill(*identity, ROWOW_SKILL_MC_PUSHCART) == 0)
         PCSetCart(player, 0);
 }

@@ -166,7 +166,7 @@ bool ROWOWMod::BuildCellPath(Creature* creature, ROWOWMapGrid const& mapGrid, fl
                     break;
                 }
             }
-            if (isVisited == true)
+            if (isVisited == true || MapGetCellIceWall(creature->GetMap(), nextCellX, nextCellY) == true) // An Ice Wall's cell is a wall
                 continue;
             float stepX = mapGrid.GetCellCenterWorldX(nextCellY);
             float stepY = mapGrid.GetCellCenterWorldY(nextCellX);
