@@ -18,6 +18,7 @@ void AddROWOWWorldScripts();
 void AddROWOWCreatureScripts();
 void AddROWOWPlayerScripts();
 void AddROWOWSkillSpellScripts();
+void AddROWOWIdentityScripts();
 
 void Addmod_rowowScripts()
 {
@@ -25,4 +26,5 @@ void Addmod_rowowScripts()
     AddROWOWCreatureScripts();
     AddROWOWPlayerScripts();
     AddROWOWSkillSpellScripts();
+    AddROWOWIdentityScripts();
 }

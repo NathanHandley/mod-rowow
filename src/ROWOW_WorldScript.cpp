@@ -41,11 +41,14 @@ public:
     void OnStartup() override
     {
         // Before the maps start updating, so the creature AIs only ever read it
+        ROWOW->LoadDataTables();
+        ROWOW->LoadCreatureMobData();
         ROWOW->LoadCreatureTemplateData();
         ROWOW->LoadIllusionData();
         ROWOW->LoadSkillEffectData();
         ROWOW->LoadSkillCellData();
         ROWOW->LoadMapGridData();
+        ROWOW->LoadIdentityData();
     }
 };
 
