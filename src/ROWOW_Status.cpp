@@ -50,14 +50,32 @@ namespace
     // item_db's ammo SubType names, by rAthena's e_ammo_type (AMMO_NONE has none)
     char const* const AmmoTypeNames[] = { "", "Arrow", "Dagger", "Bullet", "Shell", "Grenade", "Shuriken", "Kunai", "Cannonball", "Throwweapon" };
 
-    // item_db's Locations names, and the equipment positions (EQP_*) each is.  The costume and shadow positions are renewal's
+    // item_db's Locations names, and the equipment positions (EQP_*) each is.  The costume positions are for the post-renewal looks
     std::pair<char const*, uint32> const LocationNames[] =
     {
         { "Head_Low", ROWOW_EQUIP_POSITION_HEAD_LOW }, { "Right_Hand", ROWOW_EQUIP_POSITION_HAND_R }, { "Garment", ROWOW_EQUIP_POSITION_GARMENT },
         { "Left_Accessory", ROWOW_EQUIP_POSITION_ACC_L }, { "Armor", ROWOW_EQUIP_POSITION_ARMOR }, { "Left_Hand", ROWOW_EQUIP_POSITION_HAND_L },
         { "Shoes", ROWOW_EQUIP_POSITION_SHOES }, { "Right_Accessory", ROWOW_EQUIP_POSITION_ACC_R }, { "Head_Top", ROWOW_EQUIP_POSITION_HEAD_TOP },
         { "Head_Mid", ROWOW_EQUIP_POSITION_HEAD_MID }, { "Ammo", ROWOW_EQUIP_POSITION_AMMO },
+        { "Costume_Head_Top", ROWOW_EQUIP_POSITION_COSTUME_HEAD_TOP }, { "Costume_Head_Mid", ROWOW_EQUIP_POSITION_COSTUME_HEAD_MID },
+        { "Costume_Head_Low", ROWOW_EQUIP_POSITION_COSTUME_HEAD_LOW }, { "Costume_Garment", ROWOW_EQUIP_POSITION_COSTUME_GARMENT },
         { "Both_Hand", ROWOW_EQUIP_POSITION_HAND_R | ROWOW_EQUIP_POSITION_HAND_L }, { "Both_Accessory", ROWOW_EQUIP_POSITION_ACC_L | ROWOW_EQUIP_POSITION_ACC_R },
+    };
+
+    // item_db's Classes names (e_item_job), as the pre-renewal jobs use them
+    std::pair<char const*, uint8> const ItemClassNames[] =
+    {
+        { "Normal", ROWOW_ITEM_CLASS_NORMAL }, { "Upper", ROWOW_ITEM_CLASS_UPPER }, { "Baby", ROWOW_ITEM_CLASS_BABY },
+        { "All_Upper", ROWOW_ITEM_CLASS_UPPER }, { "All_Baby", ROWOW_ITEM_CLASS_BABY },
+    };
+
+    // item_db's Type names, by rAthena's e_item_types
+    std::pair<char const*, uint8> const ItemTypeNames[] =
+    {
+        { "Healing", ROWOW_ITEM_TYPE_HEALING }, { "Usable", ROWOW_ITEM_TYPE_USABLE }, { "Etc", ROWOW_ITEM_TYPE_ETC },
+        { "Armor", ROWOW_ITEM_TYPE_ARMOR }, { "Weapon", ROWOW_ITEM_TYPE_WEAPON }, { "Card", ROWOW_ITEM_TYPE_CARD },
+        { "Petegg", ROWOW_ITEM_TYPE_PETEGG }, { "Petarmor", ROWOW_ITEM_TYPE_PETARMOR }, { "Ammo", ROWOW_ITEM_TYPE_AMMO },
+        { "Delayconsume", ROWOW_ITEM_TYPE_DELAYCONSUME }, { "Cash", ROWOW_ITEM_TYPE_CASH },
     };
 
     // size_fix.yml's names for the sizes
@@ -157,6 +175,13 @@ namespace
     }
 }
 
+char const* const ROWOWItemJobNames[ROWOW_ITEM_JOB_COUNT] =
+{
+    "Novice", "Swordman", "Mage", "Archer", "Acolyte", "Merchant", "Thief", "Knight", "Priest", "Wizard", "Blacksmith", "Hunter",
+    "Assassin", "Crusader", "Monk", "Sage", "Rogue", "Alchemist", "BardDancer", "Taekwon", "StarGladiator", "SoulLinker", "Gunslinger",
+    "Ninja", "SuperNovice",
+};
+
 void ROWOWMod::LoadStatusData()
 {
     ItemsByItemTemplateID.clear();
@@ -235,6 +260,8 @@ void ROWOWMod::LoadStatusData()
         readValue("mvp_hp_rate", BattleConfig.MvpHPRate);
         readValue("monster_damage_delay_rate", BattleConfig.MonsterDamageDelayRate);
         readValue("area_size", BattleConfig.AreaSize);
+        readValue("item_use_interval", BattleConfig.ItemUseInterval);
+        readValue("ammo_unequip", BattleConfig.AmmoUnequip);
         BattleConfig.MultiLevelUp = multiLevelUp != 0;
         BattleConfig.MaxAspdAmotion = (2000 - maxAspd * 10) * 2; // As battle.cpp converts it after loading
     }
@@ -313,9 +340,13 @@ void ROWOWMod::LoadStatusData()
         }
     }
 
-    // What the status calculation and the normal attack read of the converted RO items
-    if (ROWOWDataTable const* itemTable = GetDataTable(ROWOW_DATA_TABLE_ITEM))
+    // What the RO rules read of the converted RO items (the post-renewal looks only when they were converted)
+    for (char const* itemTableName : { ROWOW_DATA_TABLE_ITEM, ROWOW_DATA_TABLE_ITEM_RENEWAL })
     {
+        ROWOWDataTable const* itemTable = GetDataTable(itemTableName);
+        if (itemTable == nullptr)
+            continue;
+        bool isRenewal = strcmp(itemTableName, ROWOW_DATA_TABLE_ITEM_RENEWAL) == 0;
         int32 idColumnIndex = itemTable->GetColumnIndex("Id");
         int32 typeColumnIndex = itemTable->GetColumnIndex("Type");
         int32 subTypeColumnIndex = itemTable->GetColumnIndex("SubType");
@@ -325,6 +356,14 @@ void ROWOWMod::LoadStatusData()
         int32 weaponLevelColumnIndex = itemTable->GetColumnIndex("WeaponLevel");
         int32 locationsColumnIndex = itemTable->GetColumnIndex("Locations");
         int32 scriptColumnIndex = itemTable->GetColumnIndex("Script");
+        int32 jobsColumnIndex = itemTable->GetColumnIndex("Jobs");
+        int32 classesColumnIndex = itemTable->GetColumnIndex("Classes");
+        int32 genderColumnIndex = itemTable->GetColumnIndex("Gender");
+        int32 equipLevelMinColumnIndex = itemTable->GetColumnIndex("EquipLevelMin");
+        int32 equipLevelMaxColumnIndex = itemTable->GetColumnIndex("EquipLevelMax");
+        int32 refineableColumnIndex = itemTable->GetColumnIndex("Refineable");
+        int32 flagsColumnIndex = itemTable->GetColumnIndex("Flags");
+        int32 delayColumnIndex = itemTable->GetColumnIndex("Delay");
         for (size_t rowIndex = 0; rowIndex < itemTable->Rows.size(); rowIndex++)
         {
             uint32 itemID = uint32(itemTable->GetInt(rowIndex, idColumnIndex, 0));
@@ -334,10 +373,81 @@ void ROWOWMod::LoadStatusData()
             ROWOWItem& item = ItemsByItemTemplateID[itemTemplateIDIter->second];
             item.ItemID = itemID;
             item.ItemTemplateID = itemTemplateIDIter->second;
-            std::string const& type = itemTable->GetCell(rowIndex, typeColumnIndex);
+            item.IsRenewal = isRenewal;
+            std::string type = itemTable->GetCell(rowIndex, typeColumnIndex);
+            if (type.empty() == true)
+                type = "Etc";
+            for (auto const& itemTypeName : ItemTypeNames)
+                if (type == itemTypeName.first)
+                    item.Type = itemTypeName.second;
             item.IsWeapon = type == "Weapon";
             item.IsArmor = type == "Armor";
             item.IsAmmo = type == "Ammo";
+            item.IsDelayConsume = item.Type == ROWOW_ITEM_TYPE_DELAYCONSUME;
+
+            // Jobs and Classes default to all.  A Jobs map lists the jobs that may (or with All, may not) use it
+            std::vector<std::pair<std::string, std::string>> jobFields = ROWOWDataTable::ParseMap(itemTable->GetCell(rowIndex, jobsColumnIndex));
+            if (jobFields.empty() == false)
+            {
+                item.JobMask = 0;
+                for (auto const& jobField : jobFields)
+                {
+                    if (jobField.first == "All")
+                    {
+                        item.JobMask = jobField.second == "true" ? ROWOW_ITEM_JOB_ALL : 0;
+                        continue;
+                    }
+                    for (int32 itemJobIndex = 0; itemJobIndex < ROWOW_ITEM_JOB_COUNT; itemJobIndex++)
+                    {
+                        if (jobField.first != ROWOWItemJobNames[itemJobIndex])
+                            continue;
+                        if (jobField.second == "true")
+                            item.JobMask |= uint64(1) << itemJobIndex;
+                        else
+                            item.JobMask &= ~(uint64(1) << itemJobIndex);
+                    }
+                }
+            }
+            std::vector<std::pair<std::string, std::string>> classFields = ROWOWDataTable::ParseMap(itemTable->GetCell(rowIndex, classesColumnIndex));
+            if (classFields.empty() == false)
+            {
+                item.ClassMask = 0;
+                for (auto const& classField : classFields)
+                {
+                    if (classField.first == "All")
+                    {
+                        item.ClassMask = classField.second == "true" ? ROWOW_ITEM_CLASS_ALL : 0;
+                        continue;
+                    }
+                    for (auto const& itemClassName : ItemClassNames)
+                    {
+                        if (classField.first != itemClassName.first)
+                            continue;
+                        if (classField.second == "true")
+                            item.ClassMask |= itemClassName.second;
+                        else
+                            item.ClassMask &= ~itemClassName.second;
+                    }
+                }
+            }
+            std::string const& gender = itemTable->GetCell(rowIndex, genderColumnIndex);
+            if (gender == "Female")
+                item.Gender = ROWOW_GENDER_FEMALE;
+            else if (gender == "Male")
+                item.Gender = ROWOW_GENDER_MALE;
+            item.EquipLevelMin = uint32(std::max<int64>(0, itemTable->GetInt(rowIndex, equipLevelMinColumnIndex, 0)));
+            item.EquipLevelMax = uint32(std::max<int64>(0, itemTable->GetInt(rowIndex, equipLevelMaxColumnIndex, 0)));
+            item.IsRefineable = itemTable->GetCell(rowIndex, refineableColumnIndex) == "true";
+            for (auto const& flagField : ROWOWDataTable::ParseMap(itemTable->GetCell(rowIndex, flagsColumnIndex)))
+            {
+                if (flagField.first == "Container")
+                    item.IsContainer = flagField.second == "true";
+                else if (flagField.first == "DeadBranch")
+                    item.IsDeadBranch = flagField.second == "true";
+            }
+            for (auto const& delayField : ROWOWDataTable::ParseMap(itemTable->GetCell(rowIndex, delayColumnIndex)))
+                if (delayField.first == "Duration")
+                    item.DelayDuration = uint32(std::max(0, atoi(delayField.second.c_str())));
             if (item.IsWeapon == true)
                 item.WeaponType = uint8(std::max(0, GetWeaponTypeByName(itemTable->GetCell(rowIndex, subTypeColumnIndex))));
             if (item.IsAmmo == true)
@@ -410,6 +520,9 @@ void ROWOWMod::CalculateIdentityStatus(Player* player, ROWOWIdentity& identity) 
     std::unordered_set<ObjectGuid::LowType> countedItemGUIDs;
     for (auto const& itemGUIDByEquipPosition : identity.ItemGUIDsByEquipPosition)
     {
+        // Costumes only change the look
+        if ((itemGUIDByEquipPosition.first & ROWOW_EQUIP_POSITION_COSTUME) != 0)
+            continue;
         if (countedItemGUIDs.insert(itemGUIDByEquipPosition.second).second == false)
             continue;
         ROWOWItem const* roItem = GetROItem(player->GetItemByGuid(ObjectGuid::Create<HighGuid::Item>(itemGUIDByEquipPosition.second)));

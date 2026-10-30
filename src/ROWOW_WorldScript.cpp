@@ -51,6 +51,7 @@ public:
         ROWOW->LoadIdentityData();
         ROWOW->LoadStatusData();
         ROWOW->LoadBattleData();
+        ROWOW->LoadItemScriptData();
     }
 };
 

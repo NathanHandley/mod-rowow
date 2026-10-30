@@ -28,6 +28,17 @@ using namespace std;
 
 // RO illusions: the job sprite displays (by weapon and shield held) and the headgear auras of a player transformed into an RO job
 
+namespace
+{
+    // The weapon sprite types (the converter's RoPlayerWeaponSprite IDs) shown for each RO weapon type, the first one the job has.  The
+    // classic sprites have none for instruments, whips and books
+    std::vector<uint32> const WeaponSpriteTypeIDsByWeaponType[ROWOW_WEAPON_TYPE_MAX] =
+    {
+        { }, { 1, 2 }, { 2, 1 }, { 3, 2 }, { 4, 5 }, { 5, 4 }, { 6, 7 }, { 7, 6 }, { 8 }, { 8 }, { 9 }, { 10 }, { 12, 11 }, { }, { }, { },
+        { 11, 12 }, { 13 }, { 14 }, { 16 }, { 15 }, { 14 }, { 17 }, { 9 },
+    };
+}
+
 void ROWOWMod::LoadIllusionData()
 {
     IllusionsBySpellID.clear();
@@ -127,32 +138,55 @@ ROWOWIllusion const* ROWOWMod::GetActiveIllusion(Player* player) const
 
 uint32 ROWOWMod::GetIllusionDisplayIDForPlayer(Player* player, ROWOWIllusion const& illusion) const
 {
-    // The weapon drawn while ready and attacking: the main hand's, or with none there the ranged slot's (in the RO form, the RO weapon
-    // worn).  A weapon this job has no sprite for shows no weapon
+    // The weapon drawn while ready and attacking: in the RO form the RO weapon worn in the right hand, otherwise the main hand's, or with
+    // none there the ranged slot's.  A weapon this job has no sprite for shows no weapon
     bool isInROForm = IsInROForm(player);
     uint32 weaponTypeID = 0;
-    Item* weaponItem = nullptr;
     if (isInROForm == true)
-        weaponItem = GetIdentityEquippedItem(player, ROWOW_EQUIP_POSITION_HAND_R);
+    {
+        ROWOWItem const* roWeapon = GetROItem(GetIdentityEquippedItem(player, ROWOW_EQUIP_POSITION_HAND_R));
+        if (roWeapon != nullptr && roWeapon->IsWeapon == true && roWeapon->WeaponType < ROWOW_WEAPON_TYPE_MAX)
+        {
+            for (uint32 weaponSpriteTypeID : WeaponSpriteTypeIDsByWeaponType[roWeapon->WeaponType])
+            {
+                if (illusion.DisplayIDsByKey.find(ROWOWIllusion::GetIllusionDisplayKey(weaponSpriteTypeID, 0)) != illusion.DisplayIDsByKey.end())
+                {
+                    weaponTypeID = weaponSpriteTypeID;
+                    break;
+                }
+            }
+        }
+    }
     else
     {
-        weaponItem = player->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_MAINHAND);
+        Item* weaponItem = player->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_MAINHAND);
         if (weaponItem == nullptr || weaponItem->GetTemplate()->Class != ITEM_CLASS_WEAPON)
             weaponItem = player->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_RANGED);
-    }
-    if (weaponItem != nullptr && weaponItem->GetTemplate()->Class == ITEM_CLASS_WEAPON)
-    {
-        auto weaponTypeIter = illusion.WeaponTypeIDsByItemSubclass.find(weaponItem->GetTemplate()->SubClass);
-        if (weaponTypeIter != illusion.WeaponTypeIDsByItemSubclass.end())
-            weaponTypeID = weaponTypeIter->second;
+        if (weaponItem != nullptr && weaponItem->GetTemplate()->Class == ITEM_CLASS_WEAPON)
+        {
+            auto weaponTypeIter = illusion.WeaponTypeIDsByItemSubclass.find(weaponItem->GetTemplate()->SubClass);
+            if (weaponTypeIter != illusion.WeaponTypeIDsByItemSubclass.end())
+                weaponTypeID = weaponTypeIter->second;
+        }
     }
 
-    // The shield drawn while ready: the off hand's (in the RO form, the RO shield worn).  An RO shield shows its own type (guard,
-    // buckler, shield or mirror shield), and any other the plain shield, each falling back to the types this job has
+    // The shield drawn while ready: in the RO form the RO shield worn in the left hand, otherwise the off hand's.  An RO shield shows its
+    // own type (guard, buckler, shield or mirror shield), and any other the plain shield, each falling back to the types this job has
     uint32 shieldTypeID = 0;
-    Item* offHandItem = isInROForm == true ? GetIdentityEquippedItem(player, ROWOW_EQUIP_POSITION_HAND_L) : player->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_OFFHAND);
-    if (offHandItem != nullptr && offHandItem->GetTemplate()->Class == ITEM_CLASS_ARMOR && offHandItem->GetTemplate()->SubClass == ITEM_SUBCLASS_ARMOR_SHIELD
-        && illusion.ShieldTypeIDs.empty() == false)
+    Item* offHandItem = nullptr;
+    bool isShield = false;
+    if (isInROForm == true)
+    {
+        offHandItem = GetIdentityEquippedItem(player, ROWOW_EQUIP_POSITION_HAND_L);
+        ROWOWItem const* roOffHand = GetROItem(offHandItem);
+        isShield = roOffHand != nullptr && roOffHand->IsArmor == true;
+    }
+    else
+    {
+        offHandItem = player->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_OFFHAND);
+        isShield = offHandItem != nullptr && offHandItem->GetTemplate()->Class == ITEM_CLASS_ARMOR && offHandItem->GetTemplate()->SubClass == ITEM_SUBCLASS_ARMOR_SHIELD;
+    }
+    if (isShield == true && illusion.ShieldTypeIDs.empty() == false)
     {
         uint32 wantedShieldTypeID = ROWOW_RO_SHIELD_TYPE_SHIELD;
         auto itemVisualIter = ItemVisualsByItemID.find(offHandItem->GetEntry());
@@ -202,10 +236,35 @@ void ROWOWMod::RefreshIllusionHeadgear(Player* player, ROWOWIllusion const* illu
     if (HeadgearSpellIDs.empty() == true)
         return;
 
-    // The headgear auras wanted: one for each headgear worn (the top one unless the helm is hidden), while in an RO illusion.  The RO
-    // form wears no WoW headgear (its own RO headgear comes with the RO equipment)
+    // The headgear auras wanted: one for each headgear worn, while in an RO illusion.  The RO form shows its RO headgear (upper, middle
+    // and lower, a costume over the one in its spot, and one covering several spots shown once, as its own spot), and otherwise the head,
+    // neck and shoulder items (the head unless the helm is hidden)
     uint32 wantedSpellIDs[3] = { 0, 0, 0 };
-    if (illusion != nullptr && IsInROForm(player) == false)
+    if (illusion != nullptr && IsInROForm(player) == true)
+    {
+        ROWOWIdentity* identity = GetIdentity(player);
+        for (bool isCostume : { false, true })
+        {
+            for (auto const& itemGUIDByEquipPosition : identity->ItemGUIDsByEquipPosition)
+            {
+                uint32 headgearPositions = isCostume == true ? (ROWOW_EQUIP_POSITION_COSTUME_HEAD_TOP | ROWOW_EQUIP_POSITION_COSTUME_HEAD_MID | ROWOW_EQUIP_POSITION_COSTUME_HEAD_LOW)
+                    : (ROWOW_EQUIP_POSITION_HEAD_TOP | ROWOW_EQUIP_POSITION_HEAD_MID | ROWOW_EQUIP_POSITION_HEAD_LOW);
+                if ((itemGUIDByEquipPosition.first & headgearPositions) == 0)
+                    continue;
+                Item* item = player->GetItemByGuid(ObjectGuid::Create<HighGuid::Item>(itemGUIDByEquipPosition.second));
+                if (item == nullptr)
+                    continue;
+                auto itemVisualIter = ItemVisualsByItemID.find(item->GetEntry());
+                if (itemVisualIter == ItemVisualsByItemID.end() || itemVisualIter->second.VisualType < ROWOW_ITEM_VISUAL_TYPE_HEADGEAR_TOP
+                    || itemVisualIter->second.VisualType > ROWOW_ITEM_VISUAL_TYPE_HEADGEAR_LOW)
+                    continue;
+                auto spellIter = HeadgearSpellIDsByKey.find(GetHeadgearKey(itemVisualIter->second.ViewID, itemVisualIter->second.VisualType, illusion->IsMale));
+                if (spellIter != HeadgearSpellIDsByKey.end())
+                    wantedSpellIDs[itemVisualIter->second.VisualType - ROWOW_ITEM_VISUAL_TYPE_HEADGEAR_TOP] = spellIter->second;
+            }
+        }
+    }
+    else if (illusion != nullptr)
     {
         uint8 headgearSlots[3] = { EQUIPMENT_SLOT_HEAD, EQUIPMENT_SLOT_NECK, EQUIPMENT_SLOT_SHOULDERS };
         for (uint8 i = 0; i < 3; ++i)

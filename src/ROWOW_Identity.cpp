@@ -49,19 +49,25 @@ namespace
     {
         uint16 JobID;
         char const* Name;
+        char const* ItemJobName; // The item_db Jobs name it uses items as (a transcendent job its first or second job's)
     };
 
     ROWOWJobName const PreRenewalJobNames[] =
     {
-        { 0, "Novice" }, { 1, "Swordman" }, { 2, "Mage" }, { 3, "Archer" }, { 4, "Acolyte" }, { 5, "Merchant" }, { 6, "Thief" },
-        { 7, "Knight" }, { 8, "Priest" }, { 9, "Wizard" }, { 10, "Blacksmith" }, { 11, "Hunter" }, { 12, "Assassin" },
-        { 14, "Crusader" }, { 15, "Monk" }, { 16, "Sage" }, { 17, "Rogue" }, { 18, "Alchemist" }, { 19, "Bard" }, { 20, "Dancer" },
-        { 23, "Super_Novice" }, { 24, "Gunslinger" }, { 25, "Ninja" },
-        { 4001, "Novice_High" }, { 4002, "Swordman_High" }, { 4003, "Mage_High" }, { 4004, "Archer_High" }, { 4005, "Acolyte_High" },
-        { 4006, "Merchant_High" }, { 4007, "Thief_High" }, { 4008, "Lord_Knight" }, { 4009, "High_Priest" }, { 4010, "High_Wizard" },
-        { 4011, "Whitesmith" }, { 4012, "Sniper" }, { 4013, "Assassin_Cross" }, { 4015, "Paladin" }, { 4016, "Champion" },
-        { 4017, "Professor" }, { 4018, "Stalker" }, { 4019, "Creator" }, { 4020, "Clown" }, { 4021, "Gypsy" },
-        { 4046, "Taekwon" }, { 4047, "Star_Gladiator" }, { 4049, "Soul_Linker" },
+        { 0, "Novice", "Novice" }, { 1, "Swordman", "Swordman" }, { 2, "Mage", "Mage" }, { 3, "Archer", "Archer" },
+        { 4, "Acolyte", "Acolyte" }, { 5, "Merchant", "Merchant" }, { 6, "Thief", "Thief" }, { 7, "Knight", "Knight" },
+        { 8, "Priest", "Priest" }, { 9, "Wizard", "Wizard" }, { 10, "Blacksmith", "Blacksmith" }, { 11, "Hunter", "Hunter" },
+        { 12, "Assassin", "Assassin" }, { 14, "Crusader", "Crusader" }, { 15, "Monk", "Monk" }, { 16, "Sage", "Sage" },
+        { 17, "Rogue", "Rogue" }, { 18, "Alchemist", "Alchemist" }, { 19, "Bard", "BardDancer" }, { 20, "Dancer", "BardDancer" },
+        { 23, "Super_Novice", "SuperNovice" }, { 24, "Gunslinger", "Gunslinger" }, { 25, "Ninja", "Ninja" },
+        { 4001, "Novice_High", "Novice" }, { 4002, "Swordman_High", "Swordman" }, { 4003, "Mage_High", "Mage" },
+        { 4004, "Archer_High", "Archer" }, { 4005, "Acolyte_High", "Acolyte" }, { 4006, "Merchant_High", "Merchant" },
+        { 4007, "Thief_High", "Thief" }, { 4008, "Lord_Knight", "Knight" }, { 4009, "High_Priest", "Priest" },
+        { 4010, "High_Wizard", "Wizard" }, { 4011, "Whitesmith", "Blacksmith" }, { 4012, "Sniper", "Hunter" },
+        { 4013, "Assassin_Cross", "Assassin" }, { 4015, "Paladin", "Crusader" }, { 4016, "Champion", "Monk" },
+        { 4017, "Professor", "Sage" }, { 4018, "Stalker", "Rogue" }, { 4019, "Creator", "Alchemist" }, { 4020, "Clown", "BardDancer" },
+        { 4021, "Gypsy", "BardDancer" }, { 4046, "Taekwon", "Taekwon" }, { 4047, "Star_Gladiator", "StarGladiator" },
+        { 4049, "Soul_Linker", "SoulLinker" },
     };
 
     std::string ToLower(std::string text)
@@ -174,6 +180,9 @@ void ROWOWMod::LoadIdentityData()
         job.JobID = jobName.JobID;
         job.Name = jobName.Name;
         job.IsUpper = jobName.JobID >= ROWOW_JOB_UPPER_START && jobName.JobID <= ROWOW_JOB_UPPER_END;
+        for (int32 itemJobIndex = 0; itemJobIndex < ROWOW_ITEM_JOB_COUNT; itemJobIndex++)
+            if (strcmp(ROWOWItemJobNames[itemJobIndex], jobName.ItemJobName) == 0)
+                job.ItemJobIndex = itemJobIndex;
         job.IllusionJobKey = ToLower(job.Name);
         if (job.IllusionJobKey.size() > 5 && job.IllusionJobKey.compare(job.IllusionJobKey.size() - 5, 5, "_high") == 0)
             job.IllusionJobKey.resize(job.IllusionJobKey.size() - 5); // Transcendent first jobs look like the first job
@@ -707,10 +716,12 @@ void ROWOWMod::RefreshROForm(Player* player)
     ROWOWIdentity* identity = GetIdentity(player);
     if (identity->IsInForm == false)
         return;
+    PCCheckItem(player, *identity);
     RefreshROFormValues(player, *identity);
     if (player->IsInWorld() == true)
         RefreshROFormLook(player);
     SendROStatusToClient(player);
+    SendEquipmentToClient(player, *identity, false);
 }
 
 void ROWOWMod::RefreshROFormLook(Player* player)

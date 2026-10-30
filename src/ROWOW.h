@@ -30,6 +30,8 @@
 #include <deque>
 #include <iterator>
 #include <map>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -41,6 +43,7 @@ class Player;
 class SpellInfo;
 class Unit;
 struct CalcDamageInfo;
+struct ROWOWScript;
 
 // Per creature template values from mod_rowow_creature_template
 struct ROWOWCreatureTemplate
@@ -161,6 +164,8 @@ struct ROWOWDataTable
 #define ROWOW_DATA_TABLE_PREFIX                     "mod_rowow_db_"
 #define ROWOW_DATA_TABLE_MOB                        "mod_rowow_db_mob"
 #define ROWOW_DATA_TABLE_ITEM                       "mod_rowow_db_item"
+#define ROWOW_DATA_TABLE_ITEM_RENEWAL               "mod_rowow_db_item_renewal"
+#define ROWOW_DATA_TABLE_ITEM_GROUP                 "mod_rowow_db_item_group"
 #define ROWOW_DATA_TABLE_JOB                        "mod_rowow_db_job"
 #define ROWOW_DATA_TABLE_STATPOINT                  "mod_rowow_db_statpoint"
 #define ROWOW_DATA_TABLE_MAP_FLAG                   "mod_rowow_db_map_flag"
@@ -174,6 +179,7 @@ struct ROWOWDataTable
 #define ROWOW_SPELL_BASE_LEVEL_UP                   200001  // RO's base level up effect (the angel and levelup.wav)
 #define ROWOW_SPELL_JOB_LEVEL_UP                    200002  // RO's job level up effect
 #define ROWOW_SPELL_WEAPON_HIT_SOUND_START          200003  // RO's weapon hit sounds, 200003-200010 (see GetWeaponHitSoundSpellID)
+#define ROWOW_SPELL_USE_ITEM                        200011  // What every usable RO item casts when used, which runs the item's RO script
 #define ROWOW_SPELL_ID_FIXED_END                    200099  // The fixed RO spells end here (generated ones follow)
 #define ROWOW_SPELL_ID_RO_START                     200000  // RO spells are 200000-248999
 #define ROWOW_SPELL_ID_RO_END                       248999
@@ -196,7 +202,27 @@ struct ROWOWDataTable
 #define ROWOW_EQUIP_POSITION_ACC_R                  0x0080
 #define ROWOW_EQUIP_POSITION_HEAD_TOP               0x0100
 #define ROWOW_EQUIP_POSITION_HEAD_MID               0x0200
+#define ROWOW_EQUIP_POSITION_COSTUME_HEAD_TOP       0x0400  // The costume positions only change the look (renewal's, for the post-renewal looks)
+#define ROWOW_EQUIP_POSITION_COSTUME_HEAD_MID       0x0800
+#define ROWOW_EQUIP_POSITION_COSTUME_HEAD_LOW       0x1000
+#define ROWOW_EQUIP_POSITION_COSTUME_GARMENT        0x2000
 #define ROWOW_EQUIP_POSITION_AMMO                   0x8000
+#define ROWOW_EQUIP_POSITION_ARMS                   (ROWOW_EQUIP_POSITION_HAND_R | ROWOW_EQUIP_POSITION_HAND_L)
+#define ROWOW_EQUIP_POSITION_ACC                    (ROWOW_EQUIP_POSITION_ACC_L | ROWOW_EQUIP_POSITION_ACC_R)
+#define ROWOW_EQUIP_POSITION_COSTUME                (ROWOW_EQUIP_POSITION_COSTUME_HEAD_TOP | ROWOW_EQUIP_POSITION_COSTUME_HEAD_MID | ROWOW_EQUIP_POSITION_COSTUME_HEAD_LOW | ROWOW_EQUIP_POSITION_COSTUME_GARMENT)
+
+// What pc_isequip says of equipping an item (e_ITEM_EQUIP_ACK)
+#define ROWOW_EQUIP_ACK_OK                          0
+#define ROWOW_EQUIP_ACK_FAIL                        1
+#define ROWOW_EQUIP_ACK_FAIL_LEVEL                  2
+
+// An RO item's own state (refine level, broken, unidentified) is in its permanent enchantment: the converter's fixed enchantments from
+// 8000 (RO_DBCID_SPELLITEMENCHANTMENT_ITEM_STATE_*), 8000 plus the refine level, plus 16 when broken, plus 32 when unidentified
+#define ROWOW_ITEM_STATE_ENCHANTMENT_START          8000
+#define ROWOW_ITEM_STATE_REFINE_MASK                0x0F
+#define ROWOW_ITEM_STATE_BROKEN                     16
+#define ROWOW_ITEM_STATE_UNIDENTIFIED               32
+#define ROWOW_ITEM_STATE_COUNT                      64
 
 // RO weapon types (rAthena's weapon_type in pc.hpp)
 #define ROWOW_WEAPON_TYPE_FIST                      0
@@ -355,11 +381,41 @@ struct ROWOWJob
     std::vector<uint64> JobExpByLevel;
     std::vector<std::array<int32, ROWOW_STAT_COUNT>> BonusStatsByJobLevel; // The job's stat bonus at each job level (index is the level less 1)
     int32 BaseASPDByWeaponType[ROWOW_WEAPON_TYPE_MAX]; // Attack motion with each weapon type, 2000 (no attacks) for those it can't use
+    int32 ItemJobIndex = -1; // The item_db Jobs name it uses items as (ROWOWItemJobNames), -1 for none
 
     ROWOWJob() { std::fill(std::begin(BaseASPDByWeaponType), std::end(BaseASPDByWeaponType), 2000); }
 };
 
-// What an RO item is to the RO rules (from mod_rowow_db_item), so far what the status calculation and the normal attack read
+// rAthena's item types (e_item_types)
+#define ROWOW_ITEM_TYPE_HEALING                     0
+#define ROWOW_ITEM_TYPE_USABLE                      2
+#define ROWOW_ITEM_TYPE_ETC                         3
+#define ROWOW_ITEM_TYPE_ARMOR                       4
+#define ROWOW_ITEM_TYPE_WEAPON                      5
+#define ROWOW_ITEM_TYPE_CARD                        6
+#define ROWOW_ITEM_TYPE_PETEGG                      7
+#define ROWOW_ITEM_TYPE_PETARMOR                    8
+#define ROWOW_ITEM_TYPE_AMMO                        10
+#define ROWOW_ITEM_TYPE_DELAYCONSUME                11
+#define ROWOW_ITEM_TYPE_CASH                        18
+
+// item_db's job classes (rAthena's e_item_job): which tiers of a job may use an item.  Pre-renewal has the normal and upper ones
+#define ROWOW_ITEM_CLASS_NORMAL                     0x01
+#define ROWOW_ITEM_CLASS_UPPER                      0x02
+#define ROWOW_ITEM_CLASS_BABY                       0x04
+#define ROWOW_ITEM_CLASS_ALL                        0xFF
+
+// item_db's genders (rAthena's e_sex)
+#define ROWOW_GENDER_FEMALE                         0
+#define ROWOW_GENDER_MALE                           1
+#define ROWOW_GENDER_BOTH                           2
+
+// item_db's Jobs names, whose bit in an item's JobMask is their index here (the jobs a pre-renewal job counts as, ROWOWJob::ItemJobIndex)
+#define ROWOW_ITEM_JOB_COUNT                        25
+#define ROWOW_ITEM_JOB_ALL                          ((uint64(1) << ROWOW_ITEM_JOB_COUNT) - 1)
+extern char const* const ROWOWItemJobNames[ROWOW_ITEM_JOB_COUNT];
+
+// What an RO item is to the RO rules (from mod_rowow_db_item, and mod_rowow_db_item_renewal for the post-renewal looks)
 #define ROWOW_AMMO_TYPE_NONE                        0
 #define ROWOW_AMMO_TYPE_ARROW                       1       // rAthena's e_ammo_type
 #define ROWOW_AMMO_TYPE_BULLET                      3
@@ -369,9 +425,22 @@ struct ROWOWItem
 {
     uint32 ItemID = 0; // item_db Id
     uint32 ItemTemplateID = 0;
+    uint8 Type = ROWOW_ITEM_TYPE_ETC; // ROWOW_ITEM_TYPE_*
     bool IsWeapon = false;
     bool IsArmor = false;
     bool IsAmmo = false;
+    bool IsRenewal = false; // A stat-less post-renewal look
+    bool IsDelayConsume = false; // Used up by what its script does, not when used (the Magnifier)
+    bool IsContainer = false; // A box, which needs room in the bags (item_db's Container flag)
+    bool IsDeadBranch = false;
+    bool IsRefineable = false;
+    uint64 JobMask = ROWOW_ITEM_JOB_ALL; // The item_db Jobs that may use it (bits by ROWOWItemJobNames)
+    uint8 ClassMask = ROWOW_ITEM_CLASS_ALL; // ROWOW_ITEM_CLASS_*
+    uint8 Gender = ROWOW_GENDER_BOTH;
+    uint32 EquipLevelMin = 0;
+    uint32 EquipLevelMax = 0;
+    uint32 DelayDuration = 0; // How long after using it before another of it can be used, in milliseconds
+    std::shared_ptr<ROWOWScript> UseScript; // A usable item's Script, compiled
     uint8 WeaponType = ROWOW_WEAPON_TYPE_FIST;
     uint8 AmmoType = ROWOW_AMMO_TYPE_NONE;
     uint32 Locations = 0; // ROWOW_EQUIP_POSITION_* where it's worn
@@ -380,6 +449,29 @@ struct ROWOWItem
     int32 Range = 0;
     int32 WeaponLevel = 0;
     int32 AmmoElement = -1; // The element an ammo's script gives its attacks (bonus bAtkEle), -1 for none.  The other scripts are R5's
+};
+
+// An item group (rAthena's item_group_db, by its name without IG_): its subgroups, each giving one item picked at random, or all of them
+#define ROWOW_ITEM_GROUP_ALGORITHM_SHAREDPOOL       0       // item_group_db's Algorithm (e_group_algorithm_type)
+#define ROWOW_ITEM_GROUP_ALGORITHM_ALL              1
+#define ROWOW_ITEM_GROUP_ALGORITHM_RANDOM           2
+#define ROWOW_ITEM_GROUP_ALGORITHM_DROP             3
+struct ROWOWItemGroupEntry
+{
+    uint32 ItemID = 0;
+    uint32 Rate = 0;
+    uint32 Given = 0; // How often a shared pool has given it out since it last filled up
+};
+struct ROWOWItemSubGroup
+{
+    uint8 Algorithm = ROWOW_ITEM_GROUP_ALGORITHM_SHAREDPOOL;
+    std::vector<ROWOWItemGroupEntry> Entries;
+    uint32 TotalRate = 0;
+    uint32 TotalGiven = 0;
+};
+struct ROWOWItemGroup
+{
+    std::map<uint32, ROWOWItemSubGroup> SubGroupsByID;
 };
 
 // The rAthena battle config values (conf/battle) the RO rules use (from mod_rowow_db_battle_config), with rAthena's defaults
@@ -439,6 +531,8 @@ struct ROWOWBattleConfig
     int32 MvpHPRate = 100;
     int32 MonsterDamageDelayRate = 100;
     int32 AreaSize = 14; // The cells around a unit it sees (area_size)
+    int32 ItemUseInterval = 100;
+    int32 AmmoUnequip = 1;
 };
 
 // An RO combatant's status (rAthena's status_data): a player's from status_calc_pc_sub, the stats with their bonuses and what follows
@@ -564,8 +658,13 @@ struct ROWOWIdentity : public DataMap::Base
     uint8 HairColor = 0;
     std::map<uint8, uint32> ActionsByButton; // The RO form's own action bars (packed action and type, as SMSG_ACTION_BUTTONS sends them)
     bool AreActionsChanged = false;
-    std::map<uint32, ObjectGuid::LowType> ItemGUIDsByEquipPosition; // The RO equipment worn
+    std::map<uint32, ObjectGuid::LowType> ItemGUIDsByEquipPosition; // The RO equipment worn (in the bags, as RO's inventory holds it)
     bool IsEquipmentChanged = false;
+    std::string SentEquipmentMessage; // What the client's RO interface was last told of the equipment
+    uint32 EquipmentCheckTimer = 0;
+    uint32 CanUseItemTime = 0; // canuseitem_tick: when the next item can be used (game time, milliseconds)
+    std::unordered_map<uint32, uint32> ItemDelayEndTimes; // By item_db Id: when each item with a reuse delay can be used again
+    bool IsIdentifyMenuOpen = false; // A Magnifier's list of items to appraise is up (menuskill_id MC_IDENTIFY)
 
     bool WasInFormAtLoad = false; // Saved in the form: logged out in the RO world, or the server stopped with the character in it
 
@@ -654,6 +753,10 @@ public:
     int32 SizeFixByWeaponType[ROWOW_WEAPON_TYPE_MAX][ROWOW_SIZE_COUNT] = { }; // size_fix.yml: each weapon type's damage against each size, in percent
     int32 AttrFix[ROWOW_ELEMENT_LEVEL_MAX][ROWOW_ELEMENT_COUNT][ROWOW_ELEMENT_COUNT] = { }; // attr_fix.yml: by defense element level, attack element and defense element
     std::unordered_map<uint32, ROWOWStatus> MobStatusesByMobID; // Each RO monster's status, as rAthena's mob_db loading leaves it
+    std::unordered_map<std::string, uint32> ItemIDsByAegisName; // Every converted RO item, by its lowercase AegisName
+    std::unordered_map<std::string, ROWOWItemGroup> ItemGroupsByName; // By the uppercase group name (IG_ without the prefix)
+    std::mutex ItemGroupSharedPoolMutex; // The shared pools' given counts are shared by every map thread
+    std::unordered_map<std::string, std::unordered_set<uint32>> MapIDsByMapFlag; // The RO maps with each map flag the item rules read
 
     void LoadConfigurationFile();
     void LoadDataTables();
@@ -804,6 +907,38 @@ public:
 
     // The RO item worn in an RO equipment position, or null
     Item* GetIdentityEquippedItem(Player* player, uint32 equipPosition) const;
+
+    // RO items (ROWOW_Items.cpp): the port of rAthena's equipment and item use (pc.cpp), and the item's own state.  Worn items stay in the
+    // bags, as RO's inventory holds them, and the identity remembers where each is worn
+    void LoadItemScriptData(); // Registers the script engine's commands and compiles the usable items' scripts
+    static uint32 GetItemRefine(Item const* item);
+    static bool IsItemBroken(Item const* item);
+    static bool IsItemIdentified(Item const* item);
+    static void SetItemState(Player* player, Item* item, uint32 refine, bool isBroken, bool isIdentified);
+    uint32 GetIdentityEquipPosition(ROWOWIdentity const& identity, ObjectGuid::LowType itemGUID) const; // Where an item is worn, 0 for not
+    uint8 PCIsEquip(Player* player, ROWOWIdentity const& identity, Item const* item) const; // pc_isequip
+    int32 PCEquipPoint(Player* player, ROWOWIdentity const& identity, ROWOWItem const& roItem) const; // pc_equippoint
+    bool PCEquipItem(Player* player, Item* item, int32 reqPos); // pc_equipitem
+    bool PCUnequipItem(Player* player, uint32 equipPosition, int32 flag); // pc_unequipitem, by a position the item is worn in
+    bool PCCheckItem(Player* player, ROWOWIdentity& identity); // pc_checkitem: takes off what can no longer be worn, true when anything was
+    bool PCIsUseItem(Player* player, Item const* item, bool isReporting); // pc_isUseitem
+    void PCUseItem(Player* player, ObjectGuid itemGUID); // pc_useitem, after the use item spell
+    void PCItemHeal(Player* player, uint32 itemID, int32 hp, int32 sp); // pc_itemheal
+    void PCPercentHeal(Player* player, int32 hp, int32 sp); // pc_percentheal
+    void StatusHeal(Player* player, int64 hp, int64 sp); // status_heal on a player
+    bool PCGetItemGroup(Player* player, std::string const& groupName); // ItemGroupDatabase::pc_get_itemgroup
+    bool GiveROItem(Player* player, uint32 itemID, uint32 amount, bool isIdentified); // pc_additem, mailing what doesn't fit
+    void SkillIdentify(Player* player, Item* item); // skill_identify
+    void SendItemIdentifyList(Player* player); // clif_item_identify_list
+    void TeleportToRandomSpot(Player* player); // A random spot on the map (AL_TELEPORT level 1), at one of its monsters' homes
+    void TeleportToSavePoint(Player* player); // The identity's save point (AL_TELEPORT level 2 and up)
+
+    // Keeps the worn items true to the bags (one sold, moved to the bank or destroyed is no longer worn) and tells the client's RO interface
+    // where each worn item is, under the ROWOWEQUIP prefix, when that changes
+    void UpdateIdentityEquipment(Player* player, ROWOWIdentity& identity);
+    void SendEquipmentToClient(Player* player, ROWOWIdentity& identity, bool isForced);
+    static bool GetClientItemPosition(Item const* item, uint32& bagOut, uint32& slotOut); // The client's bag (0-4) and slot (from 1)
+    static Item* GetItemByClientPosition(Player* player, uint32 bag, uint32 slot);
 
     // The creature template's values, or null if it has none (a melee creature with no attack visual)
     ROWOWCreatureTemplate const* GetCreatureTemplate(uint32 creatureEntry) const;

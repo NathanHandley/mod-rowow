@@ -88,7 +88,7 @@ class ROWOW_SkillSpellScript : public SpellScript
             else if (skillEffect.EffectType == ROWOW_SKILL_EFFECT_ZENY_COST && skillEffect.ValueA > 0)
                 player->ModifyMoney(-skillEffect.ValueA);
             else if (skillEffect.EffectType == ROWOW_SKILL_EFFECT_TELEPORT_RANDOM)
-                TeleportToRandomSpot(player);
+                ROWOW->TeleportToRandomSpot(player);
         }
     }
 
@@ -253,24 +253,6 @@ class ROWOW_SkillSpellScript : public SpellScript
     }
 
     // RO's Teleport level 1: to a random spot on the map, here the spawn spot of a random creature on it
-    void TeleportToRandomSpot(Player* player)
-    {
-        Map* map = player->GetMap();
-        if (map == nullptr || map->Instanceable() == true)
-            return;
-        Map::CreatureBySpawnIdContainer const& creaturesBySpawnID = map->GetCreatureBySpawnIdStore();
-        if (creaturesBySpawnID.empty() == true)
-            return;
-        uint32 index = urand(0, uint32(creaturesBySpawnID.size() - 1));
-        Map::CreatureBySpawnIdContainer::const_iterator creatureIter = creaturesBySpawnID.begin();
-        advance(creatureIter, index);
-        Creature* creature = creatureIter->second;
-        if (creature == nullptr)
-            return;
-        Position const& homePosition = creature->GetHomePosition();
-        player->NearTeleportTo(homePosition.GetPositionX(), homePosition.GetPositionY(), homePosition.GetPositionZ() + 0.5f, player->GetOrientation());
-    }
-
     void Register() override
     {
         OnCheckCast += SpellCheckCastFn(ROWOW_SkillSpellScript::CheckZenyCost);

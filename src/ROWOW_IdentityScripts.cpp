@@ -227,6 +227,20 @@ public:
                 ROWOW->RespawnAtSavePoint(player);
                 return false;
             }
+            case CMSG_DESTROYITEM:
+            {
+                // Worn RO equipment comes off before it can be thrown away
+                WorldPacket packetCopy(packet);
+                uint8 bag = 0;
+                uint8 slot = 0;
+                packetCopy >> bag >> slot;
+                Item* item = player->GetItemByPos(bag, slot);
+                if (item == nullptr || ROWOW->GetIdentityEquipPosition(*ROWOW->GetIdentity(player), item->GetGUID().GetCounter()) == 0)
+                    return true;
+                ChatHandler(session).SendSysMessage("Take it off before destroying it.");
+                player->SendEquipError(EQUIP_ERR_NONE, item, nullptr);
+                return false;
+            }
             case CMSG_SELL_ITEM:
             {
                 // RO shops only buy RO items
@@ -376,6 +390,9 @@ public:
         {
             { "sync",     HandleROSyncCommand,   SEC_PLAYER,     Console::No },
             { "statup",   HandleROStatUpCommand, SEC_PLAYER,     Console::No },
+            { "wear",     HandleROWearCommand,   SEC_PLAYER,     Console::No },
+            { "takeoff",  HandleROTakeOffCommand, SEC_PLAYER,    Console::No },
+            { "identify", HandleROIdentifyCommand, SEC_PLAYER,   Console::No },
             { "info",     HandleROInfoCommand,   SEC_GAMEMASTER, Console::No },
             { "form",     HandleROFormCommand,   SEC_GAMEMASTER, Console::No },
             { "job",      HandleROJobCommand,    SEC_GAMEMASTER, Console::No },
@@ -384,6 +401,7 @@ public:
             { "stats",    HandleROStatsCommand,  SEC_GAMEMASTER, Console::No },
             { "zeny",     HandleROZenyCommand,   SEC_GAMEMASTER, Console::No },
             { "equip",    HandleROEquipCommand,  SEC_GAMEMASTER, Console::No },
+            { "give",     HandleROGiveCommand,   SEC_GAMEMASTER, Console::No },
             { "battle",   HandleROBattleCommand, SEC_GAMEMASTER, Console::No },
             { "identity", identityCommandTable },
         };
@@ -403,6 +421,48 @@ public:
             return false;
         ROWOW->SendROFormStateToClient(player);
         ROWOW->SendROStatusToClient(player);
+        if (ROWOW->IsInROForm(player) == true)
+            ROWOW->SendEquipmentToClient(player, *ROWOW->GetIdentity(player), true);
+        return true;
+    }
+
+    static bool HandleROWearCommand(ChatHandler* handler, uint32 bag, uint32 slot, Optional<uint32> equipPosition)
+    {
+        // The RO Equipment window and the bags: wears the RO item at a bag position (the client's bag 0-4 and slot from 1), in the
+        // equipment positions asked for or wherever it goes (rAthena's clif_parse_EquipItem)
+        Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
+        if (player == nullptr || ROWOW->IsInROForm(player) == false)
+            return false;
+        Item* item = ROWOWMod::GetItemByClientPosition(player, bag, slot);
+        ROWOWItem const* roItem = ROWOW->GetROItem(item);
+        if (roItem == nullptr || roItem->Locations == 0)
+            return true;
+        if (ROWOWMod::IsItemIdentified(item) == false)
+        {
+            handler->SendSysMessage("Appraise it before wearing it.");
+            return true;
+        }
+        ROWOW->PCEquipItem(player, item, int32(equipPosition.value_or(uint32(ROWOW->PCEquipPoint(player, *ROWOW->GetIdentity(player), *roItem)))));
+        return true;
+    }
+
+    static bool HandleROTakeOffCommand(ChatHandler* handler, uint32 equipPosition)
+    {
+        // Takes off what's worn in an RO equipment position (rAthena's clif_parse_UnequipItem)
+        Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
+        if (player == nullptr || ROWOW->IsInROForm(player) == false)
+            return false;
+        ROWOW->PCUnequipItem(player, equipPosition, 1);
+        return true;
+    }
+
+    static bool HandleROIdentifyCommand(ChatHandler* handler, uint32 bag, uint32 slot)
+    {
+        // The item picked from a Magnifier's list (rAthena's clif_parse_ItemIdentify)
+        Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
+        if (player == nullptr || ROWOW->IsInROForm(player) == false)
+            return false;
+        ROWOW->SkillIdentify(player, ROWOWMod::GetItemByClientPosition(player, bag, slot));
         return true;
     }
 
@@ -623,6 +683,23 @@ public:
         else
             ROWOW->CalculateIdentityStatus(player, *identity);
         handler->PSendSysMessage("{} now wears {} x{} (position {:#x}).", player->GetName(), item->GetTemplate()->Name1, count, equipPosition);
+        return true;
+    }
+
+    static bool HandleROGiveCommand(ChatHandler* handler, uint32 itemID, Optional<uint32> amount)
+    {
+        // Gives an RO item (item_db Id) as a monster drop or a box would: equipment comes unidentified
+        Player* player = handler->getSelectedPlayerOrSelf();
+        auto itemTemplateIDIter = ROWOW->ItemTemplateIDsByItemID.find(itemID);
+        auto itemIter = itemTemplateIDIter != ROWOW->ItemTemplateIDsByItemID.end() ? ROWOW->ItemsByItemTemplateID.find(itemTemplateIDIter->second) : ROWOW->ItemsByItemTemplateID.end();
+        if (player == nullptr || itemIter == ROWOW->ItemsByItemTemplateID.end())
+        {
+            handler->PSendSysMessage("There is no converted RO item {}.", itemID);
+            return false;
+        }
+        uint8 type = itemIter->second.Type;
+        bool isIdentified = type != ROWOW_ITEM_TYPE_WEAPON && type != ROWOW_ITEM_TYPE_ARMOR && type != ROWOW_ITEM_TYPE_PETARMOR;
+        ROWOW->GiveROItem(player, itemID, amount.value_or(1), isIdentified);
         return true;
     }
 
