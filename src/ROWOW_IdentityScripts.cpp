@@ -393,6 +393,8 @@ public:
             { "wear",     HandleROWearCommand,   SEC_PLAYER,     Console::No },
             { "takeoff",  HandleROTakeOffCommand, SEC_PLAYER,    Console::No },
             { "identify", HandleROIdentifyCommand, SEC_PLAYER,   Console::No },
+            { "cardlist", HandleROCardListCommand, SEC_PLAYER,   Console::No },
+            { "compound", HandleROCompoundCommand, SEC_PLAYER,   Console::No },
             { "info",     HandleROInfoCommand,   SEC_GAMEMASTER, Console::No },
             { "form",     HandleROFormCommand,   SEC_GAMEMASTER, Console::No },
             { "job",      HandleROJobCommand,    SEC_GAMEMASTER, Console::No },
@@ -402,6 +404,7 @@ public:
             { "zeny",     HandleROZenyCommand,   SEC_GAMEMASTER, Console::No },
             { "equip",    HandleROEquipCommand,  SEC_GAMEMASTER, Console::No },
             { "give",     HandleROGiveCommand,   SEC_GAMEMASTER, Console::No },
+            { "refine",   HandleRORefineCommand, SEC_GAMEMASTER, Console::No },
             { "battle",   HandleROBattleCommand, SEC_GAMEMASTER, Console::No },
             { "identity", identityCommandTable },
         };
@@ -422,7 +425,10 @@ public:
         ROWOW->SendROFormStateToClient(player);
         ROWOW->SendROStatusToClient(player);
         if (ROWOW->IsInROForm(player) == true)
+        {
             ROWOW->SendEquipmentToClient(player, *ROWOW->GetIdentity(player), true);
+            ROWOW->SendItemCardsToClient(player, *ROWOW->GetIdentity(player), true);
+        }
         return true;
     }
 
@@ -453,6 +459,29 @@ public:
         if (player == nullptr || ROWOW->IsInROForm(player) == false)
             return false;
         ROWOW->PCUnequipItem(player, equipPosition, 1);
+        return true;
+    }
+
+    static bool HandleROCardListCommand(ChatHandler* handler, uint32 bag, uint32 slot)
+    {
+        // A card used from the bags: the items it can go into (rAthena's clif_parse_UseCard)
+        Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
+        if (player == nullptr || ROWOW->IsInROForm(player) == false)
+            return false;
+        ROWOW->SendCardTargetsToClient(player, ROWOWMod::GetItemByClientPosition(player, bag, slot));
+        return true;
+    }
+
+    static bool HandleROCompoundCommand(ChatHandler* handler, uint32 cardBag, uint32 cardSlot, uint32 bag, uint32 slot)
+    {
+        // The item picked from a card's list (rAthena's clif_parse_InsertCard)
+        Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
+        if (player == nullptr || ROWOW->IsInROForm(player) == false)
+            return false;
+        Item* card = ROWOWMod::GetItemByClientPosition(player, cardBag, cardSlot);
+        Item* equipment = ROWOWMod::GetItemByClientPosition(player, bag, slot);
+        if (card == nullptr || equipment == nullptr || ROWOW->PCInsertCard(player, card, equipment) == false)
+            handler->SendSysMessage("The card can't go into that item.");
         return true;
     }
 
@@ -683,6 +712,22 @@ public:
         else
             ROWOW->CalculateIdentityStatus(player, *identity);
         handler->PSendSysMessage("{} now wears {} x{} (position {:#x}).", player->GetName(), item->GetTemplate()->Name1, count, equipPosition);
+        return true;
+    }
+
+    static bool HandleRORefineCommand(ChatHandler* handler, uint32 equipPosition, uint32 refine)
+    {
+        // For testing until the refiner NPCs (R8): sets the refine level of what's worn in an RO equipment position
+        Player* player = handler->getSelectedPlayerOrSelf();
+        Item* item = player != nullptr ? ROWOW->GetIdentityEquippedItem(player, equipPosition) : nullptr;
+        if (item == nullptr || refine > ROWOW_MAX_REFINE)
+        {
+            handler->SendSysMessage("Nothing worn there, or a refine level past 10.");
+            return false;
+        }
+        ROWOWMod::SetItemState(player, item, refine, ROWOWMod::IsItemBroken(item), ROWOWMod::IsItemIdentified(item));
+        ROWOW->RefreshROForm(player);
+        handler->PSendSysMessage("{} is now +{}.", item->GetTemplate()->Name1, refine);
         return true;
     }
 

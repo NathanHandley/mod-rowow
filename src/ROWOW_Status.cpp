@@ -89,23 +89,6 @@ namespace
         return -1;
     }
 
-    // The element of an ammo script's plain "bonus bAtkEle,Ele_<element>;" (the ammo's element), or -1.  A script with any condition is
-    // left to the bonus engine (R5)
-    int32 GetAmmoScriptElement(std::string const& script)
-    {
-        if (script.find("if") != std::string::npos)
-            return -1;
-        static std::string const bonusText = "bonus bAtkEle,Ele_";
-        size_t bonusPosition = script.find(bonusText);
-        if (bonusPosition == std::string::npos)
-            return -1;
-        size_t nameStart = bonusPosition + bonusText.size();
-        size_t nameEnd = script.find(';', nameStart);
-        if (nameEnd == std::string::npos)
-            return -1;
-        return ROWOWMod::GetElementByName(script.substr(nameStart, nameEnd - nameStart));
-    }
-
     // "yes"/"no", hexadecimal or decimal, as rAthena reads its battle config values
     int32 ParseBattleConfigValue(std::string const& text)
     {
@@ -355,7 +338,6 @@ void ROWOWMod::LoadStatusData()
         int32 rangeColumnIndex = itemTable->GetColumnIndex("Range");
         int32 weaponLevelColumnIndex = itemTable->GetColumnIndex("WeaponLevel");
         int32 locationsColumnIndex = itemTable->GetColumnIndex("Locations");
-        int32 scriptColumnIndex = itemTable->GetColumnIndex("Script");
         int32 jobsColumnIndex = itemTable->GetColumnIndex("Jobs");
         int32 classesColumnIndex = itemTable->GetColumnIndex("Classes");
         int32 genderColumnIndex = itemTable->GetColumnIndex("Gender");
@@ -456,7 +438,6 @@ void ROWOWMod::LoadStatusData()
                 for (uint8 ammoType = 1; ammoType < std::size(AmmoTypeNames); ammoType++)
                     if (subType == AmmoTypeNames[ammoType])
                         item.AmmoType = ammoType;
-                item.AmmoElement = GetAmmoScriptElement(ROWOWDataTable::UnescapeText(itemTable->GetCell(rowIndex, scriptColumnIndex)));
             }
             for (auto const& locationField : ROWOWDataTable::ParseMap(itemTable->GetCell(rowIndex, locationsColumnIndex)))
                 for (auto const& locationName : LocationNames)
@@ -512,67 +493,13 @@ void ROWOWMod::CalculateIdentityStatus(Player* player, ROWOWIdentity& identity) 
     status.Level = identity.BaseLevel;
     ROWOWJob const* job = GetJob(identity.JobID);
 
-    // Parse equipment.  An item worn in two positions (a two-handed weapon) counts once, as pc_is_same_equip_index skips it, and the
-    // ammo is read after.  The refine bonus (R4) and the equipment scripts and cards (R5) come with their milestones
-    int32 rightWeaponRange = 0;
-    int32 leftWeaponRange = 0;
-    ROWOWItem const* ammoItem = nullptr;
-    std::unordered_set<ObjectGuid::LowType> countedItemGUIDs;
-    for (auto const& itemGUIDByEquipPosition : identity.ItemGUIDsByEquipPosition)
-    {
-        // Costumes only change the look
-        if ((itemGUIDByEquipPosition.first & ROWOW_EQUIP_POSITION_COSTUME) != 0)
-            continue;
-        if (countedItemGUIDs.insert(itemGUIDByEquipPosition.second).second == false)
-            continue;
-        ROWOWItem const* roItem = GetROItem(player->GetItemByGuid(ObjectGuid::Create<HighGuid::Item>(itemGUIDByEquipPosition.second)));
-        if (roItem == nullptr)
-            continue;
-        if (itemGUIDByEquipPosition.first == ROWOW_EQUIP_POSITION_AMMO)
-        {
-            ammoItem = roItem;
-            continue;
-        }
-        status.Def += roItem->Defense;
-        if (roItem->IsWeapon == false)
-            continue;
-        if (itemGUIDByEquipPosition.first == ROWOW_EQUIP_POSITION_HAND_L)
-        {
-            // Left-hand weapon
-            status.LeftWeaponAttack += roItem->Attack;
-            leftWeaponRange += roItem->Range;
-            status.LeftWeaponType = roItem->WeaponType;
-            status.LeftWeaponLevel = roItem->WeaponLevel;
-        }
-        else
-        {
-            status.WeaponAttack += roItem->Attack;
-            rightWeaponRange += roItem->Range;
-            if ((itemGUIDByEquipPosition.first & ROWOW_EQUIP_POSITION_HAND_R) != 0)
-            {
-                status.RightWeaponType = roItem->WeaponType;
-                status.WeaponLevel = roItem->WeaponLevel;
-            }
-        }
-    }
+    // The worn items, their refine, scripts and cards, the ammo and the item combos (StatusCalcPCItems)
+    StatusCalcPCItems(player, identity, status);
     status.WeaponType = GetCombinedWeaponType(status.RightWeaponType, status.LeftWeaponType);
-    status.Range = std::max(1, std::max(rightWeaponRange, leftWeaponRange));
-
-    // The ammo: its ATK, and its element, which a bow or gun takes as its own (the bAtkEle bonus with LR_FLAG_ARROW).  A bow or gun's
-    // normal attack shoots it (state.arrow_atk)
-    status.IsArrowAttack = status.WeaponType == ROWOW_WEAPON_TYPE_BOW || (status.WeaponType >= ROWOW_WEAPON_TYPE_REVOLVER && status.WeaponType <= ROWOW_WEAPON_TYPE_GRENADE);
-    if (ammoItem != nullptr)
-    {
-        status.ArrowAttack += ammoItem->Attack;
-        status.AmmoType = ammoItem->AmmoType;
-        if (ammoItem->AmmoElement >= 0)
-        {
-            if (status.IsArrowAttack == true)
-                status.WeaponElement = uint8(ammoItem->AmmoElement);
-            else
-                status.ArrowElement = ammoItem->AmmoElement;
-        }
-    }
+    status.Range = std::max(1, status.Range);
+    status.Bonus.DoubleRate += status.Bonus.DoubleAddRate;
+    status.Bonus.PerfectHit += status.Bonus.PerfectHitAdd;
+    status.Bonus.SplashRange += status.Bonus.SplashAddRange;
 
     // Damage modifiers from weapon type
     for (uint8 size = 0; size < ROWOW_SIZE_COUNT; size++)
@@ -588,10 +515,15 @@ void ROWOWMod::CalculateIdentityStatus(Player* player, ROWOWIdentity& identity) 
         for (uint8 statIndex = 0; statIndex < ROWOW_STAT_COUNT; statIndex++)
             status.JobBonusStats[statIndex] = job->BonusStatsByJobLevel[identity.JobLevel - 1][statIndex];
     for (uint8 statIndex = 0; statIndex < ROWOW_STAT_COUNT; statIndex++)
-        status.Stats[statIndex] = std::clamp<int32>(status.JobBonusStats[statIndex] + int32(identity.Stats[statIndex]), 0, USHRT_MAX);
+        status.Stats[statIndex] = std::clamp<int32>(status.JobBonusStats[statIndex] + int32(identity.Stats[statIndex]) + status.Bonus.ParamBonus[statIndex]
+            + status.Bonus.ParamEquip[statIndex], 0, USHRT_MAX);
+
+    // The base ATK bonus of the weapon type held (bWeaponAtk)
+    if (status.WeaponType < ROWOW_WEAPON_TYPE_MAX && status.Bonus.WeaponAtk[status.WeaponType] != 0)
+        status.BaseAttack += status.Bonus.WeaponAtk[status.WeaponType];
 
     // ----- HP MAX CALCULATION -----
-    status.MaxHP = StatusCalcMaxHPPC(identity, status.Stats[ROWOW_STAT_VIT]);
+    status.MaxHP = StatusCalcMaxHPPC(identity, status);
     if (BattleConfig.HPRate != 100)
         status.MaxHP = uint32(BattleConfig.HPRate * (status.MaxHP / 100.));
     if (identity.BaseLevel < 100)
@@ -602,7 +534,7 @@ void ROWOWMod::CalculateIdentityStatus(Player* player, ROWOWIdentity& identity) 
         status.MaxHP = std::clamp<uint32>(status.MaxHP, 1, uint32(BattleConfig.MaxHP));
 
     // ----- SP MAX CALCULATION -----
-    status.MaxSP = StatusCalcMaxSPPC(identity, status.Stats[ROWOW_STAT_INT]);
+    status.MaxSP = StatusCalcMaxSPPC(identity, status);
     if (BattleConfig.SPRate != 100)
         status.MaxSP = uint32(BattleConfig.SPRate * (status.MaxSP / 100.));
     status.MaxSP = std::clamp<uint32>(status.MaxSP, 1, uint32(BattleConfig.MaxSP));
@@ -610,7 +542,30 @@ void ROWOWMod::CalculateIdentityStatus(Player* player, ROWOWIdentity& identity) 
     // ----- MISC CALCULATION -----
     StatusCalcMisc(status, identity.BaseLevel);
 
+    // The rate bonuses of the gear
+    ROWOWBonus& bonus = status.Bonus;
+    auto applyRate = [](int32& value, int32& rate)
+    {
+        if (rate < 0)
+            rate = 0;
+        if (rate != 100)
+            value = value * rate / 100;
+    };
+    applyRate(status.MagicAttackMax, bonus.MatkRate);
+    status.MagicAttackMin = bonus.MatkRate != 100 ? status.MagicAttackMin * bonus.MatkRate / 100 : status.MagicAttackMin;
+    applyRate(status.Hit, bonus.HitRate);
+    applyRate(status.Flee, bonus.FleeRate);
+    applyRate(status.Def2, bonus.Def2Rate);
+    applyRate(status.MDef2, bonus.Mdef2Rate);
+    applyRate(status.Critical, bonus.CriticalRate);
+    status.Critical = std::clamp<int32>(status.Critical, SHRT_MIN, SHRT_MAX);
+    applyRate(status.Flee2, bonus.Flee2Rate);
+
     // ----- EQUIPMENT-DEF CALCULATION -----
+    if (bonus.DefRate < 0)
+        bonus.DefRate = 0;
+    if (bonus.DefRate != 100)
+        status.Def = std::clamp<int32>(status.Def * bonus.DefRate / 100, CHAR_MIN, CHAR_MAX);
     if (BattleConfig.WeaponDefenseType == 0 && status.Def > BattleConfig.MaxDef)
     {
         status.Def2 += BattleConfig.OverDefBonus * (status.Def - BattleConfig.MaxDef);
@@ -618,6 +573,10 @@ void ROWOWMod::CalculateIdentityStatus(Player* player, ROWOWIdentity& identity) 
     }
 
     // ----- EQUIPMENT-MDEF CALCULATION -----
+    if (bonus.MdefRate < 0)
+        bonus.MdefRate = 0;
+    if (bonus.MdefRate != 100)
+        status.MDef = std::clamp<int32>(status.MDef * bonus.MdefRate / 100, CHAR_MIN, CHAR_MAX);
     if (BattleConfig.MagicDefenseType == 0 && status.MDef > BattleConfig.MaxDef)
     {
         status.MDef2 += BattleConfig.OverDefBonus * (status.MDef - BattleConfig.MaxDef);
@@ -626,8 +585,9 @@ void ROWOWMod::CalculateIdentityStatus(Player* player, ROWOWIdentity& identity) 
 
     // ----- ASPD CALCULATION -----
     // pc_maxaspd / AMOTION_DIVIDER_PC and MIN_ASPD / AMOTION_DIVIDER_PC
+    // (status_calc_bl_main then applies the ASPD rate, which the gear's bAspdRate lowered, and caps it again)
     status.AttackMotion = std::clamp(StatusBaseAmotionPC(identity, status), BattleConfig.MaxAspdAmotion / 2, 8000 / 2);
-    status.AspdRate = 1000;
+    status.AttackMotion = std::clamp(status.AttackMotion * status.AspdRate / 1000, BattleConfig.MaxAspdAmotion / 2, 8000 / 2);
     status.AttackDelay = 2 * status.AttackMotion;
 
     // ----- DMOTION -----
@@ -652,6 +612,8 @@ int32 ROWOWMod::StatusBaseAmotionPC(ROWOWIdentity const& identity, ROWOWStatus c
 
     // Percentual delay reduction from stats
     amotion -= amotion * (4 * status.Stats[ROWOW_STAT_AGI] + status.Stats[ROWOW_STAT_DEX]) / 1000;
+    // Raw delay adjustment from bAspd bonus
+    amotion += status.Bonus.AspdAdd;
     return amotion;
 }
 
@@ -713,9 +675,10 @@ void ROWOWMod::StatusCalcMisc(ROWOWStatus& status, uint32 level) const
         StatusCalcRegen(status);
 }
 
-uint32 ROWOWMod::StatusCalcMaxHPPC(ROWOWIdentity const& identity, int32 vit) const
+uint32 ROWOWMod::StatusCalcMaxHPPC(ROWOWIdentity const& identity, ROWOWStatus const& status) const
 {
-    // status_calc_maxhp_pc.  (VIT and max HP from gear come with the gear bonuses, R5)
+    // status_calc_maxhp_pc.  (The max HP of passive skills and statuses come with them, R6)
+    int32 vit = status.Stats[ROWOW_STAT_VIT];
     ROWOWJob const* job = GetJob(identity.JobID);
     if (job == nullptr || job->BaseHPByLevel.empty() == true)
         return 1;
@@ -725,14 +688,19 @@ uint32 ROWOWMod::StatusCalcMaxHPPC(ROWOWIdentity const& identity, int32 vit) con
         dmax *= (1.0 + vit * 0.01);
     if (job->IsUpper == true)
         dmax *= 1.25;
+    // Vit from equip gives +1 additional HP
+    dmax += status.Bonus.ParamEquip[ROWOW_STAT_VIT];
+    dmax += status.Bonus.HP;
+    dmax += dmax * (status.Bonus.HPRate - 100) / 100;
     if (dmax < 1.0)
         dmax = 1.0;
     return std::max<uint32>(1, uint32(dmax));
 }
 
-uint32 ROWOWMod::StatusCalcMaxSPPC(ROWOWIdentity const& identity, int32 int_) const
+uint32 ROWOWMod::StatusCalcMaxSPPC(ROWOWIdentity const& identity, ROWOWStatus const& status) const
 {
     // status_calc_maxsp_pc
+    int32 int_ = status.Stats[ROWOW_STAT_INT];
     ROWOWJob const* job = GetJob(identity.JobID);
     if (job == nullptr || job->BaseSPByLevel.empty() == true)
         return 1;
@@ -742,6 +710,10 @@ uint32 ROWOWMod::StatusCalcMaxSPPC(ROWOWIdentity const& identity, int32 int_) co
         dmax *= (1.0 + int_ * 0.01);
     if (job->IsUpper == true)
         dmax *= 1.25;
+    // Int from equip gives +1 additional SP
+    dmax += status.Bonus.ParamEquip[ROWOW_STAT_INT];
+    dmax += status.Bonus.SP;
+    dmax += dmax * (status.Bonus.SPRate - 100) / 100;
     if (dmax < 1.0)
         dmax = 1.0;
     return std::max<uint32>(1, uint32(dmax));
@@ -1115,6 +1087,20 @@ void ROWOWMod::MobDeadExp(Creature* creature)
             if (count > BattleConfig.ExpBonusMaxAttacker)
                 count = BattleConfig.ExpBonusMaxAttacker;
             per += per * ((count - 1) * BattleConfig.ExpBonusAttacker) / 100.;
+        }
+
+        // The killer's gear's exp bonus against the monster's race and class (bExpAddRace, bExpAddClass)
+        if (ROWOWStatus const* mobStatus = GetROStatus(creature))
+        {
+            ROWOWBonus const& bonus = GetIdentity(players[i])->Status.Bonus;
+            if (bonus.ExpAddRace[mobStatus->Race] != 0)
+                per += per * bonus.ExpAddRace[mobStatus->Race] / 100.;
+            if (bonus.ExpAddRace[ROWOW_RACE_ALL] != 0)
+                per += per * bonus.ExpAddRace[ROWOW_RACE_ALL] / 100.;
+            if (bonus.ExpAddClass[mobStatus->Class] != 0)
+                per += per * bonus.ExpAddClass[mobStatus->Class] / 100.;
+            if (bonus.ExpAddClass[ROWOW_CLASS_ALL] != 0)
+                per += per * bonus.ExpAddClass[ROWOW_CLASS_ALL] / 100.;
         }
 
         uint64 baseExp = mobBaseExp != 0 ? uint64(std::clamp(double(mobBaseExp) * per, 1.0, double(std::numeric_limits<uint32>::max()))) : 0;

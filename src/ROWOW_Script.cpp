@@ -1047,7 +1047,7 @@ std::shared_ptr<ROWOWScript> ROWOWScriptEngine::Compile(std::string const& sourc
     return script;
 }
 
-bool ROWOWScriptEngine::Run(ROWOWScript const& script, ROWOWScriptContext& context) const
+bool ROWOWScriptEngine::Run(ROWOWScript const& script, ROWOWScriptContext& context, bool isLenient) const
 {
     // run_script_main: one instruction at a time until the end, an error, or a command stops the run
     auto stop = [&](std::string const& error)
@@ -1076,7 +1076,7 @@ bool ROWOWScriptEngine::Run(ROWOWScript const& script, ROWOWScriptContext& conte
         return index == 0 ? name : name + "[" + std::to_string(index) + "]";
     };
 
-    if (script.IsRunnable() == false)
+    if (script.Error.empty() == false || (isLenient == false && script.IsRunnable() == false))
     {
         stop(script.Error.empty() == false ? script.Error : "unavailable command " + script.UnavailableCommands[0]);
         return false;
@@ -1212,6 +1212,12 @@ bool ROWOWScriptEngine::Run(ROWOWScript const& script, ROWOWScriptContext& conte
             {
                 ROWOWScriptCommand const* command = GetCommand(instruction.Argument);
                 size_t argumentCount = size_t(instruction.Number);
+                if (command == nullptr && isLenient == true && context.Stack.size() >= argumentCount)
+                {
+                    context.Stack.resize(context.Stack.size() - argumentCount);
+                    context.Stack.push_back(ROWOWScriptValue::FromNumber(0));
+                    break;
+                }
                 if (command == nullptr || context.Stack.size() < argumentCount)
                 {
                     stop("a call to an unavailable command");

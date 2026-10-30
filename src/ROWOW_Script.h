@@ -26,8 +26,10 @@
 #include <unordered_map>
 #include <vector>
 
+class Item;
 class Player;
 struct ROWOWIdentity;
+struct ROWOWStatus;
 
 // The RO script engine: a subset of rAthena's script language (script.cpp), for item scripts now and NPC scripts later (R7).  A script
 // is compiled once at startup into a small bytecode, which runs on a value stack with the state kept in ROWOWScriptContext, so a run can
@@ -104,6 +106,9 @@ struct ROWOWScriptContext
     ROWOWIdentity* Identity = nullptr;
     ObjectGuid UsedItemGUID; // The item being used, for an item's use script
     uint32 UsedItemTemplateID = 0;
+    ROWOWStatus* BonusStatus = nullptr; // The status a worn item's script gives its bonuses to (status_calc_pc_sub), null otherwise
+    uint8 BonusLRFlag = 0; // ROWOW_LR_FLAG_*: whose the bonuses are
+    Item const* EquipItem = nullptr; // The worn item whose script (or card's, combo's) runs (current_equip_item_index)
     std::unordered_map<std::string, ROWOWScriptValue> Variables; // By full name.  Only the run's own for now: lasting variables come with R7
     std::vector<ROWOWScriptValue> Stack;
     size_t InstructionIndex = 0;
@@ -149,8 +154,9 @@ public:
     // Compiles a script (at startup).  It always returns a script, which says why it can't run when it can't
     std::shared_ptr<ROWOWScript> Compile(std::string const& source, std::string const& sourceName);
 
-    // Runs a compiled script to its end (or an error).  False on an error, which is logged
-    bool Run(ROWOWScript const& script, ROWOWScriptContext& context) const;
+    // Runs a compiled script to its end (or an error).  False on an error, which is logged.  A lenient run (a worn item's script) runs a
+    // script with commands the engine doesn't have yet, which do nothing, so the rest of its bonuses still count
+    bool Run(ROWOWScript const& script, ROWOWScriptContext& context, bool isLenient = false) const;
 
     // A symbol's name (SC_POISON for the symbol of that constant), or empty when the value isn't a symbol
     std::string GetSymbolName(int64 value) const;

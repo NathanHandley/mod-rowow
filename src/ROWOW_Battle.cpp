@@ -542,6 +542,9 @@ ROWOWDamage ROWOWMod::BattleCalcWeaponAttack(Unit* src, Unit* target, uint16 ski
 
     BattleCalcElementDamage(wd, src, target, skillID, skillLevel);
 
+    // The weapons' elements, for the cards' element bonuses
+    int32 rightElement = BattleGetWeaponElement(wd, src, target, skillID, skillLevel, true);
+    int32 leftElement = BattleGetWeaponElement(wd, src, target, skillID, skillLevel, false);
     Player* sd = src->ToPlayer();
     if (sd != nullptr)
     {
@@ -551,9 +554,18 @@ ROWOWDamage ROWOWMod::BattleCalcWeaponAttack(Unit* src, Unit* target, uint16 ski
         if (PCCheckSkill(sd, ROWOW_SKILL_BS_HILTBINDING) > 0)
             AttackAdd(wd, isLeftHanded, 4, 4);
 
-        // Card Fix for attacker (sd), 2 is added to the "left" flag meaning "attacker cards only" (battle_calc_cardfix, R5)
+        // Card Fix for attacker (sd), 2 is added to the "left" flag meaning "attacker cards only"
+        wd.Damage += BattleCalcCardFix(src, target, rightElement, leftElement, wd.Damage, 2, wd.Flag);
+        if (isLeftHanded == true)
+            wd.Damage2 += BattleCalcCardFix(src, target, rightElement, leftElement, wd.Damage2, 3, wd.Flag);
     }
-    // Card Fix for target (tsd), 2 is not added to the "left" flag meaning "target cards only" (battle_calc_cardfix, R5)
+    if (target->IsPlayer() == true)
+    {
+        // Card Fix for target (tsd), 2 is not added to the "left" flag meaning "target cards only"
+        wd.Damage += BattleCalcCardFix(src, target, rightElement, leftElement, wd.Damage, 0, wd.Flag);
+        if (isLeftHanded == true)
+            wd.Damage2 += BattleCalcCardFix(src, target, rightElement, leftElement, wd.Damage2, 1, wd.Flag);
+    }
 
     // only do 1 dmg to plant, no need to calculate rest
     if (infdef == true)
@@ -613,13 +625,23 @@ bool ROWOWMod::IsAttackCritical(ROWOWDamage& wd, Unit* src, Unit const* target, 
 
     ROWOWStatus const* tstatus = GetROStatus(target);
     int32 cri = sstatus->Critical;
-    // (A player's critical bonus against races and with arrows comes with the bonus engine, R5)
+    if (sd != nullptr)
+    {
+        cri += sstatus->Bonus.CriticalAddRace[tstatus->Race] + sstatus->Bonus.CriticalAddRace[ROWOW_RACE_ALL];
+        if (skillID == 0 && IsSkillUsingArrow(src, skillID) == true)
+        {
+            cri += sstatus->Bonus.ArrowCri;
+            cri += sstatus->Bonus.CriticalRangeAtk;
+        }
+    }
 
     // The official equation is *2, but that only applies when sd's do critical.
     // Therefore, we use the old value 3 on cases when an sd gets attacked by a mob
     cri -= tstatus->Stats[ROWOW_STAT_LUK] * ((sd == nullptr && target->IsPlayer() == true) ? 3 : 2);
 
-    // (Sleep doubles it, and Auto Counter makes it twice as likely or certain, R6; the target's critical defense is R5's)
+    // (Sleep doubles it, and Auto Counter makes it twice as likely or certain, R6)
+    if (target->IsPlayer() == true && tstatus->Bonus.CriticalDef != 0)
+        cri = cri * (100 - tstatus->Bonus.CriticalDef) / 100;
     return int32(urand(0, 999)) < cri;
 }
 
@@ -628,11 +650,13 @@ bool ROWOWMod::IsAttackHitting(ROWOWDamage& wd, Unit* src, Unit* target, uint16 
     // is_attack_hitting
     if (firstCall == false)
         return wd.DmgLv != ROWOW_ATK_FLEE;
+    ROWOWStatus const* sstatus = GetROStatus(src);
     if (IsAttackCritical(wd, src, target, skillID, skillLevel, false) == true)
         return true;
-    // (Perfect hit, R5; Fusion, the skills that always hit and a frozen, stoned or sleeping target, R6)
+    else if (src->IsPlayer() == true && sstatus->Bonus.PerfectHit > 0 && int32(urand(0, 99)) < sstatus->Bonus.PerfectHit)
+        return true;
+    // (Fusion, the skills that always hit and a frozen, stoned or sleeping target, R6)
 
-    ROWOWStatus const* sstatus = GetROStatus(src);
     ROWOWStatus const* tstatus = GetROStatus(target);
     int32 flee = tstatus->Flee;
     int32 hitrate = 80; // Default hitrate
@@ -654,8 +678,10 @@ bool ROWOWMod::IsAttackHitting(ROWOWDamage& wd, Unit* src, Unit* target, uint16 
 
     hitrate += sstatus->Hit - flee;
 
-    // (Fog Wall, R6; the arrow hit bonus, R5; a skill's own hit rate, R6)
+    // (Fog Wall and a skill's own hit rate, R6)
     Player* sd = src->ToPlayer();
+    if (sd != nullptr && IsSkillUsingArrow(src, skillID) == true)
+        hitrate += sstatus->Bonus.ArrowHit;
     if (skillID == 0 && sd != nullptr && (wd.Type & ROWOW_DMG_MULTI_HIT) != 0 && wd.Div == 2)
         hitrate += PCCheckSkill(sd, ROWOW_SKILL_TF_DOUBLE); // +1 hit per level of Double Attack on a successful double attack [helvetica]
 
@@ -671,17 +697,36 @@ bool ROWOWMod::IsAttackHitting(ROWOWDamage& wd, Unit* src, Unit* target, uint16 
     return int32(urand(0, 99)) < hitrate;
 }
 
-bool ROWOWMod::AttackIgnoresDef(ROWOWDamage& wd, Unit* src, Unit const* target, uint16 skillID, uint16 skillLevel, bool /*isRightHand*/) const
+bool ROWOWMod::AttackIgnoresDef(ROWOWDamage& wd, Unit* src, Unit const* target, uint16 skillID, uint16 skillLevel, bool isRightHand) const
 {
-    // attack_ignores_def.  (Fusion, R6; the ignore-defense bonuses of cards, R5; a skill's own flag, R6)
+    // attack_ignores_def.  (Fusion and a skill's own flag, R6)
     if (IsAttackCritical(wd, src, target, skillID, skillLevel, false) == true)
         return true;
-    return false;
+
+    // Ignore Defense?  (Each hand's own bonuses: left_cardfix_to_right is off)
+    ROWOWStatus const* sstatus = GetROStatus(src);
+    ROWOWStatus const* tstatus = GetROStatus(target);
+    if (src->IsPlayer() == false)
+        return false;
+    ROWOWWeaponBonus const& weaponBonus = isRightHand == true ? sstatus->Bonus.RightWeapon : sstatus->Bonus.LeftWeapon;
+    return (weaponBonus.IgnoreDefEle & (1 << tstatus->DefElement)) != 0 || (weaponBonus.IgnoreDefEle & (1 << ROWOW_ELEMENT_ALL)) != 0
+        || (weaponBonus.IgnoreDefRace & (1 << tstatus->Race)) != 0 || (weaponBonus.IgnoreDefRace & (1 << ROWOW_RACE_ALL)) != 0
+        || (weaponBonus.IgnoreDefClass & (1 << tstatus->Class)) != 0 || (weaponBonus.IgnoreDefClass & (1 << ROWOW_CLASS_ALL)) != 0;
 }
 
-int32 ROWOWMod::IsAttackPiercing(ROWOWDamage& /*wd*/, Unit* /*src*/, Unit const* /*target*/, uint16 /*skillID*/, uint16 /*skillLevel*/, bool /*isRightHand*/) const
+int32 ROWOWMod::IsAttackPiercing(ROWOWDamage& wd, Unit* src, Unit const* target, uint16 skillID, uint16 skillLevel, bool isRightHand) const
 {
-    // is_attack_piercing: the defense-ratio bonuses of cards (Ice Pick and the like, R5) and Investigate (R6)
+    // is_attack_piercing: the defense-ratio bonuses of cards (Ice Pick and the like).  (Investigate, R6)
+    if (src->IsPlayer() == false || IsAttackCritical(wd, src, target, skillID, skillLevel, false) == true)
+        return 0;
+    ROWOWStatus const* sstatus = GetROStatus(src);
+    ROWOWStatus const* tstatus = GetROStatus(target);
+    ROWOWWeaponBonus const& weaponBonus = isRightHand == true ? sstatus->Bonus.RightWeapon : sstatus->Bonus.LeftWeapon;
+    // Elemental/Racial adjustments
+    if ((weaponBonus.DefRatioAtkEle & (1 << tstatus->DefElement)) != 0 || (weaponBonus.DefRatioAtkEle & (1 << ROWOW_ELEMENT_ALL)) != 0
+        || (weaponBonus.DefRatioAtkRace & (1 << tstatus->Race)) != 0 || (weaponBonus.DefRatioAtkRace & (1 << ROWOW_RACE_ALL)) != 0
+        || (weaponBonus.DefRatioAtkClass & (1 << tstatus->Class)) != 0 || (weaponBonus.DefRatioAtkClass & (1 << ROWOW_CLASS_ALL)) != 0)
+        return 1;
     return 0;
 }
 
@@ -750,17 +795,17 @@ int32 ROWOWMod::BattleGetWeaponElement(ROWOWDamage const& /*wd*/, Unit const* sr
 
 void ROWOWMod::BattleCalcMultiAttack(ROWOWDamage& wd, Unit* src, Unit* /*target*/, uint16 skillID, uint16 /*skillLevel*/) const
 {
-    // battle_calc_multi_attack: a player's normal attack may hit twice.  (Fear Breeze, Kagemusya and the double attack rate of cards come
-    // with the skills, statuses and bonus engine)
+    // battle_calc_multi_attack: a player's normal attack may hit twice.  (Fear Breeze and Kagemusya come with the statuses, R6)
     Player* sd = src->ToPlayer();
     if (sd == nullptr || skillID != 0)
         return;
     ROWOWStatus const* sstatus = GetROStatus(src);
     int32 skillLevel = 0;
-    if (wd.Div == 1 && (skillLevel = PCCheckSkill(sd, ROWOW_SKILL_TF_DOUBLE)) > 0 && sstatus->RightWeaponType == ROWOW_WEAPON_TYPE_DAGGER)
+    if (wd.Div == 1 && (((skillLevel = PCCheckSkill(sd, ROWOW_SKILL_TF_DOUBLE)) > 0 && sstatus->RightWeaponType == ROWOW_WEAPON_TYPE_DAGGER)
+        || (sstatus->Bonus.DoubleRate > 0 && sstatus->RightWeaponType != ROWOW_WEAPON_TYPE_FIST))) // Will fail bare-handed
     {
         // Success chance is not added, the higher one is used [Skotlex]
-        int32 maxRate = 5 * skillLevel;
+        int32 maxRate = std::max(5 * skillLevel, sstatus->Bonus.DoubleRate);
         if (int32(urand(0, 99)) < maxRate)
         {
             wd.Div = 2; // Double Attack's hits
@@ -812,7 +857,13 @@ void ROWOWMod::BattleCalcSkillBaseDamage(ROWOWDamage& wd, Unit* src, Unit* targe
     if (IsAttackLeftHanded(src, skillID) == true)
         wd.Damage2 = BattleCalcBaseDamage(src, *sstatus, true, tstatus->Size, bflag);
 
-    // (The critical and non-critical ATK rates of cards, R5, the party bonus of Taekwon's Running, R6, and the target's critical defense, R5)
+    // Add any bonuses that modify the base atk (pre-skills): +crit damage bonuses in pre-renewal mode.  (The party bonus of Taekwon's
+    // Running, R6)
+    if (sd != nullptr && (bflag & ROWOW_BDMG_CRIT) != 0 && sstatus->Bonus.CritAtkRate > 0)
+    {
+        wd.Damage += wd.Damage * sstatus->Bonus.CritAtkRate / 100;
+        wd.Damage2 += wd.Damage2 * sstatus->Bonus.CritAtkRate / 100;
+    }
 }
 
 int64 ROWOWMod::BattleCalcBaseDamage(Unit const* src, ROWOWStatus const& status, bool isLeftHand, uint8 targetSize, int32 flag) const
@@ -885,8 +936,8 @@ int64 ROWOWMod::BattleCalcBaseDamage(Unit const* src, ROWOWStatus const& status,
         if ((flag & ROWOW_BDMG_ARROW) != 0 && status.ArrowAttack > 0)
             damage += ((flag & ROWOW_BDMG_CRIT) != 0) ? status.ArrowAttack : urand(0, status.ArrowAttack - 1);
 
-        // Size fix only for players.  (No size fix from cards, R5, and Weapon Perfection, R6)
-        if ((flag & ROWOW_BDMG_NOSIZE) == 0)
+        // Size fix only for players.  (Weapon Perfection, R6)
+        if (status.Bonus.NoSizeFix == false && (flag & ROWOW_BDMG_NOSIZE) == 0)
             damage = damage * (isLeftHand == true ? status.LeftWeaponSizeMods[targetSize] : status.WeaponSizeMods[targetSize]) / 100;
     }
 
@@ -894,7 +945,16 @@ int64 ROWOWMod::BattleCalcBaseDamage(Unit const* src, ROWOWStatus const& status,
     if ((flag & ROWOW_BDMG_MAGIC) == 0)
         damage += status.BaseAttack;
 
-    // (battle_add_weapon_damage: the overrefine bonus, R4, and the weapon damage rate of cards, R5)
+    // battle_add_weapon_damage: the overrefine bonus and the weapon damage rate of cards
+    if (isPlayer == true)
+    {
+        int32 overrefine = isLeftHand == true ? status.Bonus.LeftWeapon.Overrefine : status.Bonus.RightWeapon.Overrefine;
+        uint8 weaponType = isLeftHand == true ? status.LeftWeaponType : status.RightWeaponType;
+        if (overrefine > 0)
+            damage = damage + urand(0, overrefine - 1) + 1;
+        if (weaponType < ROWOW_WEAPON_TYPE_MAX && status.Bonus.WeaponDamageRate[weaponType] != 0)
+            damage += damage * status.Bonus.WeaponDamageRate[weaponType] / 100;
+    }
     return damage;
 }
 
@@ -905,10 +965,21 @@ void ROWOWMod::BattleCalcDefenseReduction(ROWOWDamage& wd, Unit* src, Unit* targ
     ROWOWStatus const* tstatus = GetROStatus(target);
     Player* tsd = target->ToPlayer();
 
-    // Defense reduction.  (The statuses that lower or raise DEF, R6, and the ignore-defense rates of cards, R5)
+    // Defense reduction.  (The statuses that lower or raise DEF, R6)
     int32 def1 = tstatus->Def;
     int32 def2 = tstatus->Def2;
     int32 vitDef = 0;
+    if (src->IsPlayer() == true)
+    {
+        int32 ignoreRate = sstatus->Bonus.IgnoreDefByRace[tstatus->Race] + sstatus->Bonus.IgnoreDefByRace[ROWOW_RACE_ALL];
+        ignoreRate += sstatus->Bonus.IgnoreDefByClass[tstatus->Class] + sstatus->Bonus.IgnoreDefByClass[ROWOW_CLASS_ALL];
+        if (ignoreRate != 0)
+        {
+            ignoreRate = std::min(ignoreRate, 100); // cap it to 100 for 0 def min
+            def1 -= def1 * ignoreRate / 100;
+            def2 -= def2 * ignoreRate / 100;
+        }
+    }
 
     // A player's DEF drops for each attacker past vit_penalty_count (official servers limit the count to 22 targets)
     if (BattleConfig.VitPenaltyType != 0 && (BattleConfig.VitPenaltyTarget & GetBattleObjectType(*tstatus)) != 0)

@@ -52,6 +52,7 @@ public:
         ROWOW->LoadStatusData();
         ROWOW->LoadBattleData();
         ROWOW->LoadItemScriptData();
+        ROWOW->LoadBonusData();
     }
 };
 

@@ -684,8 +684,17 @@ bool ROWOWMod::PCEquipItem(Player* player, Item* item, int32 reqPos)
             PCUnequipItem(player, ROWOW_EQUIP_POSITION_AMMO, 2 | 4);
     }
 
-    // The equipment scripts and cards come with the bonus engine (R5)
     RefreshROForm(player);
+
+    // The item's EquipScript, then its cards'
+    RunItemScript(player, roItem->EquipScript.get(), item);
+    for (uint8 slot = 0; slot < ROWOW_MAX_SLOTS; slot++)
+    {
+        auto cardTemplateIDIter = ItemTemplateIDsByItemID.find(GetItemCard(item, slot));
+        auto cardIter = cardTemplateIDIter != ItemTemplateIDsByItemID.end() ? ItemsByItemTemplateID.find(cardTemplateIDIter->second) : ItemsByItemTemplateID.end();
+        if (cardIter != ItemsByItemTemplateID.end())
+            RunItemScript(player, cardIter->second.EquipScript.get(), item);
+    }
     return true;
 }
 
@@ -700,9 +709,23 @@ bool ROWOWMod::PCUnequipItem(Player* player, uint32 equipPosition, int32 flag)
     if (itemGUIDIter == identity->ItemGUIDsByEquipPosition.end())
         return false;
     uint32 pos = itemGUIDIter->first;
-    ROWOWItem const* roItem = GetROItem(player->GetItemByGuid(ObjectGuid::Create<HighGuid::Item>(itemGUIDIter->second)));
+    Item* item = player->GetItemByGuid(ObjectGuid::Create<HighGuid::Item>(itemGUIDIter->second));
+    ROWOWItem const* roItem = GetROItem(item);
     identity->ItemGUIDsByEquipPosition.erase(itemGUIDIter);
     identity->IsEquipmentChanged = true;
+
+    // pc_unequipitem_sub: the item's UnEquipScript, and its cards'
+    if (roItem != nullptr)
+    {
+        RunItemScript(player, roItem->UnEquipScript.get(), item);
+        for (uint8 slot = 0; slot < ROWOW_MAX_SLOTS; slot++)
+        {
+            auto cardTemplateIDIter = ItemTemplateIDsByItemID.find(GetItemCard(item, slot));
+            auto cardIter = cardTemplateIDIter != ItemTemplateIDsByItemID.end() ? ItemsByItemTemplateID.find(cardTemplateIDIter->second) : ItemsByItemTemplateID.end();
+            if (cardIter != ItemsByItemTemplateID.end())
+                RunItemScript(player, cardIter->second.UnEquipScript.get(), item);
+        }
+    }
 
     // Taking off a bow or gun takes off its ammo (ammo_unequip)
     if ((pos & ROWOW_EQUIP_POSITION_ARMS) != 0 && roItem != nullptr && roItem->IsWeapon == true && BattleConfig.AmmoUnequip != 0 && (flag & 4) == 0)
@@ -1090,6 +1113,7 @@ void ROWOWMod::UpdateIdentityEquipment(Player* player, ROWOWIdentity& identity)
         RefreshROForm(player);
     else
         SendEquipmentToClient(player, identity, false);
+    SendItemCardsToClient(player, identity, false);
 }
 
 void ROWOWMod::SendEquipmentToClient(Player* player, ROWOWIdentity& identity, bool isForced)

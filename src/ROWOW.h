@@ -32,6 +32,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -44,6 +45,7 @@ class SpellInfo;
 class Unit;
 struct CalcDamageInfo;
 struct ROWOWScript;
+struct ROWOWScriptContext;
 
 // Per creature template values from mod_rowow_creature_template
 struct ROWOWCreatureTemplate
@@ -166,6 +168,8 @@ struct ROWOWDataTable
 #define ROWOW_DATA_TABLE_ITEM                       "mod_rowow_db_item"
 #define ROWOW_DATA_TABLE_ITEM_RENEWAL               "mod_rowow_db_item_renewal"
 #define ROWOW_DATA_TABLE_ITEM_GROUP                 "mod_rowow_db_item_group"
+#define ROWOW_DATA_TABLE_ITEM_COMBO                 "mod_rowow_db_item_combo"
+#define ROWOW_DATA_TABLE_REFINE                     "mod_rowow_db_refine"
 #define ROWOW_DATA_TABLE_JOB                        "mod_rowow_db_job"
 #define ROWOW_DATA_TABLE_STATPOINT                  "mod_rowow_db_statpoint"
 #define ROWOW_DATA_TABLE_MAP_FLAG                   "mod_rowow_db_map_flag"
@@ -302,6 +306,25 @@ struct ROWOWDataTable
 #define ROWOW_CLASS_GUARDIAN                        2
 #define ROWOW_CLASS_BATTLEFIELD                     3
 #define ROWOW_CLASS_EVENT                           4
+
+// The "all" entries of the bonus tables, and the tables' sizes (RC_ALL/RC_MAX, ELE_ALL/ELE_MAX, SZ_ALL/SZ_MAX, CLASS_ALL/CLASS_MAX)
+#define ROWOW_RACE_ALL                              12
+#define ROWOW_RACE_MAX                              13
+#define ROWOW_ELEMENT_ALL                           10
+#define ROWOW_ELEMENT_MAX                           11
+#define ROWOW_SIZE_ALL                              3
+#define ROWOW_SIZE_MAX                              4
+#define ROWOW_CLASS_ALL                             5
+#define ROWOW_CLASS_MAX                             6
+
+// Whose a bonus is while an item's script runs (rAthena's e_lr_flag): the right hand, a left-hand weapon, the ammo, or a shield
+#define ROWOW_LR_FLAG_NONE                          0
+#define ROWOW_LR_FLAG_WEAPON                        1
+#define ROWOW_LR_FLAG_ARROW                         2
+#define ROWOW_LR_FLAG_SHIELD                        3
+
+#define ROWOW_MAX_REFINE                            10
+#define ROWOW_MAX_SLOTS                             4       // Card slots on an item
 
 // The monster modes the battle rules read so far (rAthena's e_mode bits).  The AI modes come with the monster AI (R10)
 #define ROWOW_MODE_IGNORE_MELEE                     0x0010000
@@ -440,7 +463,12 @@ struct ROWOWItem
     uint32 EquipLevelMin = 0;
     uint32 EquipLevelMax = 0;
     uint32 DelayDuration = 0; // How long after using it before another of it can be used, in milliseconds
+    uint8 Slots = 0; // Card slots
     std::shared_ptr<ROWOWScript> UseScript; // A usable item's Script, compiled
+    std::shared_ptr<ROWOWScript> BonusScript; // Worn equipment's, a card's or ammo's Script, run by every status calculation
+    std::shared_ptr<ROWOWScript> EquipScript; // Run when it's put on, and UnEquipScript when it's taken off
+    std::shared_ptr<ROWOWScript> UnEquipScript;
+    uint32 CardEnchantmentID = 0; // A card's enchantment, which marks it compounded in an item's card slot
     uint8 WeaponType = ROWOW_WEAPON_TYPE_FIST;
     uint8 AmmoType = ROWOW_AMMO_TYPE_NONE;
     uint32 Locations = 0; // ROWOW_EQUIP_POSITION_* where it's worn
@@ -448,7 +476,6 @@ struct ROWOWItem
     int32 Defense = 0;
     int32 Range = 0;
     int32 WeaponLevel = 0;
-    int32 AmmoElement = -1; // The element an ammo's script gives its attacks (bonus bAtkEle), -1 for none.  The other scripts are R5's
 };
 
 // An item group (rAthena's item_group_db, by its name without IG_): its subgroups, each giving one item picked at random, or all of them
@@ -472,6 +499,21 @@ struct ROWOWItemSubGroup
 struct ROWOWItemGroup
 {
     std::map<uint32, ROWOWItemSubGroup> SubGroupsByID;
+};
+
+// An item combo (item_combos): worn together, the items give the combo's bonuses too
+struct ROWOWItemCombo
+{
+    std::vector<uint32> ItemIDs;
+    std::shared_ptr<ROWOWScript> Script;
+};
+
+// The refine bonuses (refine.yml) of armor (type 0) and each weapon level (1-4): the bonus and the random overrefine bonus, in hundredths
+#define ROWOW_REFINE_TYPE_COUNT                     5
+struct ROWOWRefineBonus
+{
+    int32 Bonus = 0;
+    int32 RandomBonus = 0;
 };
 
 // The rAthena battle config values (conf/battle) the RO rules use (from mod_rowow_db_battle_config), with rAthena's defaults
@@ -535,6 +577,94 @@ struct ROWOWBattleConfig
     int32 AmmoUnequip = 1;
 };
 
+// One weapon hand's bonuses (rAthena's weapon_data): what its cards and scripts add against races, elements, sizes and classes
+struct ROWOWWeaponBonus
+{
+    int32 AddRace[ROWOW_RACE_MAX] = { };
+    int32 AddEle[ROWOW_ELEMENT_MAX] = { };
+    int32 AddSize[ROWOW_SIZE_MAX] = { };
+    int32 AddClass[ROWOW_CLASS_MAX] = { };
+    uint32 IgnoreDefEle = 0; // Bit masks (of elements, races, classes) whose DEF it ignores
+    uint32 IgnoreDefRace = 0;
+    uint32 IgnoreDefClass = 0;
+    uint32 DefRatioAtkEle = 0; // ... whose DEF raises its damage instead (Ice Pick)
+    uint32 DefRatioAtkRace = 0;
+    uint32 DefRatioAtkClass = 0;
+    int32 Overrefine = 0; // The random bonus past the safe refine
+    std::vector<std::pair<uint32, int32>> AddDamageClass; // add_dmg: percent more damage to a monster (mob_db Id)
+};
+
+// A bonus of a system still to come (skills, magic, statuses, drops, autospells), kept by name so that system can read it
+struct ROWOWDeferredBonus
+{
+    std::string Type; // Like bAutoSpell
+    std::vector<int64> Values;
+    uint8 LRFlag = ROWOW_LR_FLAG_NONE;
+};
+
+// A player's bonuses from the worn items, their cards and the item combos (rAthena's bonus, indexed_bonus, special_state and the rates of
+// map_session_data), rebuilt by every status calculation.  Monsters have none
+struct ROWOWBonus
+{
+    int32 ParamBonus[ROWOW_STAT_COUNT] = { };
+    int32 ParamEquip[ROWOW_STAT_COUNT] = { }; // The part of the stats that came from equipment (more HP and SP, as rAthena gives)
+    ROWOWWeaponBonus RightWeapon;
+    ROWOWWeaponBonus LeftWeapon;
+    int32 ArrowAddRace[ROWOW_RACE_MAX] = { };
+    int32 ArrowAddEle[ROWOW_ELEMENT_MAX] = { };
+    int32 ArrowAddSize[ROWOW_SIZE_MAX] = { };
+    int32 ArrowAddClass[ROWOW_CLASS_MAX] = { };
+    int32 SubEle[ROWOW_ELEMENT_MAX] = { }; // subele_script: percent less damage from each element
+    int32 SubRace[ROWOW_RACE_MAX] = { };
+    int32 SubSize[ROWOW_SIZE_MAX] = { };
+    int32 SubClass[ROWOW_CLASS_MAX] = { };
+    int32 CriticalAddRace[ROWOW_RACE_MAX] = { }; // In tenths
+    int32 IgnoreDefByRace[ROWOW_RACE_MAX] = { }; // Percent of the target's DEF ignored
+    int32 IgnoreDefByClass[ROWOW_CLASS_MAX] = { };
+    int32 ExpAddRace[ROWOW_RACE_MAX] = { };
+    int32 ExpAddClass[ROWOW_CLASS_MAX] = { };
+    int32 WeaponAtk[ROWOW_WEAPON_TYPE_MAX] = { };
+    int32 WeaponDamageRate[ROWOW_WEAPON_TYPE_MAX] = { };
+    std::vector<std::pair<uint32, int32>> AddDefMonster; // add_def: percent less damage from a monster (mob_db Id)
+    int32 HP = 0;
+    int32 SP = 0;
+    int32 HPRate = 100;
+    int32 SPRate = 100;
+    int32 HPRecovRate = 100;
+    int32 SPRecovRate = 100;
+    int32 UseSPRate = 100; // dsprate
+    int32 CastRate = 100;
+    int32 MatkRate = 100;
+    int32 CriticalRate = 100;
+    int32 HitRate = 100;
+    int32 FleeRate = 100;
+    int32 Flee2Rate = 100;
+    int32 DefRate = 100;
+    int32 Def2Rate = 100;
+    int32 MdefRate = 100;
+    int32 Mdef2Rate = 100;
+    int32 AspdAdd = 0; // In tenths of a second of delay, negative is faster
+    int32 ArrowHit = 0;
+    int32 ArrowCri = 0;
+    int32 CriticalRangeAtk = 0; // More critical for ranged attacks, in tenths
+    int32 CriticalDef = 0;
+    int32 NearAttackDefRate = 0;
+    int32 LongAttackDefRate = 0;
+    int32 MagicDefRate = 0;
+    int32 MiscDefRate = 0;
+    int32 DoubleRate = 0;
+    int32 DoubleAddRate = 0;
+    int32 PerfectHit = 0;
+    int32 PerfectHitAdd = 0;
+    int32 CritAtkRate = 0;
+    int32 LongAttackAtkRate = 0;
+    int32 ShortAttackAtkRate = 0;
+    int32 SplashRange = 0;
+    int32 SplashAddRange = 0;
+    bool NoSizeFix = false;
+    std::vector<ROWOWDeferredBonus> Deferred;
+};
+
 // An RO combatant's status (rAthena's status_data): a player's from status_calc_pc_sub, the stats with their bonuses and what follows
 // from them, or a monster's from its mob_db row.  Gear scripts and cards (R5), skills (R6) and statuses come in with their milestones
 struct ROWOWStatus
@@ -587,6 +717,7 @@ struct ROWOWStatus
     uint8 LeftWeaponType = ROWOW_WEAPON_TYPE_FIST; // weapontype2
     int32 RegenHP = 1; // HP and SP each natural regen tick (status_calc_regen)
     int32 RegenSP = 1;
+    ROWOWBonus Bonus; // A player's, from its gear
 };
 
 // One attack's result (rAthena's struct Damage)
@@ -661,6 +792,7 @@ struct ROWOWIdentity : public DataMap::Base
     std::map<uint32, ObjectGuid::LowType> ItemGUIDsByEquipPosition; // The RO equipment worn (in the bags, as RO's inventory holds it)
     bool IsEquipmentChanged = false;
     std::string SentEquipmentMessage; // What the client's RO interface was last told of the equipment
+    std::string SentCardsMessage; // ... and of the cards in the bags' items
     uint32 EquipmentCheckTimer = 0;
     uint32 CanUseItemTime = 0; // canuseitem_tick: when the next item can be used (game time, milliseconds)
     std::unordered_map<uint32, uint32> ItemDelayEndTimes; // By item_db Id: when each item with a reuse delay can be used again
@@ -757,6 +889,12 @@ public:
     std::unordered_map<std::string, ROWOWItemGroup> ItemGroupsByName; // By the uppercase group name (IG_ without the prefix)
     std::mutex ItemGroupSharedPoolMutex; // The shared pools' given counts are shared by every map thread
     std::unordered_map<std::string, std::unordered_set<uint32>> MapIDsByMapFlag; // The RO maps with each map flag the item rules read
+    std::unordered_map<uint32, uint32> CardItemIDsByEnchantmentID;
+    std::vector<ROWOWItemCombo> ItemCombos;
+    std::unordered_map<uint32, std::vector<size_t>> ItemComboIndexesByItemID;
+    ROWOWRefineBonus RefineBonuses[ROWOW_REFINE_TYPE_COUNT][ROWOW_MAX_REFINE + 1];
+    std::map<std::string, std::set<uint32>> UnknownBonusItemIDs; // Bonus types no rule takes yet, and the items that have them (startup)
+    uint32 CompilingItemID = 0; // The item whose script is being compiled (startup)
 
     void LoadConfigurationFile();
     void LoadDataTables();
@@ -843,8 +981,8 @@ public:
     void StatusCalcMisc(ROWOWStatus& status, uint32 level) const; // status_calc_misc
     static int32 GetBattleObjectType(ROWOWStatus const& status) { return status.IsPlayer == true ? ROWOW_BL_PC : ROWOW_BL_MOB; }
     static int32 GetElementByName(std::string const& name); // An element (Ele_* without the prefix, any case), or -1
-    uint32 StatusCalcMaxHPPC(ROWOWIdentity const& identity, int32 vit) const; // status_calc_maxhp_pc
-    uint32 StatusCalcMaxSPPC(ROWOWIdentity const& identity, int32 int_) const; // status_calc_maxsp_pc
+    uint32 StatusCalcMaxHPPC(ROWOWIdentity const& identity, ROWOWStatus const& status) const; // status_calc_maxhp_pc
+    uint32 StatusCalcMaxSPPC(ROWOWIdentity const& identity, ROWOWStatus const& status) const; // status_calc_maxsp_pc
     static void StatusCalcRegen(ROWOWStatus& status); // status_calc_regen, for a player
     ROWOWItem const* GetROItem(Item const* item) const;
 
@@ -932,6 +1070,19 @@ public:
     void SendItemIdentifyList(Player* player); // clif_item_identify_list
     void TeleportToRandomSpot(Player* player); // A random spot on the map (AL_TELEPORT level 1), at one of its monsters' homes
     void TeleportToSavePoint(Player* player); // The identity's save point (AL_TELEPORT level 2 and up)
+
+    // RO bonuses and cards (ROWOW_Bonus.cpp): the port of rAthena's pc_bonus..pc_bonus5 and the item part of status_calc_pc_sub, the
+    // scripts of the worn items, their cards and combos, refine, card compounding (pc_insert_card) and battle_calc_cardfix
+    void LoadBonusData();
+    void StatusCalcPCItems(Player* player, ROWOWIdentity const& identity, ROWOWStatus& status) const; // Runs the gear's scripts into status
+    void PCBonus(ROWOWScriptContext& context, std::string const& type, std::vector<int64> const& values) const; // pc_bonus..pc_bonus5
+    static uint32 GetItemCard(Item const* item, uint8 slot); // The card (item_db Id) in a card slot, 0 for none
+    void SetItemCard(Player* player, Item* item, uint8 slot, uint32 cardItemID) const;
+    bool PCInsertCard(Player* player, Item* card, Item* equipment); // pc_insert_card
+    void SendCardTargetsToClient(Player* player, Item* card); // clif_use_card: the items a card can go into (ROWOWCARDLIST)
+    void SendItemCardsToClient(Player* player, ROWOWIdentity& identity, bool isForced); // The cards in the bags' items (ROWOWCARDS)
+    int64 BattleCalcCardFix(Unit* src, Unit* target, int32 rhEle, int32 lhEle, int64 damage, int32 left, int32 flag) const; // battle_calc_cardfix, BF_WEAPON
+    void RunItemScript(Player* player, ROWOWScript const* script, Item const* item); // An EquipScript or UnEquipScript
 
     // Keeps the worn items true to the bags (one sold, moved to the bank or destroyed is no longer worn) and tells the client's RO interface
     // where each worn item is, under the ROWOWEQUIP prefix, when that changes
