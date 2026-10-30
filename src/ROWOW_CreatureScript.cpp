@@ -334,6 +334,23 @@ public:
             // the core's unreachable target handling (evading after a while) take over, as it does for its own chase.  A ranged attacker
             // only closes to within its attack range, unless something blocks its view from there
             Movement::PointsArray path;
+
+            // unit_walktoxy: a confused monster walks off a random way, as far as its target is (map_random_dir), instead of to it
+            if (ROWOW->GetSCE(me, ROWOW_SC_CONFUSION) != nullptr)
+            {
+                ROWOWMapGrid const* mapGrid = ROWOW->GetMapGrid(me->GetMapId());
+                int32 goalX = 0, goalY = 0;
+                ROWOW->GetUnitCell(victim, goalX, goalY);
+                if (mapGrid != nullptr && ROWOW->MapRandomDir(me, goalX, goalY) == true &&
+                    ROWOW->BuildGroundContouredPath(me, mapGrid->GetCellCenterWorldX(goalY), mapGrid->GetCellCenterWorldY(goalX), 0, path) == true && path.size() >= 2)
+                {
+                    me->GetMotionMaster()->MoveSplinePath(&path, FORCED_MOVEMENT_RUN);
+                    IsMovingOnContouredPath = true;
+                    HasChaseGoal = false;
+                }
+                return;
+            }
+
             float meleeRange = me->GetMeleeRange(victim);
             float reachDistance = meleeRange;
             float stopShortDistance = meleeRange * 0.5f;

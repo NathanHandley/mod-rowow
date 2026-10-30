@@ -25,16 +25,24 @@
 using namespace std;
 
 // RO combat's hooks: a swing between RO combatants is RO's normal attack (ROWOW_Battle.cpp), an RO monster spawns with its RO HP and
-// attack delay, and the form attacks with its RO weapon.  All of it runs in the map's thread (the player's own, for the auto attack)
+// attack delay and keeps its status changes, an RO combatant's speed is its RO walk speed, and the form attacks with its RO weapon.  All of it runs in the map's thread (the player's
+// own, for the auto attack)
 
 class ROWOW_BattleUnitScript : public UnitScript
 {
 public:
-    ROWOW_BattleUnitScript() : UnitScript("ROWOW_BattleUnitScript", true, { UNITHOOK_ON_CALCULATE_MELEE_DAMAGE }) {}
+    ROWOW_BattleUnitScript() : UnitScript("ROWOW_BattleUnitScript", true, { UNITHOOK_ON_CALCULATE_MELEE_DAMAGE, UNITHOOK_ON_UNIT_UPDATE_SPEED }) {}
 
     bool OnCalculateMeleeDamage(Unit* attacker, Unit* victim, CalcDamageInfo* damageInfo) override
     {
         return ROWOW->CalculateMeleeDamage(attacker, victim, damageInfo);
+    }
+
+    // An RO combatant's WoW speed follows its RO walk speed, which statuses change (Increase AGI, Decrease AGI, Curse...)
+    void OnUnitUpdateSpeed(Unit* unit, uint8 moveType, float& speed) override
+    {
+        if (ROWOW->IsEnabled == true && unit != nullptr)
+            ROWOW->ApplyROSpeed(unit, moveType, speed);
     }
 };
 
@@ -49,6 +57,28 @@ public:
         if (ROWOW->IsEnabled == false || creature == nullptr)
             return;
         ROWOW->ApplyMobStatus(creature);
+    }
+
+    // An RO monster's status changes run out in its own update, and its steps in and out of ground skill units count there
+    void OnAllCreatureUpdate(Creature* creature, uint32 /*diff*/) override
+    {
+        if (ROWOW->IsEnabled == false || creature == nullptr)
+            return;
+        ROWOW->UpdateStatusChanges(creature);
+        ROWOW->UpdateSkillUnitMove(creature);
+    }
+};
+
+// skill_unit_timer: each map's ground skill units, from the map's update (its own thread)
+class ROWOW_SkillUnitAllMapScript : public AllMapScript
+{
+public:
+    ROWOW_SkillUnitAllMapScript() : AllMapScript("ROWOW_SkillUnitAllMapScript", { ALLMAPHOOK_ON_MAP_UPDATE }) {}
+
+    void OnMapUpdate(Map* map, uint32 diff) override
+    {
+        if (ROWOW->IsEnabled == true && map != nullptr)
+            ROWOW->SkillUnitTimer(map, diff);
     }
 };
 
@@ -79,5 +109,6 @@ void AddROWOWBattleScripts()
 {
     new ROWOW_BattleUnitScript();
     new ROWOW_BattleAllCreatureScript();
+    new ROWOW_SkillUnitAllMapScript();
     new ROWOW_BattlePlayerScript();
 }

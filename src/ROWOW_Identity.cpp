@@ -70,6 +70,14 @@ namespace
         { 4049, "Soul_Linker", "SoulLinker" },
     };
 
+    // Each second job's first job, as a normal job (rAthena's MAPID_FIRSTMASK of a JOBL_2 job; the Super Novice is a Novice of its own)
+    std::pair<uint16, uint16> const SecondJobFirstJobIDs[] =
+    {
+        { 7, 1 }, { 14, 1 }, { 8, 4 }, { 15, 4 }, { 9, 2 }, { 16, 2 }, { 10, 5 }, { 18, 5 }, { 11, 3 }, { 19, 3 }, { 20, 3 }, { 12, 6 }, { 17, 6 },
+        { 4008, 1 }, { 4015, 1 }, { 4009, 4 }, { 4016, 4 }, { 4010, 2 }, { 4017, 2 }, { 4011, 5 }, { 4019, 5 }, { 4012, 3 }, { 4020, 3 }, { 4021, 3 },
+        { 4013, 6 }, { 4018, 6 }, { 4047, 4046 }, { 4049, 4046 },
+    };
+
     std::string ToLower(std::string text)
     {
         for (char& curChar : text)
@@ -164,6 +172,7 @@ void ROWOWMod::LoadIdentityData()
     JobsByID.clear();
     StatusPointsByBaseLevel.clear();
     MapIDsByMapName.clear();
+    MapNamesByMapID.clear();
     ItemTemplateIDsByItemID.clear();
     ItemTemplateIDs.clear();
     StartMapID = 0;
@@ -188,6 +197,8 @@ void ROWOWMod::LoadIdentityData()
             job.IllusionJobKey.resize(job.IllusionJobKey.size() - 5); // Transcendent first jobs look like the first job
         jobIDsByName[GetJobNameKey(job.Name)] = job.JobID;
     }
+    for (auto const& secondJobFirstJobID : SecondJobFirstJobIDs)
+        JobsByID[secondJobFirstJobID.first].FirstJobID = secondJobFirstJobID.second;
     if (ROWOWDataTable const* jobTable = GetDataTable(ROWOW_DATA_TABLE_JOB))
     {
         int32 jobsColumnIndex = jobTable->GetColumnIndex("Jobs");
@@ -238,12 +249,18 @@ void ROWOWMod::LoadIdentityData()
     }
     if (tableNames.find("mod_rowow_map_name") != tableNames.end())
     {
-        if (QueryResult result = WorldDatabase.Query("SELECT `MapName`, `MapID` FROM `mod_rowow_map_name`"))
+        // A map's own name (not one of rAthena's aliases for it) is the one the warp lists show
+        bool hasAliasColumn = WorldDatabase.Query("SELECT 1 FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'mod_rowow_map_name' AND column_name = 'IsAlias'") != nullptr;
+        if (QueryResult result = WorldDatabase.Query(hasAliasColumn == true ? "SELECT `MapName`, `MapID`, `IsAlias` FROM `mod_rowow_map_name`" : "SELECT `MapName`, `MapID`, 0 FROM `mod_rowow_map_name`"))
         {
             do
             {
                 Field* fields = result->Fetch();
-                MapIDsByMapName[ToLower(fields[0].Get<std::string>())] = fields[1].Get<uint32>();
+                std::string mapName = ToLower(fields[0].Get<std::string>());
+                uint32 mapID = fields[1].Get<uint32>();
+                MapIDsByMapName[mapName] = mapID;
+                if (fields[2].Get<uint32>() == 0)
+                    MapNamesByMapID[mapID] = mapName;
             } while (result->NextRow());
         }
     }
@@ -379,7 +396,7 @@ ROWOWIdentity* ROWOWMod::GetIdentity(Player* player)
     uint32 guid = player->GetGUID().GetCounter();
     QueryResult result = CharacterDatabase.Query("SELECT `job`, `base_level`, `base_exp`, `job_level`, `job_exp`, `status_points`, `skill_points`, `str`, `agi`, `vit`, `int`, `dex`, `luk`, "
         "`hp`, `sp`, `zeny`, `save_map`, `save_x`, `save_y`, `save_z`, `save_o`, `last_map`, `last_x`, `last_y`, `last_z`, `last_o`, `return_map`, `return_x`, `return_y`, "
-        "`return_z`, `return_o`, `hair_style`, `hair_color`, `in_form` FROM `mod_rowow_identity` WHERE `guid` = {}", guid);
+        "`return_z`, `return_o`, `hair_style`, `hair_color`, `in_form`, `option` FROM `mod_rowow_identity` WHERE `guid` = {}", guid);
     if (!result)
         return identity;
     Field* fields = result->Fetch();
@@ -402,6 +419,7 @@ ROWOWIdentity* ROWOWMod::GetIdentity(Player* player)
     identity->HairStyle = fields[31].Get<uint8>();
     identity->HairColor = fields[32].Get<uint8>();
     identity->WasInFormAtLoad = fields[33].Get<uint8>() != 0;
+    identity->Option = fields[34].Get<uint32>();
 
     if (QueryResult actionResult = CharacterDatabase.Query("SELECT `button`, `action` FROM `mod_rowow_identity_action` WHERE `guid` = {}", guid))
     {
@@ -419,6 +437,42 @@ ROWOWIdentity* ROWOWMod::GetIdentity(Player* player)
             identity->ItemGUIDsByEquipPosition[equipmentFields[0].Get<uint32>()] = equipmentFields[1].Get<uint32>();
         } while (equipmentResult->NextRow());
     }
+    if (QueryResult skillResult = CharacterDatabase.Query("SELECT `skill_id`, `level` FROM `mod_rowow_identity_skill` WHERE `guid` = {}", guid))
+    {
+        do
+        {
+            Field* skillFields = skillResult->Fetch();
+            if (skillFields[1].Get<uint16>() > 0)
+                identity->SkillLevelsByID[skillFields[0].Get<uint16>()] = skillFields[1].Get<uint16>();
+        } while (skillResult->NextRow());
+    }
+    if (QueryResult variableResult = CharacterDatabase.Query("SELECT `name`, `value` FROM `mod_rowow_identity_variable` WHERE `guid` = {}", guid))
+    {
+        do
+        {
+            Field* variableFields = variableResult->Fetch();
+            identity->Variables[variableFields[0].Get<std::string>()] = variableFields[1].Get<int64>();
+        } while (variableResult->NextRow());
+    }
+    if (QueryResult statusResult = CharacterDatabase.Query("SELECT `type`, `tick`, `val1`, `val2`, `val3`, `val4` FROM `mod_rowow_identity_status` WHERE `guid` = {}", guid))
+    {
+        // chrif_load_scdata: the statuses kept, started again when the identity is next in the RO world
+        do
+        {
+            Field* statusFields = statusResult->Fetch();
+            ROWOWSavedStatusChange saved;
+            saved.Type = statusFields[0].Get<int32>();
+            saved.Tick = statusFields[1].Get<int64>();
+            saved.Val1 = statusFields[2].Get<int32>();
+            saved.Val2 = statusFields[3].Get<int32>();
+            saved.Val3 = statusFields[4].Get<int32>();
+            saved.Val4 = statusFields[5].Get<int32>();
+            identity->SavedStatusChanges.push_back(saved);
+        } while (statusResult->NextRow());
+    }
+    LoadIdentityCart(player, *identity);
+    LoadIdentityMemo(player, *identity);
+    PCCalcSkillTree(*identity);
     return identity;
 }
 
@@ -445,13 +499,13 @@ void ROWOWMod::SaveIdentity(Player* player, CharacterDatabaseTransaction trans)
     ROWOWPosition const& returnPosition = identity->ReturnPosition;
     trans->Append("REPLACE INTO `mod_rowow_identity` (`guid`, `job`, `base_level`, `base_exp`, `job_level`, `job_exp`, `status_points`, `skill_points`, `str`, `agi`, `vit`, "
         "`int`, `dex`, `luk`, `hp`, `sp`, `zeny`, `save_map`, `save_x`, `save_y`, `save_z`, `save_o`, `last_map`, `last_x`, `last_y`, `last_z`, `last_o`, `return_map`, "
-        "`return_x`, `return_y`, `return_z`, `return_o`, `hair_style`, `hair_color`, `in_form`, `updated`) VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, "
-        "{}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
+        "`return_x`, `return_y`, `return_z`, `return_o`, `hair_style`, `hair_color`, `in_form`, `option`, `updated`) VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, "
+        "{}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
         guid, identity->JobID, identity->BaseLevel, identity->BaseExp, identity->JobLevel, identity->JobExp, identity->StatusPoints, identity->SkillPoints,
         identity->Stats[0], identity->Stats[1], identity->Stats[2], identity->Stats[3], identity->Stats[4], identity->Stats[5], identity->HP, identity->SP, identity->Zeny,
         GetPositionMapValue(savePoint), savePoint.X, savePoint.Y, savePoint.Z, savePoint.O, GetPositionMapValue(lastPosition), lastPosition.X, lastPosition.Y,
         lastPosition.Z, lastPosition.O, GetPositionMapValue(returnPosition), returnPosition.X, returnPosition.Y, returnPosition.Z, returnPosition.O,
-        identity->HairStyle, identity->HairColor, identity->IsInForm == true ? 1 : 0, uint32(GameTime::GetGameTime().count()));
+        identity->HairStyle, identity->HairColor, identity->IsInForm == true ? 1 : 0, identity->Option, uint32(GameTime::GetGameTime().count()));
 
     if (identity->AreActionsChanged == true)
     {
@@ -468,12 +522,34 @@ void ROWOWMod::SaveIdentity(Player* player, CharacterDatabaseTransaction trans)
                 itemGUIDByEquipPosition.second);
         identity->IsEquipmentChanged = false;
     }
+    if (identity->AreSkillsChanged == true)
+    {
+        trans->Append("DELETE FROM `mod_rowow_identity_skill` WHERE `guid` = {}", guid);
+        for (auto const& levelBySkillID : identity->SkillLevelsByID)
+            trans->Append("INSERT INTO `mod_rowow_identity_skill` (`guid`, `skill_id`, `level`) VALUES ({}, {}, {})", guid, levelBySkillID.first, levelBySkillID.second);
+        identity->AreSkillsChanged = false;
+    }
+    if (identity->AreVariablesChanged == true)
+    {
+        trans->Append("DELETE FROM `mod_rowow_identity_variable` WHERE `guid` = {}", guid);
+        for (auto const& valueByName : identity->Variables)
+        {
+            std::string name = valueByName.first;
+            CharacterDatabase.EscapeString(name);
+            trans->Append("INSERT INTO `mod_rowow_identity_variable` (`guid`, `name`, `value`) VALUES ({}, '{}', {})", guid, name, valueByName.second);
+        }
+        identity->AreVariablesChanged = false;
+    }
+    SaveIdentityStatusChanges(player, *identity, trans);
+    SaveIdentityCart(player, *identity, trans);
+    SaveIdentityMemo(player, *identity, trans);
 }
 
 bool ROWOWMod::IsSpellKeptInROForm(SpellInfo const* spellInfo) const
 {
-    // The fixed RO spells (the world travel spell; the identity's own skills come with R6), auto attack, and languages (so chat still
-    // works).  The RO skill spells a character learned as itself (from before the identity) are the character's, not the form's
+    // The fixed RO spells (the world travel spell), auto attack, and languages (so chat still works).  The RO skill spells a character
+    // learned as itself (from before the identity) are the character's, not the form's: the form knows the spells of the skills the
+    // identity learned (IsIdentitySkillSpell)
     if (spellInfo == nullptr)
         return false;
     if (spellInfo->Id >= ROWOW_SPELL_ID_RO_START && spellInfo->Id <= ROWOW_SPELL_ID_FIXED_END)
@@ -518,6 +594,19 @@ void ROWOWMod::EnterROForm(Player* player)
         identity->AreActionsChanged = true;
         identity->ItemGUIDsByEquipPosition.clear();
         identity->IsEquipmentChanged = true;
+        identity->SkillLevelsByID.clear();
+        identity->AreSkillsChanged = true;
+        identity->Variables.clear();
+        identity->AreVariablesChanged = true;
+        identity->SavedStatusChanges.clear();
+        identity->AreStatusChangesChanged = true;
+        identity->CartItems.fill(ROWOWCartItem());
+        identity->CartNum = 0;
+        identity->CartWeight = 0;
+        identity->AreCartItemsChanged = true;
+        identity->MemoPoints.fill(ROWOWMemoPoint());
+        identity->AreMemoPointsChanged = true;
+        identity->Option = 0;
         identity->IsNewIdentityPending = true;
     }
 
@@ -552,6 +641,8 @@ void ROWOWMod::EnterROForm(Player* player)
         identity->HiddenSpellIDs.push_back(talentBySpellID.first);
     }
 
+    // The learned skills' spells, before the action bars that hold them
+    RefreshIdentitySkills(player, *identity);
     SendROFormClientSpellsAndActions(player, *identity);
 
     // Zeny, the identity's level and maximums, and its HP and SP
@@ -654,7 +745,12 @@ void ROWOWMod::CompleteROFormChange(Player* player)
             ROWOWJob const* job = GetJob(identity->JobID);
             ChatHandler(player->GetSession()).PSendSysMessage("You are a Ragnarok Online {}, base level {} and job level {}.", job != nullptr ? job->Name : "?",
                 identity->BaseLevel, identity->JobLevel);
+
+            // The statuses kept from the last time in the RO world (RO's login), once the character's own buffs are gone
+            RestoreStatusChanges(player, *identity);
         }
+        else
+            StatusChangeClearOnChangeMap(player); // From one RO map to another
         RefreshROFormLook(player);
     }
     else if (identity->IsFormDeparturePending == true || identity->WasInFormAtLoad == true)
@@ -695,6 +791,13 @@ void ROWOWMod::CompleteROFormChange(Player* player)
     identity->WasInFormAtLoad = false;
     SendROFormStateToClient(player);
     SendROStatusToClient(player);
+    if (identity->IsInForm == true)
+    {
+        SendSkillsToClient(player, *identity, true);
+        SendCartToClient(player, *identity, true);
+        // clif_parse_LoadEndAck: arriving on a map makes the player invincible for a moment (pc_setinvincibletimer)
+        PCSetInvincibleTimer(player);
+    }
 }
 
 void ROWOWMod::RefreshROFormValues(Player* player, ROWOWIdentity& identity)
@@ -717,11 +820,13 @@ void ROWOWMod::RefreshROForm(Player* player)
     if (identity->IsInForm == false)
         return;
     PCCheckItem(player, *identity);
+    RefreshIdentitySkills(player, *identity);
     RefreshROFormValues(player, *identity);
     if (player->IsInWorld() == true)
         RefreshROFormLook(player);
     SendROStatusToClient(player);
     SendEquipmentToClient(player, *identity, false);
+    SendSkillsToClient(player, *identity, false);
 }
 
 void ROWOWMod::RefreshROFormLook(Player* player)
@@ -766,7 +871,8 @@ void ROWOWMod::LeaveROForm(Player* player)
     if (identity->IsInForm == false)
         return;
 
-    // The form's values to keep
+    // The form's values to keep, and its statuses (leaving the RO world is RO's logout)
+    LeaveStatusChanges(player, *identity);
     identity->Zeny = player->GetMoney();
     if (player->IsAlive() == true)
     {
@@ -775,6 +881,7 @@ void ROWOWMod::LeaveROForm(Player* player)
     }
     player->InterruptNonMeleeSpells(false);
     identity->IsInForm = false;
+    GrantIdentitySkillSpells(player, *identity); // Out of the form, it knows none of them
 
     // The character's own values back
     player->SetLevel(identity->WoWLevel, true);
@@ -885,6 +992,7 @@ void ROWOWMod::RespawnAtSavePoint(Player* player)
     player->ResurrectPlayer(1.0f);
     player->SetHealth(std::min(1 + restartHP, player->GetMaxHealth()));
     player->SetPower(POWER_MANA, std::min(sp, player->GetMaxPower(POWER_MANA)));
+    SendStatusChangesToClient(player); // The statuses that stay through death show again
     player->TeleportTo(savePoint.MapID, savePoint.X, savePoint.Y, savePoint.Z, savePoint.O);
 }
 
@@ -896,7 +1004,50 @@ void ROWOWMod::SendROFormClientSpellsAndActions(Player* player, ROWOWIdentity co
     player->SendDirectMessage(&clearActionsPacket);
     SendIdentityActionButtons(player, identity);
     for (uint32 spellID : identity.HiddenSpellIDs)
+        if (std::find(identity.SkillSpellIDs.begin(), identity.SkillSpellIDs.end(), spellID) == identity.SkillSpellIDs.end())
+            SendQuietSpellChange(player, spellID, false);
+}
+
+void ROWOWMod::GrantIdentitySkillSpells(Player* player, ROWOWIdentity& identity)
+{
+    // In the form, the spells of every learned level of each skill on the tree it may use (a lower level can be picked, as in RO), learned
+    // as temporary spells so they're never saved with the character's own.  Each is only learned and forgotten as that changes: forgetting
+    // a spell takes off its auras.  The client is told quietly
+    std::vector<uint32> spellIDs;
+    if (identity.IsInForm == true)
+    {
+        for (auto const& levelBySkillID : identity.SkillLevelsByID)
+        {
+            ROWOWSkill const* skill = GetSkill(levelBySkillID.first);
+            if (skill == nullptr || identity.TreeSkillIDs.find(levelBySkillID.first) == identity.TreeSkillIDs.end())
+                continue;
+            for (uint16 level = 1; level <= levelBySkillID.second && level <= skill->SpellIDsByLevel.size(); level++)
+                if (skill->SpellIDsByLevel[level - 1] != 0 && sSpellMgr->GetSpellInfo(skill->SpellIDsByLevel[level - 1]) != nullptr)
+                    spellIDs.push_back(skill->SpellIDsByLevel[level - 1]);
+        }
+        std::sort(spellIDs.begin(), spellIDs.end());
+    }
+    for (uint32 spellID : identity.SkillSpellIDs)
+    {
+        if (std::binary_search(spellIDs.begin(), spellIDs.end(), spellID) == true)
+            continue;
+        player->removeSpell(spellID, SPEC_MASK_ALL, true, false);
         SendQuietSpellChange(player, spellID, false);
+    }
+    for (uint32 spellID : spellIDs)
+    {
+        if (std::binary_search(identity.SkillSpellIDs.begin(), identity.SkillSpellIDs.end(), spellID) == true)
+            continue;
+        player->_addSpell(spellID, SPEC_MASK_ALL, true, false, false);
+        SendQuietSpellChange(player, spellID, true);
+    }
+    identity.SkillSpellIDs = spellIDs;
+}
+
+bool ROWOWMod::IsIdentitySkillSpell(Player* player, uint32 spellID) const
+{
+    ROWOWIdentity const* identity = player->CustomData.Get<ROWOWIdentity>("ROWOWIdentity");
+    return identity != nullptr && identity->IsInForm == true && std::binary_search(identity->SkillSpellIDs.begin(), identity->SkillSpellIDs.end(), spellID) == true;
 }
 
 void ROWOWMod::SendIdentityActionButtons(Player* player, ROWOWIdentity const& identity) const

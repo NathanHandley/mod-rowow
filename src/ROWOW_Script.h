@@ -109,6 +109,8 @@ struct ROWOWScriptContext
     ROWOWStatus* BonusStatus = nullptr; // The status a worn item's script gives its bonuses to (status_calc_pc_sub), null otherwise
     uint8 BonusLRFlag = 0; // ROWOW_LR_FLAG_*: whose the bonuses are
     Item const* EquipItem = nullptr; // The worn item whose script (or card's, combo's) runs (current_equip_item_index)
+    uint32 EquipPositions = 0; // Where it's worn (its equip, or current_equip_combo_pos for a combo), which an autobonus keeps
+    uint32 EquipCardID = 0; // The card whose script runs (current_equip_card_id), 0 for none
     std::unordered_map<std::string, ROWOWScriptValue> Variables; // By full name.  Only the run's own for now: lasting variables come with R7
     std::vector<ROWOWScriptValue> Stack;
     size_t InstructionIndex = 0;

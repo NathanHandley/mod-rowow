@@ -1,0 +1,2378 @@
+//  Author: Nathan Handley (nathanhandley@protonmail.com)
+//  Copyright (c) 2026 Nathan Handley
+//
+//  This program is free software; you can redistribute it and/or modify it
+//  under the terms of the GNU Affero General Public License as published by the
+//  Free Software Foundation; either version 3 of the License, or (at your
+//  option) any later version.
+//
+//  This program is distributed in the hope that it will be useful, but WITHOUT
+//  ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+//  FITNESS FOR A PARTICULAR PURPOSE.See the GNU Affero General Public License for
+//  more details.
+//
+//  You should have received a copy of the GNU General Public License
+//  along with this program.  If not, see <http://www.gnu.org/licenses/>.
+//
+//  Ported from rAthena (https://github.com/rathena/rathena), src/map/skill.cpp, unit.cpp, battle.cpp and status.cpp, pre-renewal paths:
+//  Copyright (c) rAthena Dev Teams - Licensed under GNU GPL.  For more information, see LICENCE in rAthena's main folder
+
+#include "CellImpl.h"
+#include "Chat.h"
+#include "Creature.h"
+#include "GameTime.h"
+#include "GridNotifiers.h"
+#include "GridNotifiersImpl.h"
+#include "Group.h"
+#include "Item.h"
+#include "Log.h"
+#include "Map.h"
+#include "ModelIgnoreFlags.h"
+#include "MotionMaster.h"
+#include "ObjectAccessor.h"
+#include "ObjectMgr.h"
+#include "Player.h"
+#include "SpellInfo.h"
+#include "SpellMgr.h"
+#include "Unit.h"
+#include "WorldPacket.h"
+#include "WorldSession.h"
+
+#include "ROWOW.h"
+
+using namespace std;
+
+// The RO skill engine: rAthena's skill use with its function names (in the comments beside each and in ROWOW.h).  A cast starts in
+// UnitSkillUse (unit_skilluse_id2's checks), takes UnitSkillCastTime (skill_castfix, the delays set at cast begin), and ends in
+// SkillCastEndCheck and SkillCastEnd (skill_castend_id / skill_castend_pos: the costs, the after-cast delay and the cooldown, then the
+// castend dispatch to the skill's ROWOWSkillImpl).  Everything runs in the map thread the caster and its targets share: a unit's skill
+// state is on the unit, and the skill data and impl registry are only read after startup
+
+namespace
+{
+    // The attack type and range checks of an added status (skill_additional_effect's and skill_counter_additional_effect's ATF_ flags): a
+    // trigger with some of the types needs one of them, and with one range needs it
+    bool IsAddEffectTriggered(uint8 flag, int32 attackType)
+    {
+        if ((flag & (ROWOW_ATF_WEAPON | ROWOW_ATF_MAGIC | ROWOW_ATF_MISC)) != (ROWOW_ATF_WEAPON | ROWOW_ATF_MAGIC | ROWOW_ATF_MISC))
+        {
+            // Trigger has attack type consideration.
+            if (((flag & ROWOW_ATF_WEAPON) != 0 && (attackType & ROWOW_BF_WEAPON) != 0) || ((flag & ROWOW_ATF_MAGIC) != 0 && (attackType & ROWOW_BF_MAGIC) != 0) ||
+                ((flag & ROWOW_ATF_MISC) != 0 && (attackType & ROWOW_BF_MISC) != 0))
+                ;
+            else
+                return false;
+        }
+        if ((flag & (ROWOW_ATF_LONG | ROWOW_ATF_SHORT)) != (ROWOW_ATF_LONG | ROWOW_ATF_SHORT))
+        {
+            // Trigger has range consideration.
+            if (((flag & ROWOW_ATF_LONG) != 0 && (attackType & ROWOW_BF_LONG) == 0) || ((flag & ROWOW_ATF_SHORT) != 0 && (attackType & ROWOW_BF_SHORT) == 0))
+                return false; // Range Failed.
+        }
+        return true;
+    }
+
+    // dirx and diry: each RO direction's step in cells (0 north, then counter-clockwise)
+    int32 const DirX[ROWOW_RO_DIRECTION_COUNT] = { 0, -1, -1, -1, 0, 1, 1, 1 };
+    int32 const DirY[ROWOW_RO_DIRECTION_COUNT] = { 1, 1, 0, -1, -1, -1, 0, 1 };
+
+    // Whether two names are the same but for case (the bonus types, as scripts write them)
+    bool IsSameName(std::string const& a, char const* b)
+    {
+        size_t length = strlen(b);
+        return a.size() == length && std::equal(a.begin(), a.end(), b, [](char x, char y) { return tolower((unsigned char)x) == tolower((unsigned char)y); });
+    }
+
+    // Yards an area search reaches past its cells, so the units of its cells standing above or below the origin (the search is 3D) are found
+    constexpr float MapSearchHeightAllowance = 5.0f;
+
+    // How high a knocked back unit may be pushed up or down from one cell to the next before it's a wall or a cliff (yards)
+    constexpr float KnockbackMaxStepHeight = 1.5f;
+    constexpr float KnockbackSpeed = 25.0f; // Yards a second: RO's knockback is a quick slide
+
+    // The client's RO message for each skill failure (msgstringtable), as clif_skill_fail sends them
+    char const* GetSkillFailText(int32 cause)
+    {
+        switch (cause)
+        {
+            case ROWOW_USESKILL_FAIL_SP_INSUFFICIENT: return "SP Insufficient";
+            case ROWOW_USESKILL_FAIL_HP_INSUFFICIENT: return "HP Insufficient";
+            case ROWOW_USESKILL_FAIL_SKILLINTERVAL: return "You can't use skills right after another (after-cast delay).";
+            case ROWOW_USESKILL_FAIL_MONEY: return "Insufficient Zeny";
+            case ROWOW_USESKILL_FAIL_THIS_WEAPON: return "This skill can't be used with this weapon.";
+            case ROWOW_USESKILL_FAIL_REDJAMSTONE: return "Red Gemstone required.";
+            case ROWOW_USESKILL_FAIL_BLUEJAMSTONE: return "Blue Gemstone required.";
+            case ROWOW_USESKILL_FAIL_TOTARGET: return "This skill can't be used on that target.";
+            case ROWOW_USESKILL_FAIL_HOLYWATER: return "Holy Water required.";
+            case ROWOW_USESKILL_FAIL_CART: return "A Pushcart is required.";
+            case ROWOW_USESKILL_FAIL_NEED_EQUIPMENT: return "The required equipment isn't worn.";
+            case ROWOW_USESKILL_FAIL_SPIRITS: return "Spirit Spheres required.";
+            case ROWOW_USESKILL_FAIL_NEED_MORE_BULLET: return "More ammunition is required.";
+            case ROWOW_USESKILL_FAIL_NO_AMMO: return "Please equip the proper ammunition first.";
+            default: return "Skill has failed.";
+        }
+    }
+}
+
+void ROWOWMod::RegisterSkillImpl(ROWOWSkillImpl* impl)
+{
+    SkillImplsBySkillID[impl->GetSkillID()].reset(impl);
+}
+
+ROWOWSkillImpl const* ROWOWMod::GetSkillImpl(uint16 skillID) const
+{
+    auto implIter = SkillImplsBySkillID.find(skillID);
+    if (implIter == SkillImplsBySkillID.end())
+        return nullptr;
+    return implIter->second.get();
+}
+
+bool ROWOWMod::GetSkillOfSpell(uint32 spellID, uint16& skillIDOut, uint16& skillLevelOut) const
+{
+    auto skillIDIter = SkillIDsBySpellID.find(spellID);
+    auto levelIter = SkillLevelsBySpellID.find(spellID);
+    if (skillIDIter == SkillIDsBySpellID.end() || levelIter == SkillLevelsBySpellID.end())
+        return false;
+    skillIDOut = skillIDIter->second;
+    skillLevelOut = levelIter->second;
+    return true;
+}
+
+uint32 ROWOWMod::GetSkillSpellID(uint16 skillID, uint16 skillLevel) const
+{
+    ROWOWSkill const* skill = GetSkill(skillID);
+    if (skill == nullptr || skillLevel == 0 || skillLevel > skill->SpellIDsByLevel.size())
+        return 0;
+    return skill->SpellIDsByLevel[skillLevel - 1];
+}
+
+uint64 ROWOWMod::GetTick()
+{
+    return uint64(GameTime::GetGameTimeMS().count());
+}
+
+ROWOWSkillUnitData* ROWOWMod::GetSkillUnitData(Unit* unit) const
+{
+    return unit->CustomData.GetDefault<ROWOWSkillUnitData>("ROWOWSkillUnitData");
+}
+
+void ROWOWMod::GetWorldCell(uint32 mapID, float worldX, float worldY, int32& xOut, int32& yOut) const
+{
+    // RO's x runs against WoW's Y and RO's y along WoW's X; off the RO maps the cells are laid from the map's origin
+    if (ROWOWMapGrid const* mapGrid = GetMapGrid(mapID))
+    {
+        xOut = mapGrid->GetCellX(worldY);
+        yOut = mapGrid->GetCellY(worldX);
+        return;
+    }
+    xOut = int32(std::floor(-worldY / CellSize));
+    yOut = int32(std::floor(worldX / CellSize));
+}
+
+void ROWOWMod::GetUnitCell(Unit const* unit, int32& xOut, int32& yOut) const
+{
+    GetWorldCell(unit->GetMapId(), unit->GetPositionX(), unit->GetPositionY(), xOut, yOut);
+}
+
+int32 ROWOWMod::DistanceBL(Unit const* src, Unit const* target) const
+{
+    // distance_bl: the larger of the x and y cell distances (no CIRCULAR_AREA)
+    int32 srcX = 0, srcY = 0, targetX = 0, targetY = 0;
+    GetUnitCell(src, srcX, srcY);
+    GetUnitCell(target, targetX, targetY);
+    return std::max(std::abs(targetX - srcX), std::abs(targetY - srcY));
+}
+
+int32 ROWOWMod::DistanceMathBL(Unit const* src, Unit const* target) const
+{
+    // distance_math_bl: the straight distance in cells, rounded down
+    int32 srcX = 0, srcY = 0, targetX = 0, targetY = 0;
+    GetUnitCell(src, srcX, srcY);
+    GetUnitCell(target, targetX, targetY);
+    return int32(std::sqrt(float((targetX - srcX) * (targetX - srcX) + (targetY - srcY) * (targetY - srcY))));
+}
+
+int32 ROWOWMod::SkillGetRange2(Unit const* unit, uint16 skillID, uint16 skillLevel, bool isServer) const
+{
+    // skill_get_range2: the skill's range with the attack range and Vulture's Eye, Snake Eye and Shadow Jump [Skotlex]
+    ROWOWSkill const* skill = GetSkill(skillID);
+    ROWOWStatus const* status = GetROStatus(unit);
+    if (skill == nullptr || status == nullptr)
+        return 0;
+    int32 range = skill->Range[ROWOWSkill::GetLevelIndex(skillLevel)];
+    if (range < 0)
+    {
+        if ((BattleConfig.SkillrangeFromWeapon & GetBattleObjectType(*status)) != 0)
+            return status->Range;
+        range *= -1;
+    }
+    if (isServer == true && range > 14)
+        range = 14; // Server-sided base range can't be above 14
+    if (unit->IsPlayer() == true)
+    {
+        if (skill->Inf2[ROWOW_INF2_ALTERRANGEVULTURE] == true)
+            range += PCCheckSkill(unit, ROWOW_SKILL_AC_VULTURE);
+        if (skill->Inf2[ROWOW_INF2_ALTERRANGESNAKEEYE] == true)
+            range += PCCheckSkill(unit, ROWOW_SKILL_GS_SNAKEEYE); // added to allow GS skills to be effected by the range of Snake Eyes [Reddozen]
+        if (skill->Inf2[ROWOW_INF2_ALTERRANGESHADOWJUMP] == true)
+        {
+            ROWOWSkill const* shadowJump = GetSkill(ROWOW_SKILL_NJ_SHADOWJUMP);
+            range = shadowJump != nullptr ? shadowJump->Range[ROWOWSkill::GetLevelIndex(uint16(PCCheckSkill(unit, ROWOW_SKILL_NJ_SHADOWJUMP)))] : range;
+        }
+    }
+    if (range == 0 && unit->IsPlayer() == false)
+        return 9; // Enable non players to use self skills on others. [Skotlex]
+    return range;
+}
+
+uint8 ROWOWMod::SkillGetCastType(uint16 skillID) const
+{
+    // skill_get_casttype
+    ROWOWSkill const* skill = GetSkill(skillID);
+    if (skill == nullptr)
+        return ROWOW_CAST_DAMAGE;
+    if ((skill->Inf & ROWOW_INF_GROUND_SKILL) != 0)
+        return ROWOW_CAST_GROUND;
+    if ((skill->Inf & ROWOW_INF_SUPPORT_SKILL) != 0)
+        return ROWOW_CAST_NODAMAGE;
+    if ((skill->Inf & ROWOW_INF_SELF_SKILL) != 0)
+    {
+        if (skill->Inf2[ROWOW_INF2_NOTARGETSELF] == true)
+            return ROWOW_CAST_DAMAGE; // Combo skill.
+        return ROWOW_CAST_NODAMAGE;
+    }
+    if (skill->NK[ROWOW_NK_NODAMAGE] == true)
+        return ROWOW_CAST_NODAMAGE;
+    return ROWOW_CAST_DAMAGE;
+}
+
+int32 ROWOWMod::BattleCheckTarget(Unit const* src, Unit const* target, int32 flag) const
+{
+    // battle_check_target: 1 when the target is one of the flag's kinds (BCT_ENEMY, BCT_PARTY...), -1 when it isn't, 0 when it can't be
+    // targeted at all.  RO combatants are players in the form and RO monsters: a monster is every player's natural enemy, monsters are
+    // each other's friends, and players are enemies only where WoW lets them fight (rAthena's PvP map flags).  (The slaves and summons,
+    // skill units, the immunity statuses and battlegrounds come with their systems)
+    if (src == nullptr || target == nullptr)
+        return 0;
+
+    // Can't hit self and master, but can hit other slaves
+    if ((flag & ROWOW_BCT_WOS) != 0 && src == target)
+        return -1;
+    if (GetROStatus(target) == nullptr || target->IsAlive() == false || target->IsInWorld() == false || src->GetMap() != target->GetMap())
+        return 0;
+    if (target->IsCreature() == true && target->ToCreature()->IsEvadingAttacks() == true)
+        return 0;
+    if (target->IsPlayer() == true && (target->ToPlayer()->IsGameMaster() == true || PCIsInvincible(target) == true) && src != target)
+        return -1; // Cannot be targeted yet (invincible_timer, pc_isinvisible)
+
+    int32 state = 0;
+    bool stripEnemy = true; // Flag which marks whether to remove the BCT_ENEMY status if it's also friend/ally.
+    if (src->IsPlayer() == true)
+    {
+        if (target->IsPlayer() == false)
+            state |= ROWOW_BCT_ENEMY; // Natural enemy.
+    }
+    else if (target->IsPlayer() == true)
+        state |= ROWOW_BCT_ENEMY;
+    else
+        state |= ROWOW_BCT_PARTY; // Normal mobs with no ai are friends.
+
+    if ((flag & ROWOW_BCT_ALL) == ROWOW_BCT_ALL)
+        return 1; // All actually stands for all attackable chars
+    if (flag == ROWOW_BCT_NOONE)
+        return -1;
+    if (src == target)
+    {
+        // No need for further testing.
+        state |= ROWOW_BCT_SELF | ROWOW_BCT_PARTY | ROWOW_BCT_GUILD;
+        if ((state & ROWOW_BCT_ENEMY) != 0 && stripEnemy == true)
+            state &= ~ROWOW_BCT_ENEMY;
+        return (flag & state) != 0 ? 1 : -1;
+    }
+
+    Player const* srcPlayer = src->ToPlayer();
+    Player const* targetPlayer = target->ToPlayer();
+    bool isSameParty = srcPlayer != nullptr && targetPlayer != nullptr && srcPlayer->GetGroup() != nullptr && srcPlayer->GetGroup() == targetPlayer->GetGroup();
+    bool isSameGuild = srcPlayer != nullptr && targetPlayer != nullptr && srcPlayer->GetGuildId() != 0 && srcPlayer->GetGuildId() == targetPlayer->GetGuildId();
+    if (srcPlayer != nullptr && targetPlayer != nullptr && src->IsValidAttackTarget(target) == true)
+    {
+        // mapdata_flag_vs: check rivalry settings
+        if ((flag & (ROWOW_BCT_PARTY | ROWOW_BCT_ENEMY)) != 0)
+            state |= isSameParty == true ? ROWOW_BCT_PARTY : ROWOW_BCT_ENEMY;
+        if ((flag & (ROWOW_BCT_GUILD | ROWOW_BCT_ENEMY)) != 0)
+            state |= isSameGuild == true ? ROWOW_BCT_GUILD : ROWOW_BCT_ENEMY;
+    }
+    else
+    {
+        // Non pvp/gvg, check party/guild settings.
+        if (((flag & ROWOW_BCT_PARTY) != 0 || (state & ROWOW_BCT_ENEMY) != 0) && isSameParty == true)
+            state |= ROWOW_BCT_PARTY;
+        if (((flag & ROWOW_BCT_GUILD) != 0 || (state & ROWOW_BCT_ENEMY) != 0) && isSameGuild == true)
+            state |= ROWOW_BCT_GUILD;
+    }
+    if (state == 0)
+        state = ROWOW_BCT_NEUTRAL;
+    // Alliance state takes precedence over enemy one.
+    else if ((state & ROWOW_BCT_ENEMY) != 0 && stripEnemy == true && (state & (ROWOW_BCT_SELF | ROWOW_BCT_PARTY | ROWOW_BCT_GUILD)) != 0)
+        state &= ~ROWOW_BCT_ENEMY;
+    return (flag & state) != 0 ? 1 : -1;
+}
+
+bool ROWOWMod::StatusCheckSkillUse(Unit const* src, Unit const* target, uint16 skillID, int32 flag) const
+{
+    // status_check_skilluse: whether the caster can use a skill (0 a normal attack) now, and on the target.  flag 0: the cast starts; 1: it
+    // ends; 2: a target of an area.  A target must be in the world, and alive past the cast's start (the castend and area checks).  (The
+    // item skills, the wings, don't come through here)
+    ROWOWStatus const* status = src != nullptr ? GetROStatus(src) : nullptr;
+    if (src != nullptr)
+    {
+        if (src->IsInWorld() == false || (src->IsPlayer() == false && src->IsAlive() == false))
+            return false;
+    }
+    // Without a caster (a ground skill's unit with skill_caster_check off) rAthena's dummy status has every mode
+    uint32 mode = status != nullptr ? status->Mode : std::numeric_limits<uint32>::max();
+    ROWOWStatusChange const* sc = src != nullptr ? GetStatusChange(src) : nullptr;
+    ROWOWStatusChange const* tsc = target != nullptr ? GetStatusChange(target) : nullptr;
+    if (sc != nullptr && sc->IsEmpty() == true && sc->Option == 0)
+        sc = nullptr;
+    if (tsc != nullptr && tsc->IsEmpty() == true && tsc->Option == 0)
+        tsc = nullptr;
+
+    if (skillID == 0)
+    {
+        // Normal attack checks.
+        if (sc != nullptr && sc->Cant.Attack == true)
+            return false;
+        // This mode is only needed for melee attacking.
+        if ((mode & ROWOW_MODE_CANATTACK) == 0)
+            return false;
+        // Dead state is not checked for skills as some skills can be used on dead characters, said checks are left to skill.cpp [Skotlex]
+        if (target != nullptr && target->IsAlive() == false)
+            return false;
+    }
+
+    if (skillID == ROWOW_SKILL_PA_PRESSURE && flag != 0 && tsc != nullptr && (tsc->Option & ROWOW_OPTION_HIDE) != 0)
+        return false; // Gloria Avoids pretty much everything....
+
+    if (sc != nullptr)
+    {
+        if (skillID > 0 && sc->Opt1 != 0 && sc->Opt1 != ROWOW_OPT1_STONEWAIT && sc->Opt1 != ROWOW_OPT1_BURNING)
+        {
+            // Stuned/Frozen/etc
+            if (flag != 1) // Can't cast, casted stuff can't damage.
+                return false;
+            if (SkillGetCastType(skillID) == ROWOW_CAST_DAMAGE)
+                return false; // Damage spells stop casting.
+        }
+
+        if ((sc->HasSCE(ROWOW_SC_TRICKDEAD) == true && skillID != ROWOW_SKILL_NV_TRICKDEAD) || (sc->HasSCE(ROWOW_SC_AUTOCOUNTER) == true && flag == 0 && skillID != 0) ||
+            (sc->HasSCE(ROWOW_SC_GOSPEL) == true && sc->GetSCE(ROWOW_SC_GOSPEL)->Val4 == ROWOW_BCT_SELF && skillID != ROWOW_SKILL_PA_GOSPEL))
+            return false;
+
+        if (ROWOWStatusChangeEntry const* sce = sc->GetSCE(ROWOW_SC_BLADESTOP))
+        {
+            // Blade Stop's level lets a Monk use more of its skills while holding the blade
+            int32 level = sce->Val1;
+            bool allowed = (level >= 5 && skillID == ROWOW_SKILL_MO_EXTREMITYFIST) || (level >= 4 && skillID == ROWOW_SKILL_MO_CHAINCOMBO) ||
+                (level >= 3 && skillID == ROWOW_SKILL_MO_INVESTIGATE) || (level >= 2 && skillID == ROWOW_SKILL_MO_FINGEROFFENSIVE);
+            if (allowed == false)
+                return false;
+        }
+
+        // Only do skill specific checks here, normal attacks should have been checked already (additionally the skill db lookup would fail)
+        if (ROWOWStatusChangeEntry const* sce = sc->GetSCE(ROWOW_SC_DANCING); sce != nullptr && flag != 2 && skillID != 0)
+        {
+            ROWOWSkill const* skill = GetSkill(skillID);
+            if (skill == nullptr)
+                return false;
+            if (sc->HasSCE(ROWOW_SC_LONGING) == true)
+            {
+                // Allow everything except dancing/re-dancing. [Skotlex]
+                if (skillID == ROWOW_SKILL_BD_ENCORE || skill->Inf2[ROWOW_INF2_ISSONG] == true || skill->Inf2[ROWOW_INF2_ISENSEMBLE] == true)
+                    return false;
+            }
+            else if (skill->Inf2[ROWOW_INF2_ALLOWWHENPERFORMING] == false) // Skills that can be used in dancing state
+                return false;
+            if ((sce->Val1 & 0xFFFF) == ROWOW_SKILL_CG_HERMODE && skillID == ROWOW_SKILL_BD_ADAPTATION)
+                return false; // Can't amp out of Wand of Hermode :/ [Skotlex]
+        }
+
+        if (skillID != 0)
+        {
+            // Skills blocked through status changes...  Blocked only from using the skill (stuff like autospell may still go through
+            ROWOWStatusChangeEntry const* basilica = sc->GetSCE(ROWOW_SC_BASILICA);
+            if (flag == 0 && (sc->Cant.Cast == true ||
+                (basilica != nullptr && (basilica->Val4 != int32(src->GetGUID().GetCounter()) || skillID != ROWOW_SKILL_HP_BASILICA)) || // Only Basilica caster that can cast, and only Basilica to cancel it
+                (sc->HasSCE(ROWOW_SC_MARIONETTE) == true && skillID != ROWOW_SKILL_CG_MARIONETTE) || // Only skill you can use is marionette again to cancel it
+                (sc->HasSCE(ROWOW_SC_MARIONETTE2) == true && skillID == ROWOW_SKILL_CG_MARIONETTE) || // Cannot use marionette if you are being buffed by another
+                (sc->HasSCE(ROWOW_SC_ANKLE) == true && skillID == ROWOW_SKILL_AL_TELEPORT))) // skill_block_check
+                return false;
+
+            // Skill blocking.
+            ROWOWSkill const* skill = GetSkill(skillID);
+            ROWOWStatusChangeEntry const* noChat = sc->GetSCE(ROWOW_SC_NOCHAT);
+            if ((sc->HasSCE(ROWOW_SC_VOLCANO) == true && skillID == ROWOW_SKILL_WZ_ICEWALL) || (sc->HasSCE(ROWOW_SC_ROKISWEIL) == true && skillID != ROWOW_SKILL_BD_ADAPTATION) ||
+                (sc->HasSCE(ROWOW_SC_HERMODE) == true && skill != nullptr && (skill->Inf & ROWOW_INF_SUPPORT_SKILL) != 0) ||
+                (noChat != nullptr && (noChat->Val1 & 0x02) != 0)) // MANNER_NOSKILL
+                return false;
+        }
+
+        if (sc->Option != 0)
+        {
+            // We do not check it for non-players here as hide will not stop monsters from scanning for new targets and use skills.  The logic
+            // that normal attacks will not actually be executed when hidden needs to be put in the AI code instead
+            ROWOWSkill const* skill = GetSkill(skillID);
+            if ((sc->Option & ROWOW_OPTION_HIDE) != 0 && src->IsPlayer() == true && (skillID == 0 || skill == nullptr || skill->Inf2[ROWOW_INF2_ALLOWWHENHIDDEN] == false))
+                return false;
+            if ((sc->Option & ROWOW_OPTION_CHASEWALK) != 0 && skillID != ROWOW_SKILL_ST_CHASEWALK)
+                return false;
+        }
+    }
+
+    if (target == nullptr || target == src) // No further checking needed.
+        return true;
+    if (target->IsInWorld() == false || (flag != 0 && target->IsAlive() == false))
+        return false;
+
+    if (tsc != nullptr)
+    {
+        if (skillID == 0 && tsc->HasSCE(ROWOW_SC_TRICKDEAD) == true)
+            return false;
+        if ((skillID == ROWOW_SKILL_WZ_STORMGUST || skillID == ROWOW_SKILL_WZ_FROSTNOVA || skillID == ROWOW_SKILL_NJ_HYOUSYOURAKU || skillID == ROWOW_SKILL_NPC_STORMGUST2) &&
+            tsc->HasSCE(ROWOW_SC_FREEZE) == true)
+            return false;
+        if (skillID == ROWOW_SKILL_PR_LEXAETERNA && (tsc->HasSCE(ROWOW_SC_FREEZE) == true || tsc->HasSCE(ROWOW_SC_STONE) == true))
+            return false;
+    }
+
+    // If targetting, cloak+hide protect you, otherwise only hiding does.
+    uint32 hideFlag = flag != 0 ? ROWOW_OPTION_HIDE : (ROWOW_OPTION_HIDE | ROWOW_OPTION_CLOAK | ROWOW_OPTION_CHASEWALK);
+    // Skill that can hit hidden target
+    if (ROWOWSkill const* skill = GetSkill(skillID); skill != nullptr && skill->Inf2[ROWOW_INF2_TARGETHIDDEN] == true)
+        hideFlag &= ~ROWOW_OPTION_HIDE;
+    if (tsc != nullptr && (tsc->Option & hideFlag) != 0)
+    {
+        // A player hides from all but bosses and detectors (no perfect hiding before the third jobs); anything else from all but detectors
+        bool isBoss = status != nullptr && status->Class == ROWOW_CLASS_BOSS;
+        bool isDetect = (mode & ROWOW_MODE_DETECTOR) != 0;
+        if (target->IsPlayer() == true ? (isBoss == false && isDetect == false) : isDetect == false)
+            return false;
+    }
+    return true;
+}
+
+int32 ROWOWMod::MapForEachInArea(Unit* origin, int32 x0, int32 y0, int32 x1, int32 y1, std::function<int32(Unit*)> const& func) const
+{
+    // map_foreachinarea over the RO combatants (BL_CHAR) of the origin's map whose cell is in the square x0,y0 - x1,y1: the units within
+    // reach of it in yards, then those standing in it in RO cells
+    int32 originX = 0, originY = 0;
+    GetUnitCell(origin, originX, originY);
+    int32 reachCells = std::max({ std::abs(x0 - originX), std::abs(x1 - originX), std::abs(y0 - originY), std::abs(y1 - originY) }) + 1;
+    ROWOWMapGrid const* mapGrid = GetMapGrid(origin->GetMapId());
+    float searchRadius = float(reachCells) * (mapGrid != nullptr ? mapGrid->CellSize : CellSize) * 1.5f + MapSearchHeightAllowance;
+    std::list<Unit*> units;
+    Acore::AnyUnitInObjectRangeCheck check(origin, searchRadius);
+    Acore::UnitListSearcher<Acore::AnyUnitInObjectRangeCheck> searcher(origin, units, check);
+    Cell::VisitObjects(origin, searcher, searchRadius);
+    int32 returnCount = 0;
+    for (Unit* unit : units)
+    {
+        if (unit->IsInWorld() == false || GetROStatus(unit) == nullptr)
+            continue;
+        int32 unitX = 0, unitY = 0;
+        GetUnitCell(unit, unitX, unitY);
+        if (unitX < std::min(x0, x1) || unitX > std::max(x0, x1) || unitY < std::min(y0, y1) || unitY > std::max(y0, y1))
+            continue;
+        returnCount += func(unit);
+    }
+    return returnCount;
+}
+
+int32 ROWOWMod::MapForEachInRange(Unit* center, int32 range, std::function<int32(Unit*)> const& func) const
+{
+    // map_foreachinallrange: the RO combatants within range cells of the center's cell
+    int32 centerX = 0, centerY = 0;
+    GetUnitCell(center, centerX, centerY);
+    return MapForEachInArea(center, centerX - range, centerY - range, centerX + range, centerY + range, func);
+}
+
+int32 ROWOWMod::MapForEachInDir(Unit* origin, int32 x0, int32 y0, int32 x1, int32 y1, int32 range, int32 length, int32 offset,
+    std::function<int32(Unit*)> const& func) const
+{
+    // map_foreachindir: the RO combatants on a path going from x0,y0 into the one of the eight directions toward x1,y1: range cells to each
+    // side (its width range*2+1), length cells long, moved offset cells along (half-cells for a diagonal path).  The cost of a diagonal step is
+    // that of a straight one.  A unit out of sight of the origin (path_search_long's CELL_CHKWALL) isn't on it
+    if (range < 0 || length < 1 || offset < 0)
+        return 0;
+    uint8 dir = GetRODirection(float(x1 - x0), float(y1 - y0)); // map_calc_dir_xy, east on the same cell
+    int32 dx = DirX[dir];
+    int32 dy = DirY[dir];
+    bool isDiagonal = (dir % 2) != 0; // direction_diagonal
+
+    // Special offset handling for diagonal paths
+    if (offset != 0 && isDiagonal == true)
+    {
+        // So that diagonal paths can attach to each other, we have to work with half-tile offsets
+        offset = (2 * offset) - 1;
+        // To get the half-tiles we need to increase length by one
+        length++;
+    }
+
+    // Get area that needs to be checked
+    int32 mx0 = x0 + dx * (offset / ((dir % 2) + 1));
+    int32 my0 = y0 + dy * (offset / ((dir % 2) + 1));
+    int32 mx1 = x0 + dx * (offset / ((dir % 2) + 1) + length - 1);
+    int32 my1 = y0 + dy * (offset / ((dir % 2) + 1) + length - 1);
+    if (mx0 > mx1)
+        std::swap(mx0, mx1);
+    if (my0 > my1)
+        std::swap(my0, my1);
+
+    // Apply width to the path by turning 90 degrees
+    mx0 -= std::abs(range * DirX[(dir + 2) % ROWOW_RO_DIRECTION_COUNT]);
+    my0 -= std::abs(range * DirY[(dir + 2) % ROWOW_RO_DIRECTION_COUNT]);
+    mx1 += std::abs(range * DirX[(dir + 2) % ROWOW_RO_DIRECTION_COUNT]);
+    my1 += std::abs(range * DirY[(dir + 2) % ROWOW_RO_DIRECTION_COUNT]);
+    return MapForEachInArea(origin, mx0, my0, mx1, my1, [this, origin, x0, y0, dx, dy, isDiagonal, range, length, offset, &func](Unit* bl)
+    {
+        // What matters now is the relative x and y from the start point
+        int32 rx = 0, ry = 0;
+        GetUnitCell(bl, rx, ry);
+        rx -= x0;
+        ry -= y0;
+        // Do not hit source cell
+        if (BattleConfig.SkillEightpathSameCell == 0 && rx == 0 && ry == 0)
+            return 0;
+        // This turns it so that the area that is hit is always with positive rx and ry
+        rx *= dx;
+        ry *= dy;
+        // These checks only need to be done for diagonal paths
+        if (isDiagonal == true)
+        {
+            // Check for length, then for width
+            if ((rx + ry < offset) || (rx + ry > 2 * (length + (offset / 2) - 1)))
+                return 0;
+            if (std::abs(rx - ry) > 2 * range)
+                return 0;
+        }
+        // Everything else ok, check for line of sight from source
+        if (bl != origin && origin->IsWithinLOSInMap(bl) == false)
+            return 0;
+        return func(bl);
+    });
+}
+
+int32 ROWOWMod::SkillAreaSub(Unit* bl, Unit* src, uint16 skillID, uint16 skillLevel, uint64 tick, int32 flag, ROWOWSkillAreaFunc func)
+{
+    // skill_area_sub: each unit an area search finds that the flag's target rules accept.  (No pre-renewal skill sends the preamble packet)
+    if (BattleCheckTarget(src, bl, flag) <= 0)
+        return 0;
+    ROWOWSkillUnitData* ud = GetSkillUnitData(src);
+    if ((flag & ROWOW_SD_SPLASH) != 0)
+        ud->AreaTemp.Values[2]++;
+    switch (func)
+    {
+        case ROWOWSkillAreaFunc::CastendDamageID: return SkillCastendDamageID(src, bl, skillID, skillLevel, tick, flag);
+        case ROWOWSkillAreaFunc::CastendNoDamageID: return SkillCastendNoDamageID(src, bl, skillID, skillLevel, tick, flag);
+        case ROWOWSkillAreaFunc::Count: return 1; // skill_area_sub_count
+    }
+    return 0;
+}
+
+int32 ROWOWMod::GetDeferredBonus(Unit const* unit, char const* type) const
+{
+    ROWOWStatus const* status = GetROStatus(unit);
+    if (status == nullptr || status->IsPlayer == false)
+        return 0;
+    int32 total = 0;
+    for (ROWOWDeferredBonus const& bonus : status->Bonus.Deferred)
+        if (bonus.Values.empty() == false && IsSameName(bonus.Type, type) == true)
+            total += int32(bonus.Values.back());
+    return total;
+}
+
+int32 ROWOWMod::GetDeferredBonus2(Unit const* unit, char const* type, int64 key) const
+{
+    ROWOWStatus const* status = GetROStatus(unit);
+    if (status == nullptr || status->IsPlayer == false)
+        return 0;
+    int32 total = 0;
+    for (ROWOWDeferredBonus const& bonus : status->Bonus.Deferred)
+        if (bonus.Values.size() >= 2 && bonus.Values[0] == key && IsSameName(bonus.Type, type) == true)
+            total += int32(bonus.Values[1]);
+    return total;
+}
+
+bool ROWOWMod::HasDeferredBonusKey(Unit const* unit, char const* type, int64 key) const
+{
+    ROWOWStatus const* status = GetROStatus(unit);
+    if (status == nullptr || status->IsPlayer == false)
+        return false;
+    for (ROWOWDeferredBonus const& bonus : status->Bonus.Deferred)
+        if (bonus.Values.empty() == false && bonus.Values[0] == key && IsSameName(bonus.Type, type) == true)
+            return true;
+    return false;
+}
+
+void ROWOWMod::ClifSkillFail(Player* sd, uint16 skillID, int32 cause, int32 btype, uint32 itemID) const
+{
+    // clif_skill_fail: RO's failure message.  display_skill_fail 2 hides nothing a player casts.  (Needing an item names it)
+    if (sd == nullptr || cause == ROWOW_USESKILL_FAIL_MAX)
+        return;
+    std::string text = GetSkillFailText(cause);
+    if (cause == ROWOW_USESKILL_FAIL_NEED_ITEM)
+    {
+        auto itemTemplateIDIter = ItemTemplateIDsByItemID.find(itemID);
+        ItemTemplate const* itemTemplate = itemTemplateIDIter != ItemTemplateIDsByItemID.end() ? sObjectMgr->GetItemTemplate(itemTemplateIDIter->second) : nullptr;
+        text = fmt::format("[{}] required '{}' amount.", itemTemplate != nullptr ? itemTemplate->Name1 : std::to_string(itemID), btype);
+    }
+    else if (cause == ROWOW_USESKILL_FAIL_LEVEL && skillID == ROWOW_SKILL_TF_STEAL)
+        text = "Steal failed.";
+    ChatHandler(sd->GetSession()).SendNotification("{}", text);
+}
+
+void ROWOWMod::UnitSetAttackDelay(Unit* unit, uint64 tick, bool isCastBegin)
+{
+    // unit_set_attackdelay, its act delay: a player's normal attack and the start of its casts hold the next skill back by its attack motion
+    // plus the shortest motion (the attack delay itself is WoW's swing timer).  Monsters get theirs at cast end, with their AI (R10)
+    Player* sd = unit->ToPlayer();
+    ROWOWStatus const* status = GetROStatus(unit);
+    if (sd == nullptr || status == nullptr)
+        return;
+    ROWOWSkillUnitData* ud = GetSkillUnitData(unit);
+    if (isCastBegin == true && ud->SkillID == 0)
+        return;
+    int64 actDelay = status->AttackMotion + BattleConfig.MaxAspdAmotion / 2; // pc_maxaspd / AMOTION_DIVIDER_PC
+    ud->CanActTime = std::max<uint64>(tick + uint64(actDelay), ud->CanActTime);
+}
+
+void ROWOWMod::SendSkillDelayToClient(Unit* unit, uint16 skillID) const
+{
+    // What clif_status_change(EFST_POSTDELAY) shows in RO: the action bars hold every skill for the after-cast delay, and this skill's
+    // levels for its cooldown (a cooldown on the client only, which the server's own checks match)
+    Player* player = unit->ToPlayer();
+    if (player == nullptr)
+        return;
+    ROWOWIdentity const* identity = player->CustomData.Get<ROWOWIdentity>("ROWOWIdentity");
+    ROWOWSkillUnitData const* ud = unit->CustomData.Get<ROWOWSkillUnitData>("ROWOWSkillUnitData");
+    if (identity == nullptr || ud == nullptr)
+        return;
+    uint64 tick = GetTick();
+    uint64 delay = ud->CanActTime > tick ? ud->CanActTime - tick : 0;
+    auto cooldownIter = ud->CooldownEndTimesBySkillID.find(skillID);
+    uint64 cooldown = (cooldownIter != ud->CooldownEndTimesBySkillID.end() && cooldownIter->second > tick) ? cooldownIter->second - tick : 0;
+    std::vector<std::pair<uint32, uint32>> cooldownsBySpellID;
+    for (uint32 spellID : identity->SkillSpellIDs)
+    {
+        uint16 spellSkillID = 0, spellSkillLevel = 0;
+        if (GetSkillOfSpell(spellID, spellSkillID, spellSkillLevel) == false)
+            continue;
+        uint64 spellCooldown = std::max(delay, spellSkillID == skillID ? cooldown : 0);
+        if (spellCooldown > 0)
+            cooldownsBySpellID.emplace_back(spellID, uint32(spellCooldown));
+    }
+    if (cooldownsBySpellID.empty() == true)
+        return;
+    WorldPacket data(SMSG_SPELL_COOLDOWN, 8 + 1 + cooldownsBySpellID.size() * 8);
+    data << player->GetGUID();
+    data << uint8(0); // SPELL_COOLDOWN_FLAG_NONE
+    for (auto const& cooldownBySpellID : cooldownsBySpellID)
+    {
+        data << uint32(cooldownBySpellID.first);
+        data << uint32(cooldownBySpellID.second);
+    }
+    player->SendDirectMessage(&data);
+}
+
+SpellCastResult ROWOWMod::UnitSkillUse(Unit* src, Unit* target, WorldLocation const* dest, uint16 skillID, uint16 skillLevel)
+{
+    // clif_parse_UseSkillToId and unit_skilluse_id2 (or unit_skilluse_pos2, target being the caster and dest the ground spot), up to the
+    // cast time: whether the skill may start.  It has no side effects; UnitSkillCastTime starts it.  (The other jobs' checks of
+    // unit_skilluse_id2's switch come with their skills)
+    ROWOWSkill const* skill = GetSkill(skillID);
+    if (skill == nullptr || GetROStatus(src) == nullptr)
+        return SPELL_FAILED_DONT_REPORT;
+    if (src->IsAlive() == false)
+        return SPELL_FAILED_CASTER_DEAD; // Do not continue source is dead
+    if (target == nullptr)
+        target = src;
+    Player* sd = src->ToPlayer();
+    ROWOWSkillUnitData* ud = GetSkillUnitData(src);
+    uint64 tick = GetTick();
+    if (sd != nullptr)
+    {
+        // never trust client
+        if (PCCheckSkill(sd, skillID) < skillLevel)
+            return SPELL_FAILED_NOT_KNOWN;
+
+        // skill_isNotOk: the skill's cooldown (blockskill)
+        auto cooldownIter = ud->CooldownEndTimesBySkillID.find(skillID);
+        if (cooldownIter != ud->CooldownEndTimesBySkillID.end() && cooldownIter->second > tick)
+        {
+            ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_SKILLINTERVAL);
+            return SPELL_FAILED_DONT_REPORT;
+        }
+
+        // canact_tick: no skill before the after-cast delay ends
+        if (tick < ud->CanActTime)
+        {
+            ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_SKILLINTERVAL);
+            return SPELL_FAILED_DONT_REPORT;
+        }
+    }
+    if (skill->Inf2[ROWOW_INF2_NOTARGETSELF] == true && src == target)
+        return SPELL_FAILED_BAD_TARGETS;
+    if (StatusCheckSkillUse(src, target, skillID, 0) == false)
+        return SPELL_FAILED_BAD_TARGETS;
+    if (sd != nullptr && SkillCheckConditionCastBegin(sd, skillID, skillLevel) == false)
+        return SPELL_FAILED_DONT_REPORT;
+    if (sd != nullptr && skillID == ROWOW_SKILL_CR_DEVOTION && target->IsPlayer() == true &&
+        PCDevotionSlot(sd, target->GetGUID(), std::min<int32>(skillLevel, ROWOW_MAX_DEVOTION)) < 0)
+    {
+        // Devotion needs a free slot of the level's (or the target's own): no free slots, skill Fail
+        ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_LEVEL);
+        return SPELL_FAILED_DONT_REPORT;
+    }
+    if (sd != nullptr && skillID == ROWOW_SKILL_MG_FIREWALL && dest != nullptr)
+    {
+        // Special check for Firewall only (unit_skilluse_pos2)
+        int32 x = 0, y = 0;
+        GetWorldCell(src->GetMapId(), dest->GetPositionX(), dest->GetPositionY(), x, y);
+        if (SkillPosMaxcountCheck(src, x, y, skillID, skillLevel, true) == false)
+            return SPELL_FAILED_DONT_REPORT;
+    }
+
+    // Any action ends the invincibility after arriving (pc_delinvincibletimer)
+    if (sd != nullptr)
+        PCDelInvincibleTimer(sd);
+
+    // An instant skill ends at once (skill_castend_id from unit_skilluse_id2), so its castend checks are part of starting it
+    if (SkillCastFix(src, skillID, skillLevel) <= 0)
+        return SkillCastEndCheck(src, target, dest, skillID, skillLevel);
+    return SPELL_CAST_OK;
+}
+
+int32 ROWOWMod::UnitSkillCastTime(Unit* src, Unit* target, uint16 skillID, uint16 skillLevel)
+{
+    // The rest of unit_skilluse_id2: the cast time (skill_castfix, its skill switch, then skill_castfix_sc), the attack and act delays set at
+    // cast begin, the cast's cancel flag, and the skill remembered as the one being cast.  A non-combo skill stops the normal attack.  (The
+    // other jobs' cases of the cast time switch come with them)
+    ROWOWSkill const* skill = GetSkill(skillID);
+    ROWOWSkillUnitData* ud = GetSkillUnitData(src);
+    uint64 tick = GetTick();
+    int32 levelIndex = ROWOWSkill::GetLevelIndex(skillLevel);
+    src->AttackStop();
+    ud->IsSkillCastCancel = skill != nullptr && skill->IsCastCancel == true;
+    int32 casttime = SkillCastFix(src, skillID, skillLevel, true);
+    switch (skillID)
+    {
+        case ROWOW_SKILL_KN_CHARGEATK:
+        {
+            // Range 0-3: 500ms, Range 4-6: 1000ms, Range 7+: 1500ms (distance_math_bl: the straight distance in cells)
+            if (target == nullptr)
+                break;
+            int32 k = DistanceMathBL(src, target);
+            k = std::clamp((k - 1) / 3, 0, 2);
+            casttime += casttime * k;
+            break;
+        }
+    }
+    casttime = SkillCastFixSC(src, casttime, uint8(skill != nullptr ? skill->CastTimeFlags : 0));
+    if (casttime <= 0)
+        ud->IsSkillCastCancel = false;
+    ud->SkillID = skillID;
+    ud->SkillLevel = skillLevel;
+
+    // Set attack and act delays (unit_set_attackdelay relies on the skill being set), then the cast time and general delays
+    // (unit_set_castdelay, with the security delay that castend takes off again)
+    UnitSetAttackDelay(src, tick, true);
+    int64 castDelay = std::max<int64>((skill != nullptr && skill->CastTime[levelIndex] != 0) ? casttime : 0, BattleConfig.MinSkillDelayLimit);
+    ud->CanActTime = std::max<uint64>(ud->CanActTime, tick + uint64(castDelay)) + ROWOW_SECURITY_CASTTIME;
+
+    // Using a skill ends Cloaking, unless the cloak check type lets it stay (val4&4: monster_cloak_check_type 4)
+    if (ROWOWStatusChangeEntry const* sce = GetSCE(src, ROWOW_SC_CLOAKING); sce != nullptr && (sce->Val4 & 4) == 0 && skillID != ROWOW_SKILL_AS_CLOAKING)
+        StatusChangeEnd(src, ROWOW_SC_CLOAKING);
+    return casttime;
+}
+
+SpellCastResult ROWOWMod::SkillCastEndCheck(Unit* src, Unit* target, WorldLocation const* dest, uint16 skillID, uint16 skillLevel)
+{
+    // skill_castend_id's checks, before anything is paid (skill_castend_id_check, status_check_skilluse, skill_check_condition_castend), or
+    // skill_castend_pos's for a ground skill (skill_pos_maxcount_check at its spot).  A failure ends the cast with no after-cast delay
+    ROWOWSkill const* skill = GetSkill(skillID);
+    Player* sd = src->ToPlayer();
+    auto fail = [this, src, sd, skillID](int32 cause)
+    {
+        if (sd != nullptr)
+            ClifSkillFail(sd, skillID, cause);
+        ROWOWSkillUnitData* ud = GetSkillUnitData(src);
+        ud->CanActTime = GetTick();
+        ud->SkillID = 0;
+        ud->SkillLevel = 0;
+        return SPELL_FAILED_DONT_REPORT;
+    };
+    if (skill == nullptr || src->IsAlive() == false)
+        return fail(ROWOW_USESKILL_FAIL_MAX);
+    if (target == nullptr)
+        target = src;
+    if (target->IsInWorld() == false || src->GetMap() != target->GetMap())
+        return fail(ROWOW_USESKILL_FAIL_MAX);
+
+    if (SkillGetCastType(skillID) == ROWOW_CAST_GROUND)
+    {
+        // skill_castend_pos: a ground skill whose units can't go on its spot fails
+        int32 x = 0, y = 0;
+        if (dest != nullptr)
+            GetWorldCell(src->GetMapId(), dest->GetPositionX(), dest->GetPositionY(), x, y);
+        else
+            GetUnitCell(src, x, y);
+        if (SkillPosMaxcountCheck(src, x, y, skillID, skillLevel, true) == false)
+            return fail(ROWOW_USESKILL_FAIL_MAX);
+    }
+    else
+    {
+        // skill_castend_id_check.  (The other jobs' cases of its switch come with their skills)
+        if (src != target && target->IsCreature() == true && GetROStatus(target) != nullptr && (GetROStatus(target)->Mode & ROWOW_MODE_SKILL_IMMUNE) != 0 &&
+            SkillGetCastType(skillID) == ROWOW_CAST_NODAMAGE)
+            return fail(ROWOW_USESKILL_FAIL_MAX); // Don't show a skill fail message (NoDamage type doesn't consume requirements)
+        switch (skillID)
+        {
+            case ROWOW_SKILL_RG_STEALCOIN:
+            {
+                // Does not work on non-monsters, bosses and targets already mugged
+                ROWOWStealState const* stealState = target->CustomData.Get<ROWOWStealState>("ROWOWStealState");
+                if (target->IsCreature() == false || (GetROStatus(target)->Mode & ROWOW_MODE_STATUS_IMMUNE) != 0 || (stealState != nullptr && stealState->IsStealCoinFlag == true))
+                    return fail(ROWOW_USESKILL_FAIL);
+                break;
+            }
+        }
+        int32 inf = 0;
+        if ((skill->Inf & ROWOW_INF_ATTACK_SKILL) != 0 || ((skill->Inf & ROWOW_INF_SELF_SKILL) != 0 && skill->Inf2[ROWOW_INF2_NOTARGETSELF] == true)) // Casted through combo.
+            inf = ROWOW_BCT_ENEMY; // Offensive skill.
+        else if (skill->Inf2[ROWOW_INF2_NOTARGETENEMY] == true)
+            inf = ROWOW_BCT_NOENEMY;
+        if ((skill->Inf2[ROWOW_INF2_PARTYONLY] == true || skill->Inf2[ROWOW_INF2_GUILDONLY] == true) && src != target)
+        {
+            inf |= (skill->Inf2[ROWOW_INF2_PARTYONLY] == true ? ROWOW_BCT_PARTY : 0) | (skill->Inf2[ROWOW_INF2_GUILDONLY] == true ? ROWOW_BCT_GUILD : 0);
+            inf &= ~ROWOW_BCT_NEUTRAL; // Remove neutral targets (but allow enemy if skill is designed to be so)
+        }
+        if (inf != 0 && BattleCheckTarget(src, target, inf) <= 0)
+            return fail(ROWOW_USESKILL_FAIL_LEVEL);
+        // (Fog Wall's 75% failure of offensive skills, status)
+    }
+    if (StatusCheckSkillUse(src, target, skillID, 1) == false)
+        return fail(ROWOW_USESKILL_FAIL_MAX);
+    if (sd != nullptr && SkillCheckConditionCastEnd(sd, skillID, skillLevel) == false)
+        return fail(ROWOW_USESKILL_FAIL_MAX);
+    return SPELL_CAST_OK;
+}
+
+void ROWOWMod::SkillCastEnd(Unit* src, Unit* target, WorldLocation const* dest, uint16 skillID, uint16 skillLevel)
+{
+    // The rest of skill_castend_id / skill_castend_pos once the checks passed: the costs, the after-cast delay (canact_tick, which takes off
+    // the security delay of the cast begin) and the skill's cooldown, then the dispatch by cast type.  dest is a ground skill's spot
+    ROWOWSkill const* skill = GetSkill(skillID);
+    if (skill == nullptr)
+        return;
+    Player* sd = src->ToPlayer();
+    ROWOWSkillUnitData* ud = GetSkillUnitData(src);
+    uint64 tick = GetTick();
+    if (target == nullptr)
+        target = src;
+    if (sd != nullptr)
+        SkillConsumeRequirement(sd, skillID, skillLevel, 1);
+
+    // Damage skills on a skill immune target fail after paying (a skill fail message)
+    ROWOWStatus const* tstatus = GetROStatus(target);
+    if (src != target && tstatus != nullptr && tstatus->Class == ROWOW_CLASS_BATTLEFIELD && SkillGetCastType(skillID) == ROWOW_CAST_DAMAGE)
+    {
+        ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_LEVEL);
+        ud->CanActTime = tick;
+        ud->SkillID = 0;
+        return;
+    }
+
+    ud->CanActTime = std::max<uint64>(tick + uint64(SkillDelayFix(src, skillID, skillLevel)), ud->CanActTime > ROWOW_SECURITY_CASTTIME ? ud->CanActTime - ROWOW_SECURITY_CASTTIME : 0);
+
+    // Cooldown application (pc_get_skillcooldown, skill_blockpc_start)
+    if (sd != nullptr)
+    {
+        int32 cooldown = std::max(0, skill->Cooldown[ROWOWSkill::GetLevelIndex(skillLevel)] + GetDeferredBonus2(src, "bSkillCooldown", skillID));
+        if (cooldown > 0)
+            ud->CooldownEndTimesBySkillID[skillID] = tick + uint64(cooldown);
+    }
+    SendSkillDelayToClient(src, skillID);
+    if (sd != nullptr)
+    {
+        switch (skillID)
+        {
+            case ROWOW_SKILL_KN_BRANDISHSPEAR:
+            case ROWOW_SKILL_CR_GRANDCROSS:
+            {
+                // The weapon (Brandish Spear) or the shield (Grand Cross) can't be changed for the skill's time, unless a strip already lasts
+                // longer.  During Grand Cross you are in ankle state (cannot move or teleport)
+                int32 type = skillID == ROWOW_SKILL_KN_BRANDISHSPEAR ? ROWOW_SC_STRIPWEAPON : ROWOW_SC_STRIPSHIELD;
+                int64 time = SkillGetTime(skillID, skillLevel);
+                ROWOWStatusChangeEntry const* sce = GetSCE(src, type);
+                if (sce != nullptr && sce->EndTime != 0 && sce->EndTime > tick + uint64(time))
+                    break;
+                SCStart2(src, src, type, 100, 0, 1, time);
+                if (skillID == ROWOW_SKILL_CR_GRANDCROSS)
+                    SCStart(src, src, ROWOW_SC_ANKLE, 100, 0, time);
+                break;
+            }
+        }
+    }
+    // (unit_set_walkdelay: WoW's movement isn't held after a cast)
+
+    if (SkillGetCastType(skillID) == ROWOW_CAST_GROUND)
+    {
+        int32 x = 0, y = 0;
+        if (dest != nullptr)
+            GetWorldCell(src->GetMapId(), dest->GetPositionX(), dest->GetPositionY(), x, y);
+        else
+            GetUnitCell(src, x, y);
+        ud->SkillZ = dest != nullptr ? dest->GetPositionZ() : src->GetPositionZ(); // skillx and skilly's ground, where the units go
+        SkillCastendPos2(src, x, y, skillID, skillLevel, tick, 0);
+    }
+    else if (SkillGetCastType(skillID) == ROWOW_CAST_NODAMAGE)
+        SkillCastendNoDamageID(src, target, skillID, skillLevel, tick, 0);
+    else
+        SkillCastendDamageID(src, target, skillID, skillLevel, tick, 0);
+    ud->SkillID = 0;
+    ud->SkillLevel = 0;
+}
+
+void ROWOWMod::UnitSkillCastCancel(Unit* bl, int32 type)
+{
+    // unit_skillcastcancel: a cast stopped (type&2: by damage, which only stops a cast that can be, and not with the no cast cancel
+    // bonuses).  The unit may act at once
+    ROWOWSkillUnitData* ud = bl->CustomData.Get<ROWOWSkillUnitData>("ROWOWSkillUnitData");
+    if (ud == nullptr || ud->SkillID == 0)
+        return; // Nothing to cancel.
+    Spell* spell = bl->GetCurrentSpell(CURRENT_GENERIC_SPELL);
+    uint16 spellSkillID = 0, spellSkillLevel = 0;
+    if (spell == nullptr || spell->getState() != SPELL_STATE_PREPARING || GetSkillOfSpell(spell->GetSpellInfo()->Id, spellSkillID, spellSkillLevel) == false)
+        return;
+    if ((type & 2) != 0)
+    {
+        // See if it can be cancelled.
+        if (ud->IsSkillCastCancel == false)
+            return;
+        if (GetDeferredBonus(bl, "bNoCastCancel2") != 0 || GetDeferredBonus(bl, "bNoCastCancel") != 0)
+            return;
+    }
+    ud->CanActTime = GetTick();
+    ud->SkillID = 0;
+    ud->SkillLevel = 0;
+    bl->InterruptSpell(CURRENT_GENERIC_SPELL, false, false);
+}
+
+ROWOWSkillCondition ROWOWMod::SkillGetRequirement(Player* sd, uint16 skillID, uint16 skillLevel) const
+{
+    // skill_get_requirement: what a skill level needs and uses up, with the bonuses and statuses that change it.  (Encore, the soul linker
+    // spirits, Kaina, the Monk combo costs and the gemstone savers of the Mistress card come with their jobs and statuses)
+    ROWOWSkillCondition req;
+    ROWOWSkill const* skill = GetSkill(skillID);
+    ROWOWStatus const* status = GetROStatus(sd);
+    if (sd == nullptr || skill == nullptr || status == nullptr)
+        return req;
+    skillLevel = uint16(std::clamp<int32>(skillLevel, 1, ROWOW_MAX_SKILL_LEVEL));
+    int32 levelIndex = skillLevel - 1;
+
+    req.HP = skill->HPCost[levelIndex];
+    int32 hpRate = skill->HPRateCost[levelIndex];
+    if (hpRate > 0)
+        req.HP += int32(sd->GetHealth()) * hpRate / 100;
+    else
+        req.HP += int32(sd->GetMaxHealth()) * (-hpRate) / 100;
+
+    req.SP = skill->SPCost[levelIndex];
+    int32 spRate = skill->SPRateCost[levelIndex];
+    if (spRate > 0)
+        req.SP += int32(sd->GetPower(POWER_MANA)) * spRate / 100;
+    else
+        req.SP += int32(sd->GetMaxPower(POWER_MANA)) * (-spRate) / 100;
+    if (status->Bonus.UseSPRate != 100)
+        req.SP = req.SP * status->Bonus.UseSPRate / 100;
+    int32 spSkillRateBonus = 100 - GetDeferredBonus2(sd, "bSkillUseSPrate", skillID);
+    req.SP -= GetDeferredBonus2(sd, "bSkillUseSP", skillID);
+    req.SP = std::clamp(req.SP * spSkillRateBonus / 100, 0, int32(SHRT_MAX));
+
+    req.Zeny = skill->ZenyCost[levelIndex];
+    req.SpiritBall = skill->SpiritSphereCost[levelIndex];
+    req.State = skill->RequiredState;
+    req.Weapon = skill->RequiredWeapons;
+    req.AmmoAmount = skill->AmmoAmount[levelIndex];
+    if (req.AmmoAmount != 0)
+        req.Ammo = skill->RequiredAmmo;
+    req.Statuses = skill->RequiredStatuses;
+    req.EquipItemIDs = skill->RequiredEquipment;
+
+    // Normal skill requirements and gemstone checks.  A per-level item cost (Level set) is the level's own
+    size_t itemIndex = 0;
+    bool isLevelDependent = std::any_of(skill->RequiredItems.begin(), skill->RequiredItems.end(), [](ROWOWSkillItemRequirement const& item) { return item.Level != 0; });
+    bool isNoGemstone = GetDeferredBonus(sd, "bNoGemStone") != 0;
+    for (ROWOWSkillItemRequirement const& item : skill->RequiredItems)
+    {
+        if (itemIndex >= ROWOW_MAX_SKILL_ITEM_REQUIRE)
+            break;
+        if (isLevelDependent == true && item.Level != skillLevel)
+            continue;
+        uint32 itemID = item.ItemID;
+        int32 amount = item.Amount;
+        // Check requirement for gemstone (Blue, Red and Yellow Gemstones): the Mistress card's bonus saves them
+        bool isGemstone = itemID == 715 || itemID == 716 || itemID == 717;
+        if (isGemstone == true && isNoGemstone == true)
+        {
+            if (skillID != ROWOW_SKILL_SA_ABRACADABRA && skillID != ROWOW_SKILL_HW_GANBANTEIN)
+                continue;
+            if (--amount < 1)
+                amount = 1; // Hocus Pocus always use at least 1 gem
+        }
+        req.ItemIDs[itemIndex] = itemID;
+        req.ItemAmounts[itemIndex] = amount;
+        itemIndex++;
+    }
+
+    // Check for cost reductions due to skills & SCs.  (The rest of the switch come with their jobs, R6.5)
+    switch (skillID)
+    {
+        case ROWOW_SKILL_MC_MAMMONITE:
+            if (PCCheckSkill(sd, ROWOW_SKILL_BS_UNFAIRLYTRICK) > 0)
+                req.Zeny -= req.Zeny * 10 / 100;
+            break;
+    }
+    return req;
+}
+
+bool ROWOWMod::SkillCheckConditionCastBegin(Player* sd, uint16 skillID, uint16 skillLevel)
+{
+    // skill_check_condition_castbegin: the state, statuses, equipment, HP, weapon, SP, zeny and spheres a skill needs to start.  GM rights
+    // don't skip it here.  (The skill-specific checks of its switch come with their skills, R6.5; falcons, water cells and the status
+    // requirements come with their systems)
+    ROWOWSkillCondition require = SkillGetRequirement(sd, skillID, skillLevel);
+    ROWOWStatus const* status = GetROStatus(sd);
+
+    // check state required
+    switch (require.State)
+    {
+        case ROWOW_ST_HIDDEN:
+        {
+            ROWOWStatusChange const* sc = GetStatusChange(static_cast<Unit const*>(sd));
+            if (sc == nullptr || (sc->Option & ROWOW_OPTION_HIDE) == 0) // pc_ishiding
+            {
+                ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_LEVEL);
+                return false;
+            }
+            break;
+        }
+        case ROWOW_ST_RIDING:
+        case ROWOW_ST_PECO:
+            // A Peco (pc_isriding; ST_RIDING's dragon is a third job's)
+            if (PCIsRiding(sd) == false)
+            {
+                ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_LEVEL);
+                return false;
+            }
+            break;
+        case ROWOW_ST_CART:
+            if (PCIsCartOn(sd) == false)
+            {
+                ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_CART);
+                return false;
+            }
+            break;
+        case ROWOW_ST_SHIELD:
+            if (GetIdentityEquippedItem(sd, ROWOW_EQUIP_POSITION_HAND_L) == nullptr || (status->LeftWeaponType != ROWOW_WEAPON_TYPE_FIST))
+            {
+                ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_LEVEL);
+                return false;
+            }
+            break;
+        case ROWOW_ST_MOVE_ENABLE:
+            if (sd->HasUnitState(UNIT_STATE_ROOT) == true)
+            {
+                ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_LEVEL);
+                return false;
+            }
+            break;
+    }
+
+    // Check for equipped item(s)
+    for (uint32 itemID : require.EquipItemIDs)
+    {
+        bool isWorn = false;
+        ROWOWIdentity const* identity = sd->CustomData.Get<ROWOWIdentity>("ROWOWIdentity");
+        if (identity != nullptr)
+            for (auto const& itemGUIDByPosition : identity->ItemGUIDsByEquipPosition)
+                if (Item* item = GetIdentityEquippedItem(sd, itemGUIDByPosition.first))
+                    if (ROWOWItem const* roItem = GetROItem(item))
+                        isWorn = isWorn == true || roItem->ItemID == itemID;
+        if (isWorn == false)
+        {
+            ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_NEED_EQUIPMENT, 0, itemID);
+            return false;
+        }
+    }
+
+    if (require.Weapon != 0 && (require.Weapon & (1u << status->WeaponType)) == 0 && (require.Weapon & (1u << status->RightWeaponType)) == 0)
+    {
+        ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_THIS_WEAPON);
+        return false;
+    }
+    if (require.SP > 0 && int32(sd->GetPower(POWER_MANA)) < require.SP)
+    {
+        ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_SP_INSUFFICIENT);
+        return false;
+    }
+    if (require.Zeny > 0 && sd->GetMoney() < uint32(require.Zeny))
+    {
+        ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_MONEY);
+        return false;
+    }
+    if (require.SpiritBall > 0)
+    {
+        // (Spirit spheres come with the Monk, R6.5: until then a skill needing them can't start)
+        ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_SPIRITS, require.SpiritBall);
+        return false;
+    }
+    return true;
+}
+
+bool ROWOWMod::SkillCheckConditionCastEnd(Player* sd, uint16 skillID, uint16 skillLevel)
+{
+    // skill_check_condition_castend: HP, weapon, ammo and items, checked when the cast ends.  (The summon counts of its switch come with
+    // their skills, R6.5)
+    ROWOWSkillCondition require = SkillGetRequirement(sd, skillID, skillLevel);
+    ROWOWStatus const* status = GetROStatus(sd);
+    if (require.HP > 0 && int32(sd->GetHealth()) <= require.HP)
+    {
+        ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_HP_INSUFFICIENT);
+        return false;
+    }
+    if (require.Weapon != 0 && (require.Weapon & (1u << status->WeaponType)) == 0 && (require.Weapon & (1u << status->RightWeaponType)) == 0)
+    {
+        ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_THIS_WEAPON);
+        return false;
+    }
+    if (require.Ammo != 0)
+    {
+        // Skill requires stuff equipped in the ammo slot.
+        Item* ammoItem = GetIdentityEquippedItem(sd, ROWOW_EQUIP_POSITION_AMMO);
+        if (ammoItem == nullptr)
+        {
+            ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_NO_AMMO);
+            return false;
+        }
+        if (int32(ammoItem->GetCount()) < require.AmmoAmount)
+        {
+            ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_NEED_MORE_BULLET);
+            return false;
+        }
+        if ((require.Ammo & (1u << status->AmmoType)) == 0)
+        {
+            // Ammo type check. Send the "wrong weapon type" message which is the closest we have to wrong ammo type. [Skotlex]
+            ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_NO_AMMO);
+            return false;
+        }
+    }
+    for (int32 i = 0; i < ROWOW_MAX_SKILL_ITEM_REQUIRE; ++i)
+    {
+        if (require.ItemIDs[i] == 0)
+            continue;
+        auto itemTemplateIDIter = ItemTemplateIDsByItemID.find(require.ItemIDs[i]);
+        if (itemTemplateIDIter == ItemTemplateIDsByItemID.end() || int32(sd->GetItemCount(itemTemplateIDIter->second)) < require.ItemAmounts[i])
+        {
+            if (require.ItemIDs[i] == 523) // Holy Water
+                ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_HOLYWATER);
+            else if (require.ItemIDs[i] == 716) // Red Gemstone
+                ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_REDJAMSTONE);
+            else if (require.ItemIDs[i] == 717) // Blue Gemstone
+                ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_BLUEJAMSTONE);
+            else
+                ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_NEED_ITEM, require.ItemAmounts[i], require.ItemIDs[i]);
+            return false;
+        }
+    }
+    return true;
+}
+
+void ROWOWMod::SkillConsumeRequirement(Player* sd, uint16 skillID, uint16 skillLevel, int16 type)
+{
+    // skill_consume_requirement: type&1 the HP, SP and zeny when the cast ends, type&2 the items once the skill went off.  SP is the form's
+    // mana, and zeny its money.  (Spirit spheres come with the Monk, R6.5)
+    ROWOWSkillCondition require = SkillGetRequirement(sd, skillID, skillLevel);
+    if ((type & 1) != 0)
+    {
+        switch (skillID)
+        {
+            case ROWOW_SKILL_MC_IDENTIFY:
+            case ROWOW_SKILL_SM_AUTOBERSERK:
+            case ROWOW_SKILL_BD_ADAPTATION:
+            case ROWOW_SKILL_BD_ENCORE:
+                require.SP = 0;
+                break;
+            case ROWOW_SKILL_AL_HOLYLIGHT:
+                if (ROWOWStatusChangeEntry const* spirit = GetSCE(sd, ROWOW_SC_SPIRIT); spirit != nullptr && spirit->Val2 == ROWOW_SKILL_SL_PRIEST)
+                    require.SP *= 5;
+                break;
+            default:
+                if (GetSkillUnitData(sd)->IsAutoCast == true)
+                    require.SP = 0; // An autospell costs no SP
+                break;
+        }
+
+        // skill_consume_hpspap: Magnum Break needs HP but doesn't use it up
+        if (skillID == ROWOW_SKILL_SM_MAGNUM)
+            require.HP = 0;
+        if (require.HP > 0)
+            sd->SetHealth(sd->GetHealth() > uint32(require.HP) ? sd->GetHealth() - uint32(require.HP) : 1);
+        if (require.SP > 0)
+            sd->SetPower(POWER_MANA, sd->GetPower(POWER_MANA) > uint32(require.SP) ? sd->GetPower(POWER_MANA) - uint32(require.SP) : 0);
+        if (require.Zeny > 0)
+            sd->ModifyMoney(-std::min<int32>(require.Zeny, int32(std::min<uint32>(sd->GetMoney(), INT32_MAX))));
+    }
+    if ((type & 2) != 0)
+    {
+        if (skillID == ROWOW_SKILL_MC_IDENTIFY && require.SP > 0)
+            sd->SetPower(POWER_MANA, sd->GetPower(POWER_MANA) > uint32(require.SP) ? sd->GetPower(POWER_MANA) - uint32(require.SP) : 0);
+        for (int32 i = 0; i < ROWOW_MAX_SKILL_ITEM_REQUIRE; ++i)
+        {
+            if (require.ItemIDs[i] == 0 || require.ItemAmounts[i] <= 0)
+                continue;
+            auto itemTemplateIDIter = ItemTemplateIDsByItemID.find(require.ItemIDs[i]);
+            if (itemTemplateIDIter != ItemTemplateIDsByItemID.end())
+                sd->DestroyItemCount(itemTemplateIDIter->second, uint32(require.ItemAmounts[i]), true);
+        }
+    }
+}
+
+int32 ROWOWMod::SkillCastFix(Unit* bl, uint16 skillID, uint16 skillLevel, bool isCastBegin)
+{
+    // skill_castfix: the skill's cast time, reduced by DEX (castrate_dex_scale DEX is instant), the cast rate bonuses, Magic Strings and
+    // Foresight.  Only the cast's start (isCastBegin) uses up a Foresight count; the other calls just ask the time
+    ROWOWSkill const* skill = GetSkill(skillID);
+    ROWOWStatus const* status = GetROStatus(bl);
+    if (skill == nullptr || status == nullptr)
+        return 0;
+    double time = skill->CastTime[ROWOWSkill::GetLevelIndex(skillLevel)];
+    int32 flag = skill->CastTimeFlags;
+    int32 reduceCastRate = 0;
+
+    // Calculate base cast time (reduced by dex)
+    if ((flag & ROWOW_SKILL_CAST_IGNOREDEX) == 0)
+    {
+        int32 scale = BattleConfig.CastrateDexScale - status->Stats[ROWOW_STAT_DEX];
+        if (scale > 0) // not instant cast
+            time = time * float(scale) / BattleConfig.CastrateDexScale;
+        else
+            return 0; // instant cast
+    }
+
+    // Calculate cast time reduced by item/card bonuses
+    if (bl->IsPlayer() == true)
+    {
+        if ((flag & ROWOW_SKILL_CAST_IGNOREITEMBONUS) == 0)
+        {
+            if (status->Bonus.CastRate != 100)
+                reduceCastRate += 100 - status->Bonus.CastRate;
+            time += GetDeferredBonus(bl, "bVariableCast"); // bonus bVariableCast
+        }
+        // Skill-specific reductions work regardless of flag
+        time += time * (GetDeferredBonus2(bl, "bCastrate", skillID) + GetDeferredBonus2(bl, "bVariableCastrate", skillID)) / 100; // bonus2 bCastrate, bVariableCastrate
+        time += GetDeferredBonus2(bl, "bSkillVariableCast", skillID); // bonus2 bSkillVariableCast
+    }
+
+    // These cast time reductions are processed even if the skill fails
+    ROWOWStatusChange* sc = GetStatusChange(bl);
+    if (sc != nullptr && sc->IsEmpty() == false)
+    {
+        // Magic Strings stacks additively with item bonuses
+        if ((flag & ROWOW_SKILL_CAST_IGNORESTATUS) == 0 && sc->HasSCE(ROWOW_SC_POEMBRAGI) == true)
+            reduceCastRate += sc->GetSCE(ROWOW_SC_POEMBRAGI)->Val2;
+        // Foresight halves the cast time, it does not stack additively
+        if (ROWOWStatusChangeEntry* sce = sc->GetSCE(ROWOW_SC_MEMORIZE))
+        {
+            if (bl->IsPlayer() == false || PCCheckSkill(bl, skillID) > 0) // Foresight only decreases cast times from learned skills, not skills granted by items
+            {
+                if ((flag & ROWOW_SKILL_CAST_IGNORESTATUS) == 0)
+                    time -= time * 50 / 100;
+                // Foresight counter gets reduced even if the skill is not affected by it
+                if (isCastBegin == true && (--sce->Val2) <= 0)
+                    StatusChangeEnd(bl, ROWOW_SC_MEMORIZE);
+            }
+        }
+    }
+    time = time * (1 - float(reduceCastRate) / 100);
+
+    // config cast time multiplier
+    if (BattleConfig.CastRate != 100)
+        time = time * BattleConfig.CastRate / 100;
+    // return final cast time
+    return std::max(int32(time), 0);
+}
+
+int32 ROWOWMod::SkillCastFixSC(Unit* bl, double time, uint8 flag)
+{
+    // skill_castfix_sc: the statuses' part of the cast time (Slow Cast, Suffragium, which the cast uses up).  Monsters keep their time
+    if (time < 0)
+        return 0;
+    if (bl->IsPlayer() == false)
+        return int32(time);
+    ROWOWStatusChange* sc = GetStatusChange(bl);
+    if (sc != nullptr && sc->IsEmpty() == false)
+    {
+        if ((flag & ROWOW_SKILL_CAST_IGNORESTATUS) == 0)
+        {
+            if (ROWOWStatusChangeEntry const* sce = sc->GetSCE(ROWOW_SC_SLOWCAST))
+                time += time * sce->Val2 / 100;
+        }
+        if (ROWOWStatusChangeEntry const* sce = sc->GetSCE(ROWOW_SC_SUFFRAGIUM))
+        {
+            if ((flag & ROWOW_SKILL_CAST_IGNORESTATUS) == 0)
+                time -= time * sce->Val2 / 100;
+            // Suffragium ends even if the skill is not affected by it
+            StatusChangeEnd(bl, ROWOW_SC_SUFFRAGIUM);
+        }
+    }
+    time = std::max(time, 0.0);
+    return int32(time);
+}
+
+int32 ROWOWMod::SkillDelayFix(Unit* bl, uint16 skillID, uint16 skillLevel) const
+{
+    // skill_delayfix: the after-cast delay, reduced by DEX (delay_dependon_dex), Bragi, the Soul Linker spirits and the delay bonuses
+    ROWOWSkill const* skill = GetSkill(skillID);
+    ROWOWStatus const* status = GetROStatus(bl);
+    if (skill == nullptr || status == nullptr)
+        return 0;
+    if (skillID == ROWOW_SKILL_SA_ABRACADABRA)
+        return 0; // Will use picked skill's delay.
+    if ((GetBattleObjectType(*status) & BattleConfig.NoSkillDelay) != 0)
+        return BattleConfig.MinSkillDelayLimit;
+    int32 delaynodex = skill->CastDelayFlags;
+    ROWOWStatusChange const* sc = GetStatusChange(static_cast<Unit const*>(bl));
+    if (sc != nullptr && sc->IsEmpty() == true)
+        sc = nullptr;
+    double time = skill->AfterCastActDelay[ROWOWSkill::GetLevelIndex(skillLevel)];
+    if (time < 0)
+        time = -time + status->AttackMotion; // If set to <0, add to attack motion.
+
+    // Delay reductions
+    switch (skillID)
+    {
+        // Monk combo skills have their delay reduced by agi/dex.
+        case ROWOW_SKILL_MO_TRIPLEATTACK:
+        case ROWOW_SKILL_MO_CHAINCOMBO:
+        case ROWOW_SKILL_MO_COMBOFINISH:
+        case ROWOW_SKILL_CH_TIGERFIST:
+        case ROWOW_SKILL_CH_CHAINCRUSH:
+            // If delay not specified, it will be 1000 - 4*agi - 2*dex
+            if (time == 0)
+                time = 1000;
+            time -= (4 * status->Stats[ROWOW_STAT_AGI] + 2 * status->Stats[ROWOW_STAT_DEX]);
+            break;
+        case ROWOW_SKILL_HP_BASILICA:
+            if (sc != nullptr && sc->HasSCE(ROWOW_SC_BASILICA) == false)
+                time = 0; // There is no Delay on Basilica creation, only on cancel
+            break;
+        default:
+            if (BattleConfig.DelayDependOnDex != 0 && (delaynodex & ROWOW_SKILL_CAST_IGNOREDEX) == 0)
+            {
+                // if skill delay is allowed to be reduced by dex
+                int32 scale = BattleConfig.CastrateDexScale - status->Stats[ROWOW_STAT_DEX];
+                time = scale > 0 ? time * scale / BattleConfig.CastrateDexScale : 0;
+            }
+            if (BattleConfig.DelayDependOnAgi != 0 && (delaynodex & ROWOW_SKILL_CAST_IGNOREDEX) == 0)
+            {
+                // if skill delay is allowed to be reduced by agi
+                int32 scale = BattleConfig.CastrateDexScale - status->Stats[ROWOW_STAT_AGI];
+                time = scale > 0 ? time * scale / BattleConfig.CastrateDexScale : 0;
+            }
+            break;
+    }
+
+    if (ROWOWStatusChangeEntry const* sce = sc != nullptr ? sc->GetSCE(ROWOW_SC_SPIRIT) : nullptr)
+    {
+        if ((skillID == ROWOW_SKILL_CR_SHIELDBOOMERANG && sce->Val2 == ROWOW_SKILL_SL_CRUSADER) || (skillID == ROWOW_SKILL_AS_SONICBLOW && sce->Val2 == ROWOW_SKILL_SL_ASSASIN))
+            time /= 2; // (no War of Emperium or battleground here)
+    }
+
+    int32 delay = 0;
+    if ((delaynodex & ROWOW_SKILL_CAST_IGNORESTATUS) == 0 && sc != nullptr)
+    {
+        if (ROWOWStatusChangeEntry const* sce = sc->GetSCE(ROWOW_SC_POEMBRAGI))
+            delay += sce->Val3;
+        if (ROWOWStatusChangeEntry const* sce = sc->GetSCE(ROWOW_SC_MAGICMUSHROOM); sce != nullptr && sce->Val3 == 0)
+            delay += sce->Val2;
+    }
+    if ((delaynodex & ROWOW_SKILL_CAST_IGNOREITEMBONUS) == 0 && bl->IsPlayer() == true)
+    {
+        delay += GetDeferredBonus(bl, "bDelayRate"); // bonus bDelayRate
+        time += GetDeferredBonus2(bl, "bSkillDelay", skillID); // bonus2 bSkillDelay
+    }
+    if (delay != 0)
+        time = time * (1 - float(std::min(delay, 100)) / 100);
+    if (BattleConfig.DelayRate != 100)
+        time = time * BattleConfig.DelayRate / 100;
+    return std::max(int32(time), 0);
+}
+
+int32 ROWOWMod::SkillCastendDamageID(Unit* src, Unit* bl, uint16 skillID, uint16 skillLevel, uint64 tick, int32 flag)
+{
+    // skill_castend_damage_id: hands a damage skill to its impl, then (on the first call of an area) uses up the ammo and items
+    if (skillID > 0 && skillLevel == 0)
+        return 0;
+    if (src->GetMap() != bl->GetMap() || bl->IsInWorld() == false || bl->IsAlive() == false)
+        return 1;
+    // (Golden Thief Bug's magic immunity, status)
+    ROWOWSkillImpl const* impl = GetSkillImpl(skillID);
+    if (impl == nullptr)
+        return 1; // An unknown skill (one whose class isn't in yet) does nothing after its costs
+    impl->CastendDamageID(src, bl, skillLevel, tick, flag);
+
+    if (Player* sd = src->ToPlayer(); sd != nullptr && (flag & 1) == 0)
+    {
+        // consume arrow on last invocation to this skill.
+        if (IsSkillUsingArrow(src, skillID) == true)
+            BattleConsumeAmmo(sd, skillID, skillLevel);
+        // perform skill requirement consumption
+        if ((flag & ROWOW_SKILL_NOCONSUME_REQ) == 0)
+            SkillConsumeRequirement(sd, skillID, skillLevel, 2);
+    }
+    return 0;
+}
+
+int32 ROWOWMod::SkillCastendNoDamageID(Unit* src, Unit* bl, uint16 skillID, uint16 skillLevel, uint64 tick, int32 flag)
+{
+    // skill_castend_nodamage_id
+    if (skillID > 0 && skillLevel == 0)
+        return 0;
+    if (src->GetMap() != bl->GetMap() || bl->IsInWorld() == false || src->IsAlive() == false)
+        return 1;
+    if (src != bl && bl->IsAlive() == false)
+    {
+        // Skills that may be cast on dead targets
+        switch (skillID)
+        {
+            case ROWOW_SKILL_PR_REDEMPTIO:
+            case ROWOW_SKILL_ALL_RESURRECTION:
+                break;
+            default:
+                return 1;
+        }
+    }
+    ROWOWStatus const* tstatus = GetROStatus(bl);
+    Player* sd = src->ToPlayer();
+    ROWOWSkill const* skill = GetSkill(skillID);
+    if (tstatus == nullptr || skill == nullptr)
+        return 1;
+
+    // Check for undead skills that convert a no-damage skill into a damage one. [Skotlex]
+    switch (skillID)
+    {
+        case ROWOW_SKILL_AL_HEAL:
+        case ROWOW_SKILL_ALL_RESURRECTION:
+        case ROWOW_SKILL_PR_ASPERSIO:
+            // Apparently only player casted skills can be offensive like this.
+            if (sd != nullptr && BattleCheckUndead(tstatus->Race, tstatus->DefElement) == true)
+            {
+                if (BattleCheckTarget(src, bl, ROWOW_BCT_ENEMY) < 1)
+                {
+                    // Offensive heal does not works on non-enemies. [Skotlex]
+                    ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_LEVEL);
+                    return 0;
+                }
+                return SkillCastendDamageID(src, bl, skillID, skillLevel, tick, flag);
+            }
+            break;
+        default:
+            // Skill is actually ground placed.
+            if (src == bl && skill->UnitTypeID != 0)
+            {
+                int32 x = 0, y = 0;
+                GetUnitCell(bl, x, y);
+                GetSkillUnitData(src)->SkillZ = bl->GetPositionZ();
+                return SkillCastendPos2(src, x, y, skillID, skillLevel, tick, 0);
+            }
+            break;
+    }
+
+    // Skills that cause an status should be blocked if the target element blocks its element.
+    int32 element = skill->Element[ROWOWSkill::GetLevelIndex(skillLevel)];
+    if (src != bl && skill->StatusID > ROWOW_SC_NONE && element > ROWOW_ELEMENT_NEUTRAL && element < ROWOW_ELEMENT_COUNT && skill->Inf != ROWOW_INF_SUPPORT_SKILL &&
+        BattleAttrFix(nullptr, nullptr, 100, element, tstatus->DefElement, tstatus->ElementLevel, 0) <= 0)
+        return 1;
+
+    ROWOWSkillImpl const* impl = GetSkillImpl(skillID);
+    if (impl == nullptr)
+        return 1; // An unknown skill (one whose class isn't in yet) does nothing after its costs
+    impl->CastendNoDamageID(src, bl, skillLevel, tick, flag);
+
+    // Mob skill event for no damage skills (damage ones are handled in battle_damage/skill_attack) [Skotlex]
+    if (bl->IsCreature() == true && BattleConfig.ExpBonusNodamageAttacker != 0)
+        MobLogDamage(bl->ToCreature(), src, 0); // Log interaction (counts as 'attacker' for the exp bonus)
+
+    if (sd != nullptr && (flag & 1) == 0)
+    {
+        // consume arrow on last invocation to this skill.
+        if (IsSkillUsingArrow(src, skillID) == true)
+            BattleConsumeAmmo(sd, skillID, skillLevel);
+        SkillOnSkillUsage(sd, bl, skillID, tick);
+        // perform skill requirement consumption
+        if ((flag & ROWOW_SKILL_NOCONSUME_REQ) == 0)
+            SkillConsumeRequirement(sd, skillID, skillLevel, 2);
+    }
+    return 0;
+}
+
+int32 ROWOWMod::SkillCastendPos2(Unit* src, int32 x, int32 y, uint16 skillID, uint16 skillLevel, uint64 tick, int32 flag)
+{
+    // skill_castend_pos2: a ground skill at an RO cell, through its impl (which places its units with skill_unitsetting)
+    if (skillID > 0 && skillLevel == 0)
+        return 0;
+    if (src->IsAlive() == false)
+        return 0;
+    ROWOWSkillImpl const* impl = GetSkillImpl(skillID);
+    if (impl == nullptr)
+        return 1; // An unknown skill (one whose class isn't in yet) does nothing after its costs
+    impl->CastendPos2(src, x, y, skillLevel, tick, flag);
+    if (Player* sd = src->ToPlayer())
+    {
+        // consume arrow if this is a ground skill
+        if (IsSkillUsingArrow(src, skillID) == true && (flag & 1) == 0)
+            BattleConsumeAmmo(sd, skillID, skillLevel);
+        SkillOnSkillUsage(sd, nullptr, skillID, tick);
+        // perform skill requirement consumption
+        if ((flag & ROWOW_SKILL_NOCONSUME_REQ) == 0)
+            SkillConsumeRequirement(sd, skillID, skillLevel, 2);
+    }
+    return 0;
+}
+
+int64 ROWOWMod::SkillAttack(int32 attackType, Unit* src, Unit* dsrc, Unit* bl, uint16 skillID, uint16 skillLevel, uint64 tick, int32 flag,
+    ROWOWSkillUnit const* dsrcUnit)
+{
+    // skill_attack: one skill hit on one target, worked out (battle_calc_attack), delivered after the attack motion (battle_delay_damage),
+    // then the knockback.  flag&0xFFF goes to battle_calc_attack (the targets of a split skill, Magnum Break's distance), flag&4 skips the
+    // knockback, and the SD_ flags are how the hit shows.  A ground skill's unit (dsrcUnit) is the damage's source as rAthena's BL_SKILL dsrc:
+    // its hits aren't delayed and knock back from its cell.  A devoted target's Crusader takes the hit.  (Magic reflection, Magic Rod, Kaite
+    // and the other statuses that turn a hit, Plagiarism's copy, the combos and the post-damage skills of its switches come with them)
+    if (skillID > 0 && skillLevel == 0)
+        return 0;
+    ROWOWStatus const* tstatus = GetROStatus(bl);
+    if (tstatus == nullptr || GetROStatus(src) == nullptr)
+        return 0;
+    bool isUnitSource = src != dsrc || dsrcUnit != nullptr;
+    if (isUnitSource == true)
+    {
+        // When caster is not the src of attack, this is a ground skill, and as such, do the relevant target checking. [Skotlex]
+        if (StatusCheckSkillUse(BattleConfig.SkillCasterCheck != 0 ? src : nullptr, bl, skillID, 2) == false)
+            return 0;
+    }
+    else if ((flag & ROWOW_SD_ANIMATION) != 0 && GetSkill(skillID) != nullptr && GetSkill(skillID)->NK[ROWOW_NK_SPLASH] == true)
+    {
+        // Note that splash attacks often only check versus the targetted mob, those around the splash area normally don't get checked for
+        // being hidden/cloaked/etc. [Skotlex]
+        if (StatusCheckSkillUse(src, bl, skillID, 2) == false)
+            return 0;
+    }
+
+    ROWOWDamage dmg = BattleCalcAttack(attackType, src, bl, skillID, skillLevel, flag & 0xFFF);
+
+    // If the damage source is a unit, the damage is not delayed
+    if (isUnitSource == true)
+        dmg.AMotion = 0;
+    int64 damage = dmg.Damage + dmg.Damage2;
+    if (damage < dmg.Div)
+        dmg.BlewCount = 0; // only pushback when it hit for other
+
+    // Blessing and Increase AGI on someone who's undead from Change Undead (a player; the skill class makes the attack) do 1 damage
+    if ((skillID == ROWOW_SKILL_AL_INCAGI || skillID == ROWOW_SKILL_AL_BLESSING) && GetSCE(bl, ROWOW_SC_CHANGEUNDEAD) != nullptr)
+        damage = 1;
+
+    // Skills with can't walk delay also stop normal attacking for that duration when the attack connects. [Skotlex]  (WoW's swing timer)
+    ROWOWSkill const* skill = GetSkill(skillID);
+    if (dmg.DmgLv >= ROWOW_ATK_MISS && skill != nullptr && skill->AfterCastWalkDelay[ROWOWSkill::GetLevelIndex(skillLevel)] > 0 && src->IsPlayer() == true)
+        src->ToPlayer()->setAttackTimer(BASE_ATTACK, std::max<uint32>(src->getAttackTimer(BASE_ATTACK), uint32(skill->AfterCastWalkDelay[ROWOWSkill::GetLevelIndex(skillLevel)])));
+
+    bool isCritical = dmg.Type == ROWOW_DMG_CRITICAL;
+    ROWOWStatusChange const* tsc = GetStatusChange(static_cast<Unit const*>(bl));
+    if (tsc != nullptr && tsc->IsEmpty() == true)
+        tsc = nullptr;
+
+    // Instant damage
+    if (dmg.AMotion == 0)
+    {
+        // Deal damage before knockback to allow stuff like firewall+storm gust combo.  A devoted target's Crusader takes it instead (below)
+        if (tsc == nullptr || (tsc->HasSCE(ROWOW_SC_DEVOTION) == false && skillID != ROWOW_SKILL_CR_REFLECTSHIELD) || skillID == ROWOW_SKILL_HW_GRAVITATION ||
+            skillID == ROWOW_SKILL_NPC_EVILLAND)
+            BattleDamage(src, bl, damage, dmg.Div, skillLevel, skillID, dmg.DmgLv, dmg.Flag, false, tick, isCritical);
+        if (bl->IsAlive() == true)
+            SkillAdditionalEffect(src, bl, skillID, skillLevel, dmg.Flag, dmg.DmgLv, tick);
+        if (damage > 0) // Counter status effects [Skotlex]
+            SkillCounterAdditionalEffect(src, bl, skillID, skillLevel, dmg.Flag, tick);
+    }
+
+    // Blow!
+    if ((flag & 4) == 0)
+        SkillAttackBlow(src, dsrc, bl, uint8(std::clamp(dmg.BlewCount, 0, 255)), skillID, skillLevel, damage, tick, flag, dsrcUnit);
+
+    // Delayed damage must be dealt after the knockback (it needs to know actual position of target)
+    if (dmg.AMotion != 0)
+        BattleDelayDamage(tick, dmg.AMotion, src, bl, dmg.Flag, skillID, skillLevel, damage, dmg.DmgLv, dmg.Div, true, isCritical);
+
+    // Devotion: while the link holds, the devoted target's Crusader takes the whole hit (battle_delay_damage kept a delayed one off the
+    // target, and an instant one skipped it above).  A broken link ends the status, and an instant hit lands on the target after all.
+    // (Magic reflected onto the Crusader, devotion_rdamage with Kaite's reflection, comes with the reflecting statuses)
+    tsc = GetStatusChange(static_cast<Unit const*>(bl));
+    if (tsc != nullptr && tsc->HasSCE(ROWOW_SC_DEVOTION) == true && skillID != ROWOW_SKILL_NPC_EVILLAND && skillID != ROWOW_SKILL_PA_PRESSURE &&
+        skillID != ROWOW_SKILL_HW_GRAVITATION)
+    {
+        if (Player* d_bl = GetDevotionSource(bl, true))
+            BattleFixDamage(src, d_bl, damage, ROWOW_SKILL_CR_DEVOTION);
+        else
+        {
+            StatusChangeEnd(bl, ROWOW_SC_DEVOTION);
+            if (dmg.AMotion == 0)
+                BattleDamage(src, bl, damage, dmg.Div, skillLevel, skillID, dmg.DmgLv, dmg.Flag, false, tick, isCritical);
+        }
+    }
+
+    // Post-damage effects
+    if (damage > 0)
+        if (Player* sd = src->ToPlayer())
+            SkillOnSkillUsage(sd, bl, skillID, tick);
+    // (battle_drain, the drain bonuses of weapon skills, come with the deferred drain bonuses)
+    return damage;
+}
+
+void ROWOWMod::SkillAttackBlow(Unit* src, Unit* dsrc, Unit* target, uint8 blewcount, uint16 skillID, uint16 /*skillLevel*/, int64 /*damage*/, uint64 /*tick*/,
+    int32 /*flag*/, ROWOWSkillUnit const* dsrcUnit)
+{
+    // skill_attack_blow: knockback the target on skill_attack.  Only knockback if it's still alive, otherwise a "ghost" is left behind.
+    // [Skotlex]  Reflected spells do not bounce back (src == dsrc since it only happens for direct skills).  (Knuckle Arrow's and the third
+    // jobs' cases come with them)
+    if (blewcount == 0 || (target == dsrc && dsrcUnit == nullptr) || target->IsAlive() == false)
+        return;
+    int8 dir = -1; // Default direction
+    // Skill specific direction
+    switch (skillID)
+    {
+        case ROWOW_SKILL_MG_FIREWALL:
+            dir = int8(UnitGetDir(target)); // Backwards
+            break;
+        // This ensures the storm randomly pushes instead of exactly a cell backwards per official mechanics.
+        case ROWOW_SKILL_NPC_STORMGUST2:
+        case ROWOW_SKILL_WZ_STORMGUST:
+            if (BattleConfig.StormgustKnockback == 0)
+                dir = int8(urand(0, ROWOW_RO_DIRECTION_COUNT - 1));
+            break;
+        case ROWOW_SKILL_MC_CARTREVOLUTION:
+            if (BattleConfig.CartRevoKnockback != 0)
+                dir = ROWOW_RO_DIRECTION_WEST; // Official servers push target to the West
+            break;
+        case ROWOW_SKILL_AC_SHOWER:
+        {
+            // map_calc_dir: from the target to the caster, or (arrow_shower_knockback) to the arrows' spot
+            int32 targetX = 0, targetY = 0, srcX = 0, srcY = 0;
+            GetUnitCell(target, targetX, targetY);
+            if (BattleConfig.ArrowShowerKnockback == 0)
+                GetUnitCell(src, srcX, srcY);
+            else
+            {
+                ROWOWSkillUnitData const* ud = GetSkillUnitData(src);
+                srcX = ud->AreaTemp.Values[4];
+                srcY = ud->AreaTemp.Values[5];
+            }
+            dir = int8((srcX == targetX && srcY == targetY) ? UnitGetDir(target) : GetRODirection(float(srcX - targetX), float(srcY - targetY)));
+            break;
+        }
+    }
+    SkillBlown(dsrc, target, blewcount, dir, ROWOW_BLOWN_NONE, dsrcUnit);
+}
+
+bool ROWOWMod::IsCellNoPass(Unit const* unit, ROWOWMapGrid const& mapGrid, int32 cellX, int32 cellY) const
+{
+    // map_getcell(CELL_CHKNOPASS) beside the unit: a cell is a wall when there's no ground there, or it's too steep from the unit's ground to
+    // step to (a wall or a cliff), or something solid stands between (the same rules as a monster's cell path)
+    float x = mapGrid.GetCellCenterWorldX(cellY);
+    float y = mapGrid.GetCellCenterWorldY(cellX);
+    float distance = std::sqrt((x - unit->GetPositionX()) * (x - unit->GetPositionX()) + (y - unit->GetPositionY()) * (y - unit->GetPositionY()));
+    float unitZ = unit->GetPositionZ();
+    float groundZ = unit->GetMap()->GetHeight(unit->GetPhaseMask(), x, y, unitZ + ConfigMoveMaxRisePerStep * distance + 0.5f, true, ConfigMoveFloorSearchDistance);
+    if (groundZ <= INVALID_HEIGHT || std::fabs(groundZ - unitZ) > ConfigMoveMaxRisePerStep * distance)
+        return true;
+    return unit->GetMap()->isInLineOfSight(unit->GetPositionX(), unit->GetPositionY(), unitZ + ROWOW_MOVE_LINE_OF_SIGHT_HEIGHT, x, y, groundZ + ROWOW_MOVE_LINE_OF_SIGHT_HEIGHT,
+        unit->GetPhaseMask(), LINEOFSIGHT_CHECK_VMAP, VMAP::ModelIgnoreFlags::Nothing) == false;
+}
+
+bool ROWOWMod::MapRandomDir(Unit const* bl, int32& x, int32& y) const
+{
+    // map_random_dir: a spot as far from the unit as x,y but off along a random diagonal (Confusion's walk), one that isn't a wall, or
+    // false (x,y kept) after 100 tries.  (The path search to it is the walk's own)
+    static int32 const dirx[] = { 0, -1, -1, -1, 0, 1, 1, 1 };
+    static int32 const diry[] = { 1, 1, 0, -1, -1, -1, 0, 1 };
+    ROWOWMapGrid const* mapGrid = GetMapGrid(bl->GetMapId());
+    if (mapGrid == nullptr)
+        return false;
+    int32 blX = 0, blY = 0;
+    GetUnitCell(bl, blX, blY);
+    int32 xi = x - blX;
+    int32 yi = y - blY;
+    int32 dist2 = xi * xi + yi * yi;
+    int32 dist = int32(std::sqrt(float(dist2)));
+    if (dist < 1)
+        dist = 1;
+    int32 i = 0;
+    do
+    {
+        int32 j = 1 + 2 * int32(urand(0, 3)); // Pick a random diagonal direction
+        int32 segment = int32(urand(1, uint32(dist))); // Pick a random interval from the whole vector in that direction
+        xi = blX + segment * dirx[j];
+        segment = int32(std::sqrt(float(std::max(0, dist2 - segment * segment)))); // The complement of the previously picked segment
+        yi = blY + segment * diry[j];
+    } while (IsCellNoPass(bl, *mapGrid, xi, yi) == true && (++i) < 100);
+    if (i < 100)
+    {
+        x = xi;
+        y = yi;
+        return true;
+    }
+    return false;
+}
+
+bool ROWOWMod::SkillCheckCloaking(Unit* bl, ROWOWStatusChangeEntry* sce)
+{
+    // skill_check_cloaking: whether a wall is next to the unit (any of the 8 cells around it), with the cloak check type asking for one.
+    // With the unit's Cloaking: below level 3 it ends away from a wall, and from level 3 the wall's speed bonus (val4&1) follows
+    bool wall = true;
+    if ((bl->IsPlayer() == true && (BattleConfig.PCCloakCheckType & 1) != 0) || (bl->IsPlayer() == false && (BattleConfig.MonsterCloakCheckType & 1) != 0))
+    {
+        // Check for walls.
+        static int32 const dx[] = { 0, 1, 0, -1, -1, 1, 1, -1 };
+        static int32 const dy[] = { -1, 0, 1, 0, -1, -1, 1, 1 };
+        if (ROWOWMapGrid const* mapGrid = GetMapGrid(bl->GetMapId()))
+        {
+            int32 x = 0, y = 0;
+            GetUnitCell(bl, x, y);
+            int32 i = 0;
+            while (i < 8 && IsCellNoPass(bl, *mapGrid, x + dx[i], y + dy[i]) == false)
+                i++;
+            if (i == 8)
+                wall = false;
+        }
+    }
+    if (sce != nullptr)
+    {
+        std::bitset<ROWOW_SCB_MAX> speedFlag;
+        speedFlag.set(ROWOW_SCB_SPEED);
+        if (wall == false)
+        {
+            if (sce->Val1 < 3) // End cloaking.
+                StatusChangeEnd(bl, ROWOW_SC_CLOAKING);
+            else if ((sce->Val4 & 1) != 0)
+            {
+                // Remove wall bonus
+                sce->Val4 &= ~1;
+                StatusCalcBL(bl, speedFlag);
+            }
+        }
+        else if ((sce->Val4 & 1) == 0)
+        {
+            // Add wall speed bonus
+            sce->Val4 |= 1;
+            StatusCalcBL(bl, speedFlag);
+        }
+    }
+    return wall;
+}
+
+int32 ROWOWMod::SkillBlown(Unit* src, Unit* target, int32 count, int8 dir, int32 flag, ROWOWSkillUnit const* srcUnit)
+{
+    // skill_blown: knocks the target back count RO cells, away from src (or its ground unit's cell; dir -1) or in a direction.  A cell it
+    // can't stand on stops it (path_blown_halt); it slides there.  Bosses and the knockback-immune don't move (unit_blown_immune)
+    if (count == 0)
+        return count; // Actual knockback distance is 0.
+    ROWOWStatus const* tstatus = GetROStatus(target);
+    if (tstatus == nullptr)
+        return 0;
+    bool isSelf = src == target && srcUnit == nullptr;
+    if (isSelf == false && target->IsCreature() == true && (tstatus->Mode & ROWOW_MODE_KNOCKBACK_IMMUNE) != 0)
+        return (flag & ROWOW_BLOWN_MD_KNOCKBACK_IMMUNE) != 0 ? count : 0; // Immune can't be knocked back
+    if (isSelf == false && (flag & ROWOW_BLOWN_IGNORE_NO_KNOCKBACK) == 0 && target->IsPlayer() == true && GetDeferredBonus(target, "bNoKnockback") != 0)
+        return (flag & ROWOW_BLOWN_TARGET_NO_KNOCKBACK) != 0 ? count : 0; // Target has special_state.no_knockback (equip)
+
+    int32 srcX = 0, srcY = 0, targetX = 0, targetY = 0;
+    if (srcUnit != nullptr)
+    {
+        srcX = srcUnit->X;
+        srcY = srcUnit->Y;
+    }
+    else
+        GetUnitCell(src, srcX, srcY);
+    GetUnitCell(target, targetX, targetY);
+    if (dir == -1)
+    {
+        // <optimized>: do the computation here instead of outside.  Direction from src to target, reversed
+        if (targetX == srcX && targetY == srcY)
+            dir = int8(BattleConfig.KnockbackLeft != 0 ? ROWOW_RO_DIRECTION_EAST : 0);
+        else
+            dir = int8(GetRODirection(float(srcX - targetX), float(srcY - targetY)));
+    }
+    int32 dx = 0, dy = 0;
+    if (dir >= 0 && dir < ROWOW_RO_DIRECTION_COUNT)
+    {
+        // Take the reversed 'direction' and reverse it
+        dx = -DirX[dir];
+        dy = -DirY[dir];
+    }
+    if (dx == 0 && dy == 0)
+        return 0;
+
+    // unit_blown with path_blownpos: step cell by cell while the next cell has ground at a walkable height and nothing in the way
+    count = std::min(count, 25); // Cap to prevent too much processing...?
+    Map* map = target->GetMap();
+    ROWOWMapGrid const* mapGrid = GetMapGrid(target->GetMapId());
+    float cellSize = mapGrid != nullptr ? mapGrid->CellSize : CellSize;
+    float x = target->GetPositionX();
+    float y = target->GetPositionY();
+    float z = target->GetPositionZ();
+    int32 moved = 0;
+    for (; moved < count; moved++)
+    {
+        // RO's x east is WoW's -Y, RO's y north is WoW's X
+        float nextX = x + float(dy) * cellSize;
+        float nextY = y - float(dx) * cellSize;
+        float nextZ = map->GetHeight(target->GetPhaseMask(), nextX, nextY, z + KnockbackMaxStepHeight + 0.5f, true, KnockbackMaxStepHeight * 2.0f + 1.0f);
+        if (nextZ <= INVALID_HEIGHT || std::fabs(nextZ - z) > KnockbackMaxStepHeight)
+            break;
+        if (map->isInLineOfSight(x, y, z + ROWOW_MOVE_LINE_OF_SIGHT_HEIGHT, nextX, nextY, nextZ + ROWOW_MOVE_LINE_OF_SIGHT_HEIGHT, target->GetPhaseMask(),
+            LINEOFSIGHT_CHECK_VMAP, VMAP::ModelIgnoreFlags::Nothing) == false)
+            break;
+        x = nextX;
+        y = nextY;
+        z = nextZ;
+    }
+    if (moved == 0)
+        return 0;
+    target->StopMoving();
+    target->GetMotionMaster()->MoveCharge(x, y, z, KnockbackSpeed);
+    ROWOWSkillUnitData* targetUD = GetSkillUnitData(target);
+    targetUD->SkillBlownTick = std::max(GetTick(), targetUD->SkillBlownTick + 1); // Always changes, so a hit can tell it knocked back
+    return moved; // Return amount of knocked back cells
+}
+
+bool ROWOWMod::UnitMovePos(Unit* bl, int32 x, int32 y)
+{
+    // skill_check_unit_movepos with unit_movepos: the unit goes at once (the quick slide of a knockback) onto an RO cell of its map that has
+    // ground near its own height and nothing solid in the way; else it stays and it's false.  (No map here forbids it, as War of Emperium's)
+    float cellX = 0, cellY = 0;
+    GetCellWorldPosition(bl->GetMapId(), x, y, cellX, cellY);
+    Map* map = bl->GetMap();
+    float z = map->GetHeight(bl->GetPhaseMask(), cellX, cellY, bl->GetPositionZ() + ROWOW_SKILL_CELL_GROUND_SEARCH_HEIGHT, true, ROWOW_SKILL_CELL_GROUND_SEARCH_DISTANCE);
+    if (z <= INVALID_HEIGHT || map->isInLineOfSight(bl->GetPositionX(), bl->GetPositionY(), bl->GetPositionZ() + ROWOW_MOVE_LINE_OF_SIGHT_HEIGHT, cellX, cellY,
+        z + ROWOW_MOVE_LINE_OF_SIGHT_HEIGHT, bl->GetPhaseMask(), LINEOFSIGHT_CHECK_VMAP, VMAP::ModelIgnoreFlags::Nothing) == false)
+        return false;
+    bl->StopMoving();
+    bl->GetMotionMaster()->MoveCharge(cellX, cellY, z, KnockbackSpeed);
+    return true;
+}
+
+int32 ROWOWMod::SkillAdditionalEffect(Unit* src, Unit* bl, uint16 skillID, uint16 skillLevel, int32 attackType, uint8 dmgLv, uint64 tick)
+{
+    // skill_additional_effect: what a hit does past its damage: the statuses the attacker's items give (bAddEff, bAddEffOnSkill, which go
+    // through even when the damage was blocked), the skill's own, Enchant Poison's and Enchant Deadly Poison's on a normal attack, equipment
+    // breaking and the autospells.  (Blitz Beat's and Gank's normal attack triggers and the Taekwon stances come with their jobs)
+    if (skillID > 0 && skillLevel == 0)
+        return 0; // don't forget auto attacks! - celest
+    if (dmgLv < ROWOW_ATK_BLOCK) // Don't apply effect if miss.
+        return 0;
+    ROWOWStatus const* sstatus = GetROStatus(src);
+    if (sstatus == nullptr || GetROStatus(bl) == nullptr)
+        return 0; // skill additional effect is about adding effects to the target...  So if the target can't be inflicted with statuses, this is pointless.
+    ROWOWStatusChange const* sc = GetStatusChange(static_cast<Unit const*>(src));
+    if (sc != nullptr && sc->IsEmpty() == true)
+        sc = nullptr;
+
+    if (src->IsPlayer() == true)
+    {
+        // These statuses would be applied anyway even if the damage was blocked by some skills. [Inkfish]
+        if (skillID != ROWOW_SKILL_WS_CARTTERMINATION && skillID != ROWOW_SKILL_AM_DEMONSTRATION && skillID != ROWOW_SKILL_CR_REFLECTSHIELD &&
+            skillID != ROWOW_SKILL_MS_REFLECTSHIELD && skillID != ROWOW_SKILL_ASC_BREAKER)
+        {
+            // Trigger status effects
+            for (ROWOWAddEffect const& effect : sstatus->Bonus.AddEff)
+            {
+                int32 rate = effect.Rate;
+                if ((attackType & ROWOW_BF_LONG) != 0) // Any ranged physical attack takes status arrows into account (Grimtooth...) [DracoRPG]
+                    rate += effect.ArrowRate;
+                if (rate == 0)
+                    continue;
+                if (IsAddEffectTriggered(effect.Flag, attackType) == false)
+                    continue;
+                if ((effect.Flag & ROWOW_ATF_TARGET) != 0)
+                    StatusChangeStart(src, bl, effect.Type, rate, 7, 0, 0, 0, effect.Duration, ROWOW_SCSTART_NONE, 100);
+                if ((effect.Flag & ROWOW_ATF_SELF) != 0)
+                    StatusChangeStart(src, src, effect.Type, rate, 7, 0, 0, 0, effect.Duration, ROWOW_SCSTART_NONE, 100);
+            }
+        }
+        if (skillID != 0)
+        {
+            // Trigger status effects on skills
+            for (ROWOWAddEffectOnSkill const& effect : sstatus->Bonus.AddEffOnSkill)
+            {
+                if (skillID != effect.SkillID || effect.Rate == 0)
+                    continue;
+                if ((effect.Target & ROWOW_ATF_TARGET) != 0)
+                    StatusChangeStart(src, bl, effect.Type, effect.Rate, 7, 0, 0, 0, effect.Duration, ROWOW_SCSTART_NONE, 100);
+                if ((effect.Target & ROWOW_ATF_SELF) != 0)
+                    StatusChangeStart(src, src, effect.Type, effect.Rate, 7, 0, 0, 0, effect.Duration, ROWOW_SCSTART_NONE, 100);
+            }
+        }
+    }
+    if (dmgLv < ROWOW_ATK_DEF) // no damage, return;
+        return 0;
+    if (ROWOWSkillImpl const* impl = GetSkillImpl(skillID))
+        impl->ApplyAdditionalEffects(src, bl, skillLevel, tick, attackType, dmgLv);
+
+    // Normal attacks (no skill used); a normal attack that is a skill is splash damage. [Inkfish]
+    if (skillID == 0 && (attackType & ROWOW_BF_SKILL) == 0 && sc != nullptr)
+    {
+        // Enchant Poison gives a chance to poison attacked enemies (don't use sc_start since chance comes in 1/10000 rate)
+        if (ROWOWStatusChangeEntry const* sce = sc->GetSCE(ROWOW_SC_ENCPOISON))
+            StatusChangeStart(src, bl, ROWOW_SC_POISON, sce->Val2, sce->Val1, int32(src->GetGUID().GetCounter()), 0, 0,
+                SkillGetTime2(ROWOW_SKILL_AS_ENCHANTPOISON, uint16(sce->Val1)), ROWOW_SCSTART_NONE);
+        // Enchant Deadly Poison gives a chance to deadly poison attacked enemies
+        if (ROWOWStatusChangeEntry const* sce = sc->GetSCE(ROWOW_SC_EDP))
+            SCStart4(src, bl, ROWOW_SC_DPOISON, sce->Val2, sce->Val1, int32(src->GetGUID().GetCounter()), 0, 0, SkillGetTime2(ROWOW_SKILL_ASC_EDP, uint16(sce->Val1)));
+    }
+
+    if ((attackType & ROWOW_BF_WEAPON) != 0)
+    {
+        // Breaking Equipment
+        Player* sd = src->ToPlayer();
+        if (sd != nullptr && BattleConfig.EquipSelfBreakRate != 0)
+        {
+            // Self weapon breaking
+            int32 rate = BattleConfig.EquipNaturalBreakRate;
+            if (sc != nullptr)
+            {
+                if (sc->HasSCE(ROWOW_SC_OVERTHRUST) == true)
+                    rate += 10;
+                if (sc->HasSCE(ROWOW_SC_MAXOVERTHRUST) == true)
+                    rate += 10;
+            }
+            if (rate != 0)
+                SkillBreakEquip(src, src, ROWOW_EQUIP_POSITION_HAND_R, rate, ROWOW_BCT_SELF);
+        }
+        if (BattleConfig.EquipSkillBreakRate != 0 && skillID != ROWOW_SKILL_WS_CARTTERMINATION && skillID != ROWOW_SKILL_ITM_TOMAHAWK)
+        {
+            // Cart Termination/Tomahawk won't trigger breaking data. Why? No idea, go ask Gravity.  Target weapon breaking
+            int32 rate = 0;
+            if (sd != nullptr)
+                rate += GetDeferredBonus(src, "bBreakWeaponRate");
+            if (sc != nullptr)
+            {
+                if (ROWOWStatusChangeEntry const* sce = sc->GetSCE(ROWOW_SC_MELTDOWN))
+                    rate += sce->Val2;
+                if (ROWOWStatusChangeEntry const* sce = sc->GetSCE(ROWOW_SC_WEAPONBREAKER))
+                    rate += sce->Val2;
+            }
+            if (rate != 0)
+                SkillBreakEquip(src, bl, ROWOW_EQUIP_POSITION_HAND_R, rate, ROWOW_BCT_ENEMY);
+            // Target armor breaking
+            rate = 0;
+            if (sd != nullptr)
+                rate += GetDeferredBonus(src, "bBreakArmorRate");
+            if (ROWOWStatusChangeEntry const* sce = sc != nullptr ? sc->GetSCE(ROWOW_SC_MELTDOWN) : nullptr)
+                rate += sce->Val3;
+            if (rate != 0)
+                SkillBreakEquip(src, bl, ROWOW_EQUIP_POSITION_ARMOR, rate, ROWOW_BCT_ENEMY);
+        }
+    }
+
+    // Autospell when attacking
+    SkillAutoSpellAdditionalEffect(src, bl, skillID, attackType, tick);
+    return 0;
+}
+
+int32 ROWOWMod::SkillCounterAdditionalEffect(Unit* src, Unit* bl, uint16 skillID, uint16 skillLevel, int32 attackType, uint64 tick)
+{
+    // skill_counter_additional_effect: what being hit does to the attacker (the statuses the target's items give when hit, bAddEffWhenHit),
+    // what a kill gives it, the counter autospells and the autobonuses.  (Soul Drain comes with the Wizard)
+    if (skillID > 0 && skillLevel == 0)
+        return 0; // don't forget auto attacks! - celest
+    ROWOWStatus const* dstStatus = GetROStatus(bl);
+    if (bl->IsPlayer() == true && dstStatus != nullptr && (attackType & (ROWOW_BF_WEAPON | ROWOW_BF_MAGIC | ROWOW_BF_MISC)) != 0)
+    {
+        // Counter effects.
+        for (ROWOWAddEffect const& effect : dstStatus->Bonus.AddEffAtked)
+        {
+            int32 rate = effect.Rate;
+            if ((attackType & ROWOW_BF_LONG) != 0)
+                rate += effect.ArrowRate;
+            if (rate == 0)
+                continue;
+            if (IsAddEffectTriggered(effect.Flag, attackType) == false)
+                continue;
+            if ((effect.Flag & ROWOW_ATF_TARGET) != 0 && src != bl)
+                StatusChangeStart(src, src, effect.Type, rate, 7, 0, 0, 0, effect.Duration, ROWOW_SCSTART_NONE, 100);
+            if ((effect.Flag & ROWOW_ATF_SELF) != 0 && bl->IsAlive() == true)
+                StatusChangeStart(src, bl, effect.Type, rate, 7, 0, 0, 0, effect.Duration, ROWOW_SCSTART_NONE, 100);
+        }
+    }
+    if (ROWOWSkillImpl const* impl = GetSkillImpl(skillID))
+        impl->ApplyCounterAdditionalEffects(src, bl, skillLevel, tick, attackType);
+
+    // HP and SP gained on a kill
+    Player* sd = src->ToPlayer();
+    if (sd != nullptr && bl->IsAlive() == false)
+    {
+        int32 sp = 0, hp = 0;
+        ROWOWStatus const* tstatus = GetROStatus(bl);
+        if ((attackType & (ROWOW_BF_WEAPON | ROWOW_BF_SHORT)) == (ROWOW_BF_WEAPON | ROWOW_BF_SHORT))
+        {
+            sp += GetDeferredBonus(src, "bSPGainValue");
+            if (tstatus != nullptr)
+                sp += GetDeferredBonus2(src, "bSPGainRace", tstatus->Race) + GetDeferredBonus2(src, "bSPGainRace", ROWOW_RACE_ALL);
+            hp += GetDeferredBonus(src, "bHPGainValue");
+        }
+        if ((attackType & ROWOW_BF_MAGIC) != 0)
+        {
+            sp += GetDeferredBonus(src, "bMagicSPGainValue");
+            hp += GetDeferredBonus(src, "bMagicHPGainValue");
+        }
+        if (hp != 0 || sp != 0) // updated to force healing to allow healing through berserk
+            StatusHeal(src, hp, sp, 3, src, GetSkillSpellID(skillID, skillLevel));
+    }
+
+    // Trigger counter-spells to retaliate against damage causing skills, and the autobonuses of the attack
+    SkillAutoSpellCounterAdditionalEffect(src, bl, skillID, attackType, tick);
+    return 0;
+}
+
+int32 ROWOWMod::SkillCalcHeal(Unit* src, Unit* target, uint16 skillID, uint16 skillLevel, bool heal) const
+{
+    // skill_calc_heal: a heal skill's amount (halved when it's damage to the undead), raised by the heal bonuses and the target's Recovery
+    // Potion, and cut by its Critical Wound.  (Offertorium is a third job's)
+    ROWOWStatus const* sstatus = GetROStatus(src);
+    if (sstatus == nullptr)
+        return 0;
+    int32 hp = 0;
+    int32 skill = 0;
+    switch (skillID)
+    {
+        case ROWOW_SKILL_BA_APPLEIDUN:
+            hp = 30 + 5 * skillLevel + (sstatus->Stats[ROWOW_STAT_VIT] / 2); // HP recovery
+            hp += 5 * PCCheckSkill(src, ROWOW_SKILL_BA_MUSICALLESSON);
+            break;
+        case ROWOW_SKILL_PR_SANCTUARY:
+            hp = (skillLevel > 6) ? 777 : skillLevel * 100;
+            break;
+        case ROWOW_SKILL_NPC_EVILLAND:
+            hp = (skillLevel > 6) ? 666 : skillLevel * 100;
+            break;
+        default:
+            if (skillLevel >= BattleConfig.MaxHealLv)
+                return BattleConfig.MaxHeal;
+            hp = (int32(sstatus->Level) + sstatus->Stats[ROWOW_STAT_INT]) / 8 * (4 + (skillLevel * 8));
+            if ((skill = PCCheckSkill(src, ROWOW_SKILL_HP_MEDITATIO)) > 0)
+                hp += hp * skill * 2 / 100;
+            break;
+    }
+    if (heal == false && skillID != ROWOW_SKILL_NPC_EVILLAND)
+        hp /= 2;
+    if (src->IsPlayer() == true)
+    {
+        // pc_skillheal_bonus: bHealPower (skill_add_heal_rate 7: Heal, Sanctuary and Potion Pitcher) and bSkillHeal
+        int32 bonus = GetDeferredBonus(src, "bHealPower");
+        if (skillID != ROWOW_SKILL_AL_HEAL && skillID != ROWOW_SKILL_PR_SANCTUARY && skillID != ROWOW_SKILL_AM_POTIONPITCHER)
+            bonus = 0;
+        bonus += GetDeferredBonus2(src, "bSkillHeal", skillID);
+        if (bonus != 0)
+            hp += hp * bonus / 100;
+    }
+    if (target != nullptr && target->IsPlayer() == true)
+    {
+        // pc_skillheal2_bonus: bHealPower2 and bSkillHeal2
+        int32 bonus = GetDeferredBonus(target, "bHealPower2") + GetDeferredBonus2(target, "bSkillHeal2", skillID);
+        if (bonus != 0)
+            hp += hp * bonus / 100;
+    }
+    ROWOWStatusChange const* tsc = target != nullptr ? GetStatusChange(target) : nullptr;
+    if (tsc != nullptr && tsc->IsEmpty() == false)
+    {
+        if (skillID != ROWOW_SKILL_NPC_EVILLAND && skillID != ROWOW_SKILL_BA_APPLEIDUN)
+        {
+            if (ROWOWStatusChangeEntry const* sce = tsc->GetSCE(ROWOW_SC_INCHEALRATE))
+                hp += hp * sce->Val1 / 100;
+        }
+        if (heal == true)
+        {
+            uint8 penalty = 0;
+            if (ROWOWStatusChangeEntry const* sce = tsc->GetSCE(ROWOW_SC_CRITICALWOUND))
+                penalty += uint8(sce->Val2);
+            if (ROWOWStatusChangeEntry const* sce = tsc->GetSCE(ROWOW_SC_DEATHHURT); sce != nullptr && sce->Val3 == 1)
+                penalty += 20;
+            if (tsc->HasSCE(ROWOW_SC_NORECOVER_STATE) == true)
+                penalty = 100;
+            if (penalty > 0)
+                hp -= hp * penalty / 100;
+        }
+    }
+    return hp;
+}
+
+int64 ROWOWMod::StatusHeal(Unit* bl, int64 hp, int64 sp, int32 flag, Unit* src, uint32 spellID)
+{
+    // status_heal: heals HP and SP, never past the maximums.  The heal shows whole as the spell's (RO's green number shows what the skill
+    // heals, not what was missing).  Berserk blocks HP heals but the forced ones (flag&1).  (A negative heal is Akaitsuki's, a third job's)
+    if (bl->IsAlive() == false)
+        return 0;
+    if (hp > 0 && (flag & 1) == 0)
+    {
+        if (ROWOWStatusChangeEntry const* sce = GetSCE(bl, ROWOW_SC_BERSERK); sce != nullptr)
+            hp = 0;
+    }
+    if (hp > 0)
+    {
+        uint32 missingHP = bl->GetMaxHealth() - bl->GetHealth();
+        SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(spellID != 0 ? spellID : ROWOW_SPELL_USE_ITEM);
+        if (spellInfo != nullptr)
+        {
+            HealInfo healInfo(src != nullptr ? src : bl, bl, uint32(std::min<int64>(hp, std::numeric_limits<uint32>::max())), spellInfo, SPELL_SCHOOL_MASK_NORMAL);
+            (src != nullptr ? src : bl)->HealBySpell(healInfo);
+        }
+        hp = std::min<int64>(hp, missingHP);
+    }
+    else
+        hp = 0;
+    if (sp > 0 && bl->GetMaxPower(POWER_MANA) > 0)
+    {
+        sp = std::min<int64>(sp, int64(bl->GetMaxPower(POWER_MANA) - bl->GetPower(POWER_MANA)));
+        bl->SetPower(POWER_MANA, bl->GetPower(POWER_MANA) + uint32(sp));
+    }
+    else
+        sp = 0;
+    return hp + sp;
+}
+
+void ROWOWMod::BattleDelayDamage(uint64 tick, int32 amotion, Unit* src, Unit* target, int32 attackType, uint16 skillID, uint16 skillLevel, int64 damage, uint8 dmgLv,
+    int16 div, bool additionalEffects, bool isCritical)
+{
+    // battle_delay_damage: the hit lands after the attack motion (Aegis caps it at 1 second for non players), in the target's update, if
+    // both are still on the map and the attacker didn't teleport away.  A devoted target whose Crusader is in reach takes none of it (the
+    // Crusader takes it in skill_attack), which also keeps it from stopping a cast or triggering autospells (ATK_BLOCK)
+    if (damage > 0 && skillID != ROWOW_SKILL_CR_REFLECTSHIELD && skillID != ROWOW_SKILL_PA_PRESSURE && GetDevotionSource(target, true) != nullptr)
+    {
+        Player* tsd = target->ToPlayer();
+        if (tsd != nullptr && tsd->IsSitState() == true && BattleConfig.DevotionStandupFix != 0)
+            tsd->SetStandState(UNIT_STAND_STATE_STAND); // pc_setstand
+        damage = 0;
+        if (dmgLv == ROWOW_ATK_DEF)
+            dmgLv = ROWOW_ATK_BLOCK;
+    }
+    if (BattleConfig.DelayBattleDamage == 0)
+        amotion = 1;
+    else if (src->IsPlayer() == false && amotion > 1000)
+        amotion = 1000;
+    if (amotion <= 1)
+    {
+        BattleDamage(src, target, damage, div, skillLevel, skillID, dmgLv, attackType, additionalEffects, GetTick(), isCritical);
+        return;
+    }
+    // The event is the target's own: it goes with the target, and runs in its update, where the attacker is looked up again
+    ObjectGuid srcGUID = src->GetGUID();
+    int32 distance = DistanceBL(src, target) + BattleConfig.AreaSize;
+    target->m_Events.AddEventAtOffset([this, target, srcGUID, distance, damage, div, skillLevel, skillID, dmgLv, attackType, additionalEffects, isCritical]()
+    {
+        // battle_delay_damage_sub
+        if (target->IsAlive() == false)
+            return;
+        Unit* delayedSrc = ObjectAccessor::GetUnit(*target, srcGUID);
+        if (delayedSrc == nullptr || delayedSrc->IsInWorld() == false || delayedSrc->GetMap() != target->GetMap() || DistanceBL(delayedSrc, target) > distance)
+            return; // Check to see if you haven't teleported. [Skotlex]
+        BattleDamage(delayedSrc, target, damage, div, skillLevel, skillID, dmgLv, attackType, additionalEffects, GetTick(), isCritical);
+    }, Milliseconds(std::max<int64>(1, int64(amotion) - int64(GetTick() - tick))));
+}
+
+void ROWOWMod::BattleDamage(Unit* src, Unit* target, int64 damage, int16 /*div*/, uint16 skillLevel, uint16 skillID, uint8 dmgLv, int32 attackType, bool additionalEffects,
+    uint64 tick, bool isCritical)
+{
+    // battle_damage: status_fix_damage as WoW damage carrying the RO number (the client's RO digits, MobLogDamage through the damage hook,
+    // death and exp), shown as the skill's spell; a miss shows RO's "Miss".  A coma hit (battle_check_coma) leaves 1 HP and 1 SP.  Then the
+    // additional effects
+    if (target == nullptr || src == nullptr || target->IsAlive() == false)
+        return;
+    uint32 spellID = GetSkillSpellID(skillID, skillLevel);
+    SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(spellID != 0 ? spellID : GetWeaponHitSoundSpellID(ROWOW_WEAPON_TYPE_FIST));
+    bool isComa = src->IsPlayer() == true && BattleCheckComa(src, target, attackType) == true;
+    if (spellInfo != nullptr && (dmgLv > ROWOW_ATK_BLOCK || isComa == true))
+    {
+        if (target->IsCreature() == true && target->ToCreature()->IsEvadingAttacks() == true)
+            src->SendSpellMiss(target, spellInfo->Id, SPELL_MISS_EVADE);
+        else if (damage <= 0 && isComa == false)
+            src->SendSpellMiss(target, spellInfo->Id, SPELL_MISS_MISS);
+        else
+        {
+            src->AtTargetAttacked(target, true);
+            uint32 dealt = uint32(std::clamp<int64>(damage, 0, std::numeric_limits<uint32>::max()));
+            SpellNonMeleeDamage log(src, target, spellInfo, SPELL_SCHOOL_MASK_NORMAL);
+            log.damage = dealt;
+            if (isCritical == true)
+                log.HitInfo |= SPELL_HIT_TYPE_CRIT;
+            src->SendSpellNonMeleeDamageLog(&log);
+            if (isComa == true)
+            {
+                // Coma: the damage is logged as it was, but HP and SP are set to 1
+                dealt = target->GetHealth() > 1 ? target->GetHealth() - 1 : 0;
+                if (target->GetMaxPower(POWER_MANA) > 0)
+                    target->SetPower(POWER_MANA, 1);
+            }
+            if (dealt > 0)
+                Unit::DealDamage(src, target, dealt, nullptr, SPELL_DIRECT_DAMAGE, SPELL_SCHOOL_MASK_NORMAL, spellInfo, false);
+        }
+    }
+    else if (spellInfo != nullptr)
+        src->SendSpellMiss(target, spellInfo->Id, dmgLv == ROWOW_ATK_LUCKY ? SPELL_MISS_DODGE : SPELL_MISS_MISS);
+    if (attackType != 0 && target->IsAlive() == true && additionalEffects == true)
+        SkillAdditionalEffect(src, target, skillID, skillLevel, attackType, dmgLv, tick);
+    if (dmgLv > ROWOW_ATK_BLOCK && attackType != 0 && additionalEffects == true)
+        SkillCounterAdditionalEffect(src, target, skillID, skillLevel, attackType, tick);
+}
+
+bool ROWOWMod::BattleCheckComa(Unit const* src, Unit const* target, int32 attackType) const
+{
+    // battle_check_coma: the coma bonuses (bComaClass, bComaRace, and for weapon attacks bWeaponComaClass, bWeaponComaEle, bWeaponComaRace;
+    // the race and element ones not on status immune monsters), in 10000.  (The guild castle's monsters come with War of Emperium)
+    ROWOWStatus const* tstatus = GetROStatus(target);
+    if (tstatus == nullptr || tstatus->Class == ROWOW_CLASS_BATTLEFIELD)
+        return false;
+    bool isStatusImmune = (tstatus->Mode & ROWOW_MODE_STATUS_IMMUNE) != 0;
+    int32 rate = GetDeferredBonus2(src, "bComaClass", tstatus->Class) + GetDeferredBonus2(src, "bComaClass", ROWOW_CLASS_ALL);
+    if (isStatusImmune == false)
+        rate += GetDeferredBonus2(src, "bComaRace", tstatus->Race) + GetDeferredBonus2(src, "bComaRace", ROWOW_RACE_ALL);
+    if ((attackType & ROWOW_BF_WEAPON) != 0)
+    {
+        rate += GetDeferredBonus2(src, "bWeaponComaClass", tstatus->Class) + GetDeferredBonus2(src, "bWeaponComaClass", ROWOW_CLASS_ALL);
+        if (isStatusImmune == false)
+        {
+            rate += GetDeferredBonus2(src, "bWeaponComaEle", tstatus->DefElement) + GetDeferredBonus2(src, "bWeaponComaEle", ROWOW_ELEMENT_ALL);
+            rate += GetDeferredBonus2(src, "bWeaponComaRace", tstatus->Race) + GetDeferredBonus2(src, "bWeaponComaRace", ROWOW_RACE_ALL);
+        }
+    }
+    return rate > 0 && int32(urand(0, 9999)) < rate;
+}
+
+void ROWOWStatusSkillImpl::CastendNoDamageID(Unit* src, Unit* target, uint16 skillLevel, uint64 /*tick*/, int32& /*flag*/) const
+{
+    // StatusSkillImpl::castendNoDamageId: the skill's status on the target for its Duration1, or ended when it runs and that's asked
+    ROWOWSkill const* skill = ROWOW->GetSkill(SkillID);
+    if (skill == nullptr || skill->StatusID == ROWOW_SC_NONE)
+        return;
+    if (IsEndIfRunning == true)
+    {
+        ROWOWStatusChange const* tsc = ROWOW->GetStatusChange(static_cast<Unit const*>(target));
+        if (tsc != nullptr && tsc->HasSCE(skill->StatusID) == true)
+        {
+            ROWOW->StatusChangeEnd(target, skill->StatusID);
+            return;
+        }
+    }
+    ROWOW->SCStart(src, target, skill->StatusID, 100, skillLevel, skill->Duration1[ROWOWSkill::GetLevelIndex(skillLevel)]);
+}
+
+void ROWOWWeaponSkillImpl::CastendDamageID(Unit* src, Unit* target, uint16 skillLevel, uint64 tick, int32& flag) const
+{
+    // WeaponSkillImpl::castendDamageId
+    ROWOW->SkillAttack(ROWOW_BF_WEAPON, src, src, target, SkillID, skillLevel, tick, flag);
+}
+
+void ROWOWRecursiveDamageSplashSkillImpl::CastendDamageID(Unit* src, Unit* target, uint16 skillLevel, uint64 tick, int32& flag) const
+{
+    // SkillImplRecursiveDamageSplash::castendDamageId: the first call searches the area around the target, which calls back with flag&1 for
+    // each unit found.  The search's skill_area_temp is the caster's, put back after it
+    ROWOWSkillUnitData* ud = ROWOW->GetSkillUnitData(src);
+    ROWOWSkill const* skill = ROWOW->GetSkill(SkillID);
+    if (skill == nullptr)
+        return;
+    if ((flag & 1) != 0)
+    {
+        // Recursive invocation.  (Hovering's immunity to ground and trap skills, status)
+        int32 sflag = ud->AreaTemp.Values[0] & 0xFFF;
+        if ((flag & ROWOW_SD_LEVEL) != 0)
+            sflag |= ROWOW_SD_LEVEL; // -1 will be used in packets instead of the skill level
+        if (ud->AreaTemp.TargetGUID != target->GetGUID() && skill->Inf2[ROWOW_INF2_ISNPC] == false)
+            sflag |= ROWOW_SD_ANIMATION; // original target gets no animation (as well as all NPC skills)
+        SplashDamage(src, target, skillLevel, tick, sflag);
+    }
+    else
+    {
+        ROWOWSkillAreaTemp outerAreaTemp = ud->AreaTemp;
+        ud->AreaTemp = ROWOWSkillAreaTemp();
+        ud->AreaTemp.TargetGUID = target->GetGUID();
+        SplashSearch(src, target, skillLevel, tick, flag);
+        ud->AreaTemp = outerAreaTemp;
+    }
+}
+
+void ROWOWRecursiveDamageSplashSkillImpl::CastendPos2(Unit* src, int32 x, int32 y, uint16 skillLevel, uint64 tick, int32& flag) const
+{
+    // SkillImplRecursiveDamageSplash::castendPos2: every enemy in the splash area around the ground spot (the cast center kept for the
+    // knockback direction)
+    ROWOWSkillUnitData* ud = ROWOW->GetSkillUnitData(src);
+    ROWOWSkillAreaTemp outerAreaTemp = ud->AreaTemp;
+    ud->AreaTemp.Values[4] = x;
+    ud->AreaTemp.Values[5] = y;
+    int16 size = GetSplashSearchSize(src, skillLevel);
+    int32 splashFlag = flag | ROWOW_BCT_ENEMY | 1;
+    ROWOW->MapForEachInArea(src, x - size, y - size, x + size, y + size, [this, src, skillLevel, tick, splashFlag](Unit* bl)
+    {
+        return ROWOW->SkillAreaSub(bl, src, SkillID, skillLevel, tick, splashFlag, ROWOWSkillAreaFunc::CastendDamageID);
+    });
+    ud->AreaTemp = outerAreaTemp;
+}
+
+int16 ROWOWRecursiveDamageSplashSkillImpl::GetSearchSize(Unit* /*src*/, uint16 skillLevel) const
+{
+    ROWOWSkill const* skill = ROWOW->GetSkill(SkillID);
+    return int16(skill != nullptr ? skill->SplashArea[ROWOWSkill::GetLevelIndex(skillLevel)] : 0);
+}
+
+int16 ROWOWRecursiveDamageSplashSkillImpl::GetSplashSearchSize(Unit* /*src*/, uint16 skillLevel) const
+{
+    ROWOWSkill const* skill = ROWOW->GetSkill(SkillID);
+    return int16(skill != nullptr ? skill->SplashArea[ROWOWSkill::GetLevelIndex(skillLevel)] : 0);
+}
+
+void ROWOWRecursiveDamageSplashSkillImpl::SplashSearch(Unit* src, Unit* target, uint16 skillLevel, uint64 tick, int32 flag) const
+{
+    // SkillImplRecursiveDamageSplash::splashSearch.  If skill damage should be split among targets, count them (SD_LEVEL: forced splash
+    // damage counts targets).  If there are no characters in the area, then it always counts as if there was one target
+    ROWOWSkill const* skill = ROWOW->GetSkill(SkillID);
+    ROWOWSkillUnitData* ud = ROWOW->GetSkillUnitData(src);
+    if ((flag & ROWOW_SD_LEVEL) != 0 || (skill != nullptr && skill->NK[ROWOW_NK_SPLASHSPLIT] == true))
+    {
+        ud->AreaTemp.Values[0] = ROWOW->MapForEachInRange(target, GetSearchSize(src, skillLevel), [this, src, skillLevel, tick](Unit* bl)
+        {
+            return ROWOW->SkillAreaSub(bl, src, SkillID, skillLevel, tick, ROWOW_BCT_ENEMY, ROWOWSkillAreaFunc::Count);
+        });
+        ud->AreaTemp.Values[0] = std::max(1, ud->AreaTemp.Values[0]);
+    }
+
+    // recursive invocation of skill_castend_damage_id() with flag|1
+    int32 splashFlag = flag | ROWOW_BCT_ENEMY | ROWOW_SD_SPLASH | 1;
+    ROWOW->MapForEachInRange(target, GetSplashSearchSize(src, skillLevel), [this, src, skillLevel, tick, splashFlag](Unit* bl)
+    {
+        return ROWOW->SkillAreaSub(bl, src, SkillID, skillLevel, tick, splashFlag, ROWOWSkillAreaFunc::CastendDamageID);
+    });
+}
+
+int64 ROWOWRecursiveDamageSplashSkillImpl::SplashDamage(Unit* src, Unit* target, uint16 skillLevel, uint64 tick, int32 flag) const
+{
+    // SkillImplRecursiveDamageSplash::splashDamage
+    ROWOWSkill const* skill = ROWOW->GetSkill(SkillID);
+    return ROWOW->SkillAttack(skill != nullptr ? skill->AttackType : ROWOW_BF_WEAPON, src, src, target, SkillID, skillLevel, tick, flag);
+}

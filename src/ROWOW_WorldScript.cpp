@@ -45,14 +45,15 @@ public:
         ROWOW->LoadCreatureMobData();
         ROWOW->LoadCreatureTemplateData();
         ROWOW->LoadIllusionData();
-        ROWOW->LoadSkillEffectData();
-        ROWOW->LoadSkillCellData();
         ROWOW->LoadMapGridData();
         ROWOW->LoadIdentityData();
         ROWOW->LoadStatusData();
         ROWOW->LoadBattleData();
         ROWOW->LoadItemScriptData();
         ROWOW->LoadBonusData();
+        ROWOW->LoadSkillData(); // After the items, whose names the skills' item costs use
+        ROWOW->LoadSkillUnitData();
+        ROWOW->LoadStatusChangeData(); // After the skills, whose durations the statuses take, and the script commands their scripts use
     }
 };
 

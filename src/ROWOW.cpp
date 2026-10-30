@@ -122,77 +122,6 @@ void ROWOWMod::LoadCreatureTemplateData()
     LOG_INFO("module.ROWOW", "ROWOWMod::LoadCreatureTemplateData loaded {} creature templates", CreatureTemplatesByEntry.size());
 }
 
-void ROWOWMod::LoadSkillEffectData()
-{
-    SkillEffectsBySpellID.clear();
-    if (IsEnabled == false)
-        return;
-
-    // The converter creates the table, so it may not exist yet on a server that hasn't had the ROWOW SQL applied
-    QueryResult tableResult = WorldDatabase.Query("SELECT 1 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'mod_rowow_skill_effect'");
-    if (!tableResult)
-    {
-        LOG_INFO("module.ROWOW", "ROWOWMod::LoadSkillEffectData found no mod_rowow_skill_effect table, so RO skills have no scripted parts");
-        return;
-    }
-    QueryResult result = WorldDatabase.Query("SELECT `SpellID`, `EffectType`, `TriggerSpellID`, `Chance`, `ChancePerCasterLevel`, `IsChanceByLevelDifference`, `ValueA`, `ValueB` FROM `mod_rowow_skill_effect` ORDER BY `SpellID`, `EffectIndex`");
-    if (!result)
-        return;
-    uint32 effectCount = 0;
-    do
-    {
-        Field* fields = result->Fetch();
-        ROWOWSkillEffect skillEffect;
-        skillEffect.EffectType = fields[1].Get<uint8>();
-        skillEffect.TriggerSpellID = fields[2].Get<uint32>();
-        skillEffect.Chance = fields[3].Get<float>();
-        skillEffect.ChancePerCasterLevel = fields[4].Get<float>();
-        skillEffect.IsChanceByLevelDifference = fields[5].Get<uint8>() != 0;
-        skillEffect.ValueA = fields[6].Get<int32>();
-        skillEffect.ValueB = fields[7].Get<int32>();
-        SkillEffectsBySpellID[fields[0].Get<uint32>()].push_back(skillEffect);
-        effectCount++;
-    } while (result->NextRow());
-    LOG_INFO("module.ROWOW", "ROWOWMod::LoadSkillEffectData loaded {} skill script parts for {} spells", effectCount, SkillEffectsBySpellID.size());
-}
-
-void ROWOWMod::LoadSkillCellData()
-{
-    SkillCellLayoutsBySpellID.clear();
-    if (IsEnabled == false)
-        return;
-
-    // The converter creates the table, so it may not exist yet on a server that hasn't had the ROWOW SQL applied
-    QueryResult tableResult = WorldDatabase.Query("SELECT 1 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'mod_rowow_skill_cell'");
-    if (!tableResult)
-    {
-        LOG_INFO("module.ROWOW", "ROWOWMod::LoadSkillCellData found no mod_rowow_skill_cell table, so RO ground skills have no cell layouts");
-        return;
-    }
-    QueryResult result = WorldDatabase.Query("SELECT `SpellID`, `Direction`, `OffsetX`, `OffsetY` FROM `mod_rowow_skill_cell` ORDER BY `SpellID`, `Direction`, `CellIndex`");
-    if (!result)
-        return;
-    uint32 cellCount = 0;
-    do
-    {
-        Field* fields = result->Fetch();
-        uint8 direction = fields[1].Get<uint8>();
-        ROWOWSkillCellLayout& cellLayout = SkillCellLayoutsBySpellID[fields[0].Get<uint32>()];
-        if (direction == ROWOW_RO_DIRECTION_ANY)
-            direction = 0;
-        else if (direction < ROWOW_RO_DIRECTION_COUNT)
-            cellLayout.IsDirectional = true;
-        else
-        {
-            LOG_ERROR("module.ROWOW", "ROWOWMod::LoadSkillCellData has a cell with direction {} for spell {}, which isn't a direction", direction, fields[0].Get<uint32>());
-            continue;
-        }
-        cellLayout.CellsByDirection[direction].emplace_back(fields[2].Get<int16>(), fields[3].Get<int16>());
-        cellCount++;
-    } while (result->NextRow());
-    LOG_INFO("module.ROWOW", "ROWOWMod::LoadSkillCellData loaded {} skill cells for {} spells", cellCount, SkillCellLayoutsBySpellID.size());
-}
-
 void ROWOWMod::LoadMapGridData()
 {
     MapGridsByMapID.clear();
@@ -235,14 +164,6 @@ ROWOWMapGrid const* ROWOWMod::GetMapGrid(uint32 mapID) const
     return &mapGridIter->second;
 }
 
-ROWOWSkillCellLayout const* ROWOWMod::GetSkillCellLayout(uint32 spellID) const
-{
-    auto cellLayoutIter = SkillCellLayoutsBySpellID.find(spellID);
-    if (cellLayoutIter == SkillCellLayoutsBySpellID.end())
-        return nullptr;
-    return &cellLayoutIter->second;
-}
-
 uint8 ROWOWMod::GetRODirection(float deltaX, float deltaY)
 {
     // RO's directions: 0 north, 1 north-west, 2 west, 3 south-west, 4 south, 5 south-east, 6 east, 7 north-east (x east, y north)
@@ -277,14 +198,6 @@ uint8 ROWOWMod::GetRODirection(float deltaX, float deltaY)
     if (-deltaX > deltaY * 3)
         return 2;
     return 1;
-}
-
-std::vector<ROWOWSkillEffect> const* ROWOWMod::GetSkillEffects(uint32 spellID) const
-{
-    auto skillEffectsIter = SkillEffectsBySpellID.find(spellID);
-    if (skillEffectsIter == SkillEffectsBySpellID.end())
-        return nullptr;
-    return &skillEffectsIter->second;
 }
 
 ROWOWCreatureTemplate const* ROWOWMod::GetCreatureTemplate(uint32 creatureEntry) const

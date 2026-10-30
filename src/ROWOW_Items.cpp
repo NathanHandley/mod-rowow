@@ -38,21 +38,12 @@
 
 namespace
 {
-    // The skills an item reads (rAthena's skill IDs)
-    constexpr uint16 SKILL_SM_RECOVERY = 4;
-    constexpr uint16 SKILL_MG_SRECOVERY = 9;
-    constexpr uint16 SKILL_AL_TELEPORT = 26;
-    constexpr uint16 SKILL_MC_IDENTIFY = 40;
-    constexpr uint16 SKILL_AS_LEFT = 133;
-    constexpr uint16 SKILL_AS_VENOMKNIFE = 1004;
-    constexpr uint16 SKILL_AM_LEARNINGPOTION = 227;
-
     // item_db's ammo SubTypes (e_ammo_type) the equipping rules check
     constexpr uint8 AMMO_TYPE_DAGGER = 2;
 
     // The skills itemskill can use so far: the Fly and Butterfly Wings' Teleport, and the Magnifier's Item Appraisal.  The rest come with
     // the skills (R6)
-    std::pair<char const*, uint16> const ItemSkills[] = { { "AL_TELEPORT", SKILL_AL_TELEPORT }, { "MC_IDENTIFY", SKILL_MC_IDENTIFY } };
+    std::pair<char const*, uint16> const ItemSkills[] = { { "AL_TELEPORT", ROWOW_SKILL_AL_TELEPORT }, { "MC_IDENTIFY", ROWOW_SKILL_MC_IDENTIFY } };
 
     uint16 GetItemSkillID(ROWOWScriptValue const& skill)
     {
@@ -282,6 +273,22 @@ void ROWOWMod::LoadItemScriptData()
         ROWOWSCRIPT->RegisterConstant(std::string("RC_") + RaceNames[race], race);
     for (auto const& jobByID : JobsByID)
         ROWOWSCRIPT->RegisterConstant("Job_" + jobByID.second.Name, jobByID.first);
+
+    // The statuses by their numbers (SC_*, and the Eff_* the bonuses of added statuses name), and the added statuses' flags (ATF_*)
+    for (auto const& statusName : ROWOWStatusNames)
+        ROWOWSCRIPT->RegisterConstant(std::string("SC_") + statusName.first, statusName.second);
+    std::pair<char const*, int32> const EffNames[] = { { "Eff_Stone", ROWOW_SC_STONEWAIT }, { "Eff_Freeze", ROWOW_SC_FREEZE }, { "Eff_Stun", ROWOW_SC_STUN },
+        { "Eff_Sleep", ROWOW_SC_SLEEP }, { "Eff_Poison", ROWOW_SC_POISON }, { "Eff_Curse", ROWOW_SC_CURSE }, { "Eff_Silence", ROWOW_SC_SILENCE },
+        { "Eff_Confusion", ROWOW_SC_CONFUSION }, { "Eff_Blind", ROWOW_SC_BLIND }, { "Eff_Bleeding", ROWOW_SC_BLEEDING }, { "Eff_DPoison", ROWOW_SC_DPOISON },
+        { "Eff_Fear", ROWOW_SC_FEAR }, { "Eff_Burning", ROWOW_SC_BURNING }, { "Eff_Hallucination", ROWOW_SC_HALLUCINATION } };
+    for (auto const& effName : EffNames)
+        ROWOWSCRIPT->RegisterConstant(effName.first, effName.second);
+    std::pair<char const*, int32> const AtfNames[] = { { "ATF_SELF", ROWOW_ATF_SELF }, { "ATF_TARGET", ROWOW_ATF_TARGET }, { "ATF_SHORT", ROWOW_ATF_SHORT },
+        { "ATF_LONG", ROWOW_ATF_LONG }, { "ATF_WEAPON", ROWOW_ATF_WEAPON }, { "ATF_MAGIC", ROWOW_ATF_MAGIC }, { "ATF_MISC", ROWOW_ATF_MISC },
+        { "ATF_SKILL", ROWOW_ATF_MAGIC | ROWOW_ATF_MISC } };
+    for (auto const& atfName : AtfNames)
+        ROWOWSCRIPT->RegisterConstant(atfName.first, atfName.second);
+    ROWOWSCRIPT->RegisterConstant("INFINITE_TICK", ROWOW_INFINITE_TICK);
     for (char const* symbolPrefix : { "SC_", "EF_", "IG_", "MOBG_", "HAT_EF_", "ITEMID_", "RC_", "RC2_", "Class_", "ATF_", "BF_", "EAJ_", "EAJL_", "Size_", "Ele_", "SP_" })
         ROWOWSCRIPT->RegisterSymbolPrefix(symbolPrefix);
 
@@ -348,10 +355,72 @@ void ROWOWMod::LoadItemScriptData()
             StatusHeal(context.AttachedPlayer, GetArgumentNumber(arguments, 0, 0), GetArgumentNumber(arguments, 1, 0));
         return ROWOWScriptValue::FromNumber(0);
     });
-    ROWOWSCRIPT->RegisterCommand("sc_end", [](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const&)
+    for (char const* startCommandName : { "sc_start", "sc_start2", "sc_start4" })
     {
-        // Ending a status: no RO statuses exist until the status engine (R6), so there is never one to end
+        // sc_start <type>,<tick>,<val1>{,<rate>,<flag>{,<GID>}}; (sc_start2 adds val2, sc_start4 val2..val4): a status on the attached
+        // player, with a 1/10000 rate (100% unless told) and SCSTART_NOAVOID unless told.  No tick takes the status's skill's Duration1 at val1.
+        // A worn item's bonus script doesn't start statuses (its status calculation runs it again and again; the throwable items' scripts are
+        // their use)
+        int32 startType = strstr(startCommandName, "4") != nullptr ? 4 : (strstr(startCommandName, "2") != nullptr ? 2 : 1);
+        ROWOWSCRIPT->RegisterCommand(startCommandName, [this, startType](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+        {
+            if (context.AttachedPlayer == nullptr || context.BonusStatus != nullptr || arguments.size() < size_t(3 + startType - 1))
+                return ROWOWScriptValue::FromNumber(0);
+            int32 type = GetArgumentNumber(arguments, 0, ROWOW_SC_NONE);
+            int64 tick = arguments[1].GetNumber();
+            int32 val1 = GetArgumentNumber(arguments, 2, 0);
+            int32 val2 = startType >= 2 ? GetArgumentNumber(arguments, 3, 0) : 0;
+            int32 val3 = startType == 4 ? GetArgumentNumber(arguments, 4, 0) : 0;
+            int32 val4 = startType == 4 ? GetArgumentNumber(arguments, 5, 0) : 0;
+            int32 rate = std::min(GetArgumentNumber(arguments, size_t(2 + startType), 10000), 10000);
+            uint8 flag = uint8(GetArgumentNumber(arguments, size_t(3 + startType), ROWOW_SCSTART_NOAVOID));
+            uint16 skillID = StatusDBGetSkill(type);
+            if (tick == 0 && val1 > 0 && skillID > 0) // When there isn't a duration specified, try to get it from the skill_db
+                tick = SkillGetTime(skillID, uint16(val1));
+            StatusChangeStart(context.AttachedPlayer, context.AttachedPlayer, type, rate, val1, val2, val3, val4, tick, flag);
+            return ROWOWScriptValue::FromNumber(0);
+        });
+    }
+    ROWOWSCRIPT->RegisterCommand("sc_end", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // sc_end <type>: ends a status on the attached player, unless it can't be cleared (NoClearbuff and NoForcedEnd)
+        if (context.AttachedPlayer == nullptr || context.BonusStatus != nullptr || arguments.empty() == true)
+            return ROWOWScriptValue::FromNumber(0);
+        int32 type = GetArgumentNumber(arguments, 0, ROWOW_SC_NONE);
+        ROWOWStatusChangeDB const* scdb = GetStatusChangeDB(type);
+        if (scdb == nullptr || (scdb->Flag[ROWOW_SCF_NOCLEARBUFF] == true && scdb->Flag[ROWOW_SCF_NOFORCEDEND] == true))
+            return ROWOWScriptValue::FromNumber(0);
+        if (ROWOWStatusChange* sc = GetStatusChange(static_cast<Unit*>(context.AttachedPlayer)))
+        {
+            // This should help status_change_end force disabling the SC in case it has no limit.
+            if (ROWOWStatusChangeEntry* sce = sc->GetSCE(type))
+                sce->Val1 = sce->Val2 = sce->Val3 = sce->Val4 = 0;
+        }
+        StatusChangeEnd(context.AttachedPlayer, type);
         return ROWOWScriptValue::FromNumber(0);
+    });
+    ROWOWSCRIPT->RegisterCommand("getstatus", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // getstatus(<type>{,<type2>}): 0 or 1 for whether the attached player has the status, or with type2 one of its values (1-4) or the
+        // time left (5)
+        if (context.AttachedPlayer == nullptr || arguments.empty() == true)
+            return ROWOWScriptValue::FromNumber(0);
+        ROWOWStatusChangeEntry const* sce = GetSCE(context.AttachedPlayer, GetArgumentNumber(arguments, 0, ROWOW_SC_NONE));
+        if (sce == nullptr)
+            return ROWOWScriptValue::FromNumber(0);
+        switch (GetArgumentNumber(arguments, 1, 0))
+        {
+            case 1: return ROWOWScriptValue::FromNumber(sce->Val1);
+            case 2: return ROWOWScriptValue::FromNumber(sce->Val2);
+            case 3: return ROWOWScriptValue::FromNumber(sce->Val3);
+            case 4: return ROWOWScriptValue::FromNumber(sce->Val4);
+            case 5:
+            {
+                uint64 tick = GetTick();
+                return ROWOWScriptValue::FromNumber(sce->TimerTime > tick ? int64(sce->TimerTime - tick) : 0);
+            }
+            default: return ROWOWScriptValue::FromNumber(1);
+        }
     });
     for (char const* effectCommandName : { "specialeffect", "specialeffect2" })
     {
@@ -408,7 +477,7 @@ void ROWOWMod::LoadItemScriptData()
             uint32 count = 1;
             context.AttachedPlayer->DestroyItemCount(usedItem, count, true);
         };
-        if (skillID == SKILL_AL_TELEPORT)
+        if (skillID == ROWOW_SKILL_AL_TELEPORT)
         {
             // A Fly Wing is level 1 (a random spot), a Butterfly Wing level 3 (the save point, without level 2's menu)
             consumeUsedItem();
@@ -417,7 +486,7 @@ void ROWOWMod::LoadItemScriptData()
             else
                 TeleportToSavePoint(context.AttachedPlayer);
         }
-        else if (skillID == SKILL_MC_IDENTIFY)
+        else if (skillID == ROWOW_SKILL_MC_IDENTIFY)
         {
             // The Magnifier's list of items to appraise comes up, and it's used up (kept when there's nothing to appraise)
             SendItemIdentifyList(context.AttachedPlayer);
@@ -602,7 +671,7 @@ uint8 ROWOWMod::PCIsEquip(Player* player, ROWOWIdentity const& identity, Item co
     // Ammo needs its weapon (ammo_check_weapon), and the Venom Knives the skill that throws them
     if ((roItem->Locations & ROWOW_EQUIP_POSITION_AMMO) != 0)
     {
-        if (roItem->AmmoType == AMMO_TYPE_DAGGER && PCCheckSkill(player, SKILL_AS_VENOMKNIFE) == 0)
+        if (roItem->AmmoType == AMMO_TYPE_DAGGER && PCCheckSkill(player, ROWOW_SKILL_AS_VENOMKNIFE) == 0)
             return ROWOW_EQUIP_ACK_FAIL;
         if (BattleConfig.AmmoCheckWeapon != 0 && IsAmmoForWeaponType(roItem->AmmoType, identity.Status.WeaponType) == false)
             return ROWOW_EQUIP_ACK_FAIL;
@@ -626,7 +695,7 @@ int32 ROWOWMod::PCEquipPoint(Player* player, ROWOWIdentity const& identity, ROWO
     {
         ROWOWJob const* job = GetJob(identity.JobID);
         bool isAssassin = job != nullptr && job->ItemJobIndex >= 0 && strcmp(ROWOWItemJobNames[job->ItemJobIndex], "Assassin") == 0;
-        if (isAssassin == true || PCCheckSkill(player, SKILL_AS_LEFT) > 0)
+        if (isAssassin == true || PCCheckSkill(player, ROWOW_SKILL_AS_LEFT) > 0)
             return ROWOW_EQUIP_POSITION_ARMS;
     }
     return equipPosition;
@@ -785,6 +854,10 @@ bool ROWOWMod::PCIsUseItem(Player* player, Item const* item, bool isReporting)
         return false;
     }
 
+    // Statuses that keep the player from using items (Hiding, Stomach Ache...)
+    if (ROWOWStatusChange const* sc = GetStatusChange(static_cast<Unit const*>(player)); sc != nullptr && sc->Cant.Consume == true)
+        return false;
+
     // Prevent mass item usage, and items with their own reuse delay (pc_itemcd_check)
     uint32 now = uint32(GameTime::GetGameTimeMS().count());
     if (int32(identity->CanUseItemTime - now) > 0)
@@ -879,22 +952,42 @@ void ROWOWMod::PCUseItem(Player* player, ObjectGuid itemGUID)
 
 void ROWOWMod::PCItemHeal(Player* player, uint32 /*itemID*/, int32 hp, int32 sp)
 {
-    // pc_itemheal: VIT (and Increase HP Recovery, Potion Research) adds to HP potions, INT (Increase SP Recovery) to SP ones.  The item
-    // heal rate bonuses come with the bonus engine (R5) and Critical Wounds with the statuses (R6)
+    // pc_itemheal: VIT (and Increase HP Recovery, Potion Research) adds to HP potions, INT (Increase SP Recovery) to SP ones, and the
+    // statuses that lower or block healing.  The item heal rate bonuses come with the bonus engine (R5)
     ROWOWIdentity* identity = GetIdentity(player);
+    ROWOWStatusChange const* sc = GetStatusChange(static_cast<Unit const*>(player));
     if (hp != 0)
     {
-        int32 bonus = 100 + identity->Status.Stats[ROWOW_STAT_VIT] * 2 + PCCheckSkill(player, SKILL_SM_RECOVERY) * 10 + PCCheckSkill(player, SKILL_AM_LEARNINGPOTION) * 5;
+        int32 bonus = 100 + identity->Status.Stats[ROWOW_STAT_VIT] * 2 + PCCheckSkill(player, ROWOW_SKILL_SM_RECOVERY) * 10 + PCCheckSkill(player, ROWOW_SKILL_AM_LEARNINGPOTION) * 5;
+        // Recovery Potion
+        if (ROWOWStatusChangeEntry const* sce = sc != nullptr ? sc->GetSCE(ROWOW_SC_INCHEALRATE) : nullptr)
+            bonus += bonus * sce->Val1 / 100;
         int32 boostedHP = hp * bonus / 100; // Overflow check
         if (bonus != 100 && boostedHP > hp)
             hp = boostedHP;
     }
     if (sp != 0)
     {
-        int32 bonus = 100 + identity->Status.Stats[ROWOW_STAT_INT] * 2 + PCCheckSkill(player, SKILL_MG_SRECOVERY) * 10 + PCCheckSkill(player, SKILL_AM_LEARNINGPOTION) * 5;
+        int32 bonus = 100 + identity->Status.Stats[ROWOW_STAT_INT] * 2 + PCCheckSkill(player, ROWOW_SKILL_MG_SRECOVERY) * 10 + PCCheckSkill(player, ROWOW_SKILL_AM_LEARNINGPOTION) * 5;
         int32 boostedSP = sp * bonus / 100;
         if (bonus != 100 && boostedSP > sp)
             sp = boostedSP;
+    }
+    if (sc != nullptr && sc->IsEmpty() == false)
+    {
+        // Critical Wound and Death Hurt stack
+        int32 penalty = 0;
+        if (ROWOWStatusChangeEntry const* sce = sc->GetSCE(ROWOW_SC_CRITICALWOUND))
+            penalty += sce->Val2;
+        if (ROWOWStatusChangeEntry const* sce = sc->GetSCE(ROWOW_SC_DEATHHURT); sce != nullptr && sce->Val3 == 1)
+            penalty += 20;
+        if (sc->HasSCE(ROWOW_SC_NORECOVER_STATE) == true)
+            penalty = 100;
+        if (penalty > 0)
+        {
+            hp -= hp * penalty / 100;
+            sp -= sp * penalty / 100;
+        }
     }
     StatusHeal(player, hp, sp);
 }

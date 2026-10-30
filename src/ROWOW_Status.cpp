@@ -245,6 +245,69 @@ void ROWOWMod::LoadStatusData()
         readValue("area_size", BattleConfig.AreaSize);
         readValue("item_use_interval", BattleConfig.ItemUseInterval);
         readValue("ammo_unequip", BattleConfig.AmmoUnequip);
+        readValue("skillup_limit", BattleConfig.SkillUpLimit);
+        readValue("skillfree", BattleConfig.SkillFree);
+        readValue("quest_skill_learn", BattleConfig.QuestSkillLearn);
+        readValue("casting_rate", BattleConfig.CastRate);
+        readValue("castrate_dex_scale", BattleConfig.CastrateDexScale);
+        readValue("delay_rate", BattleConfig.DelayRate);
+        readValue("delay_dependon_dex", BattleConfig.DelayDependOnDex);
+        readValue("delay_dependon_agi", BattleConfig.DelayDependOnAgi);
+        readValue("min_skill_delay_limit", BattleConfig.MinSkillDelayLimit);
+        readValue("no_skill_delay", BattleConfig.NoSkillDelay);
+        readValue("max_heal", BattleConfig.MaxHeal);
+        readValue("max_heal_lv", BattleConfig.MaxHealLv);
+        readValue("delay_battle_damage", BattleConfig.DelayBattleDamage);
+        readValue("knockback_left", BattleConfig.KnockbackLeft);
+        readValue("skillrange_by_distance", BattleConfig.SkillrangeByDistance);
+        readValue("skillrange_from_weapon", BattleConfig.SkillrangeFromWeapon);
+        readValue("skill_caster_check", BattleConfig.SkillCasterCheck);
+        readValue("cardfix_monster_physical", BattleConfig.CardfixMonsterPhysical);
+        readValue("path_blown_halt", BattleConfig.PathBlownHalt);
+        readValue("exp_bonus_nodamage_attacker", BattleConfig.ExpBonusNodamageAttacker);
+        readValue("heal_exp", BattleConfig.HealExp);
+        readValue("skill_add_range", BattleConfig.SkillAddRange);
+        readValue("pc_status_def_rate", BattleConfig.PCScDefRate);
+        readValue("mob_status_def_rate", BattleConfig.MobScDefRate);
+        readValue("pc_max_status_def", BattleConfig.PCMaxScDef);
+        readValue("mob_max_status_def", BattleConfig.MobMaxScDef);
+        readValue("status_cast_cancel", BattleConfig.ScCastCancel);
+        readValue("max_walk_speed", BattleConfig.MaxWalkSpeed);
+        readValue("gtb_sc_immunity", BattleConfig.GtbScImmunity);
+        readValue("player_cloak_check_type", BattleConfig.PCCloakCheckType);
+        readValue("monster_cloak_check_type", BattleConfig.MonsterCloakCheckType);
+        readValue("infinite_endure", BattleConfig.InfiniteEndure);
+        readValue("undead_detect_type", BattleConfig.UndeadDetectType);
+        readValue("debuff_on_logout", BattleConfig.DebuffOnLogout);
+        readValue("auto_counter_type", BattleConfig.AutoCounterType);
+        readValue("equip_natural_break_rate", BattleConfig.EquipNaturalBreakRate);
+        readValue("equip_self_break_rate", BattleConfig.EquipSelfBreakRate);
+        readValue("equip_skill_break_rate", BattleConfig.EquipSkillBreakRate);
+        readValue("break_mob_equip", BattleConfig.BreakMobEquip);
+        readValue("stormgust_knockback", BattleConfig.StormgustKnockback);
+        readValue("cart_revo_knockback", BattleConfig.CartRevoKnockback);
+        readValue("arrow_shower_knockback", BattleConfig.ArrowShowerKnockback);
+        readValue("player_invincible_time", BattleConfig.PCInvincibleTime);
+        int32 maxCartWeight = BattleConfig.MaxCartWeight / 10; // The setting is in whole weight, the cart counts tenths (battle_adjust_conf)
+        readValue("max_cart_weight", maxCartWeight);
+        BattleConfig.MaxCartWeight = maxCartWeight * 10;
+        readValue("vending_max_value", BattleConfig.VendingMaxValue);
+        readValue("vending_over_max", BattleConfig.VendingOverMax);
+        readValue("vending_tax", BattleConfig.VendingTax);
+        readValue("vending_tax_min", BattleConfig.VendingTaxMin);
+        readValue("skill_steal_max_tries", BattleConfig.SkillStealMaxTries);
+        readValue("autospell_check_range", BattleConfig.AutospellCheckRange);
+        readValue("autospell_stacking", BattleConfig.AutospellStacking);
+        readValue("skip_teleport_lv1_menu", BattleConfig.SkipTeleportLv1Menu);
+        readValue("basic_skill_check", BattleConfig.BasicSkillCheck);
+        readValue("natural_heal_skill_interval", BattleConfig.NaturalHealSkillInterval);
+        readValue("devotion_level_difference", BattleConfig.DevotionLevelDifference);
+        readValue("devotion_rdamage", BattleConfig.DevotionRDamage);
+        readValue("devotion_rdamage_skill_only", BattleConfig.DevotionRDamageSkillOnly);
+        readValue("devotion_standup_fix", BattleConfig.DevotionStandupFix);
+        readValue("bowling_bash_area", BattleConfig.BowlingBashArea);
+        readValue("gx_allhit", BattleConfig.GxAllHit);
+        readValue("skill_eightpath_same_cell", BattleConfig.SkillEightpathSameCell);
         BattleConfig.MultiLevelUp = multiLevelUp != 0;
         BattleConfig.MaxAspdAmotion = (2000 - maxAspd * 10) * 2; // As battle.cpp converts it after loading
     }
@@ -346,6 +409,9 @@ void ROWOWMod::LoadStatusData()
         int32 refineableColumnIndex = itemTable->GetColumnIndex("Refineable");
         int32 flagsColumnIndex = itemTable->GetColumnIndex("Flags");
         int32 delayColumnIndex = itemTable->GetColumnIndex("Delay");
+        int32 weightColumnIndex = itemTable->GetColumnIndex("Weight");
+        int32 tradeColumnIndex = itemTable->GetColumnIndex("Trade");
+        int32 buyColumnIndex = itemTable->GetColumnIndex("Buy");
         for (size_t rowIndex = 0; rowIndex < itemTable->Rows.size(); rowIndex++)
         {
             uint32 itemID = uint32(itemTable->GetInt(rowIndex, idColumnIndex, 0));
@@ -430,6 +496,15 @@ void ROWOWMod::LoadStatusData()
             for (auto const& delayField : ROWOWDataTable::ParseMap(itemTable->GetCell(rowIndex, delayColumnIndex)))
                 if (delayField.first == "Duration")
                     item.DelayDuration = uint32(std::max(0, atoi(delayField.second.c_str())));
+            item.Weight = int32(std::max<int64>(0, itemTable->GetInt(rowIndex, weightColumnIndex, 0)));
+            item.Buy = int32(std::max<int64>(0, itemTable->GetInt(rowIndex, buyColumnIndex, 0)));
+            for (auto const& tradeField : ROWOWDataTable::ParseMap(itemTable->GetCell(rowIndex, tradeColumnIndex)))
+            {
+                if (tradeField.first == "NoTrade")
+                    item.IsNoTrade = tradeField.second == "true";
+                else if (tradeField.first == "NoCart")
+                    item.IsNoCart = tradeField.second == "true";
+            }
             if (item.IsWeapon == true)
                 item.WeaponType = uint8(std::max(0, GetWeaponTypeByName(itemTable->GetCell(rowIndex, subTypeColumnIndex))));
             if (item.IsAmmo == true)
@@ -487,13 +562,17 @@ ROWOWItem const* ROWOWMod::GetROItem(Item const* item) const
 
 void ROWOWMod::CalculateIdentityStatus(Player* player, ROWOWIdentity& identity) const
 {
-    // status_calc_pc_sub
+    // status_calc_pc_sub (the base status), then status_calc_bl_main with every flag (the battle status: the statuses' changes)
     ROWOWStatus status;
+    ROWOWStatusChange const* sc = GetStatusChange(static_cast<Unit const*>(player));
+    if (sc != nullptr && sc->IsEmpty() == true)
+        sc = nullptr;
     status.IsPlayer = true;
     status.Level = identity.BaseLevel;
+    status.Mode = ROWOW_MODE_PC;
     ROWOWJob const* job = GetJob(identity.JobID);
 
-    // The worn items, their refine, scripts and cards, the ammo and the item combos (StatusCalcPCItems)
+    // The worn items, their refine, scripts and cards, the ammo and the item combos, then the statuses' scripts (StatusCalcPCItems)
     StatusCalcPCItems(player, identity, status);
     status.WeaponType = GetCombinedWeaponType(status.RightWeaponType, status.LeftWeaponType);
     status.Range = std::max(1, status.Range);
@@ -507,23 +586,36 @@ void ROWOWMod::CalculateIdentityStatus(Player* player, ROWOWIdentity& identity) 
         status.WeaponSizeMods[size] = SizeFixByWeaponType[status.RightWeaponType][size];
         status.LeftWeaponSizeMods[size] = SizeFixByWeaponType[status.LeftWeaponType][size];
     }
+    if (PCIsRiding(player) == true && (status.WeaponType == ROWOW_WEAPON_TYPE_1HSPEAR || status.WeaponType == ROWOW_WEAPON_TYPE_2HSPEAR))
+    {
+        // When Riding with spear, damage modifier to mid-class becomes same as versus large size.
+        status.WeaponSizeMods[ROWOW_SIZE_MEDIUM] = status.WeaponSizeMods[ROWOW_SIZE_BIG];
+        status.LeftWeaponSizeMods[ROWOW_SIZE_MEDIUM] = status.LeftWeaponSizeMods[ROWOW_SIZE_BIG];
+    }
 
     // ----- STATS CALCULATION -----
-    // Job bonuses, then the base stats.  (The Super Novice's +10 for never dying waits for a death count, and the passive skills that
-    // add stats come with the skills, R6)
+    // Job bonuses, the passive skills, then the base stats.  (The Super Novice's +10 for never dying waits for a death count)
     if (job != nullptr && identity.JobLevel >= 1 && identity.JobLevel <= job->BonusStatsByJobLevel.size())
         for (uint8 statIndex = 0; statIndex < ROWOW_STAT_COUNT; statIndex++)
             status.JobBonusStats[statIndex] = job->BonusStatsByJobLevel[identity.JobLevel - 1][statIndex];
+    int32 skillStats[ROWOW_STAT_COUNT] = { };
+    int32 skill = 0;
+    if (PCCheckSkill(identity, ROWOW_SKILL_BS_HILTBINDING) > 0)
+        skillStats[ROWOW_STAT_STR]++;
+    if ((skill = PCCheckSkill(identity, ROWOW_SKILL_SA_DRAGONOLOGY)) > 0)
+        skillStats[ROWOW_STAT_INT] += (skill + 1) / 2; // +1 INT / 2 lv
+    if ((skill = PCCheckSkill(identity, ROWOW_SKILL_AC_OWL)) > 0)
+        skillStats[ROWOW_STAT_DEX] += skill;
     for (uint8 statIndex = 0; statIndex < ROWOW_STAT_COUNT; statIndex++)
-        status.Stats[statIndex] = std::clamp<int32>(status.JobBonusStats[statIndex] + int32(identity.Stats[statIndex]) + status.Bonus.ParamBonus[statIndex]
-            + status.Bonus.ParamEquip[statIndex], 0, USHRT_MAX);
+        status.Stats[statIndex] = std::clamp<int32>(status.JobBonusStats[statIndex] + skillStats[statIndex] + int32(identity.Stats[statIndex]) +
+            status.Bonus.ParamBonus[statIndex] + status.Bonus.ParamEquip[statIndex], 0, USHRT_MAX);
 
     // The base ATK bonus of the weapon type held (bWeaponAtk)
     if (status.WeaponType < ROWOW_WEAPON_TYPE_MAX && status.Bonus.WeaponAtk[status.WeaponType] != 0)
         status.BaseAttack += status.Bonus.WeaponAtk[status.WeaponType];
 
     // ----- HP MAX CALCULATION -----
-    status.MaxHP = StatusCalcMaxHPPC(identity, status);
+    status.MaxHP = StatusCalcMaxHPPC(identity, status, sc);
     if (BattleConfig.HPRate != 100)
         status.MaxHP = uint32(BattleConfig.HPRate * (status.MaxHP / 100.));
     if (identity.BaseLevel < 100)
@@ -534,7 +626,7 @@ void ROWOWMod::CalculateIdentityStatus(Player* player, ROWOWIdentity& identity) 
         status.MaxHP = std::clamp<uint32>(status.MaxHP, 1, uint32(BattleConfig.MaxHP));
 
     // ----- SP MAX CALCULATION -----
-    status.MaxSP = StatusCalcMaxSPPC(identity, status);
+    status.MaxSP = StatusCalcMaxSPPC(identity, status, sc);
     if (BattleConfig.SPRate != 100)
         status.MaxSP = uint32(BattleConfig.SPRate * (status.MaxSP / 100.));
     status.MaxSP = std::clamp<uint32>(status.MaxSP, 1, uint32(BattleConfig.MaxSP));
@@ -542,8 +634,15 @@ void ROWOWMod::CalculateIdentityStatus(Player* player, ROWOWIdentity& identity) 
     // ----- MISC CALCULATION -----
     StatusCalcMisc(status, identity.BaseLevel);
 
-    // The rate bonuses of the gear
+    // The rate bonuses of the gear (and of the statuses that raise the matk rate, which status_calc_pc_sub gives as pc_bonus SP_MATK_RATE)
     ROWOWBonus& bonus = status.Bonus;
+    if (sc != nullptr)
+    {
+        if (ROWOWStatusChangeEntry const* sce = sc->GetSCE(ROWOW_SC_INCMATKRATE))
+            bonus.MatkRate += sce->Val1;
+        if (ROWOWStatusChangeEntry const* sce = sc->GetSCE(ROWOW_SC_MINDBREAKER))
+            bonus.MatkRate += sce->Val2;
+    }
     auto applyRate = [](int32& value, int32& rate)
     {
         if (rate < 0)
@@ -560,6 +659,34 @@ void ROWOWMod::CalculateIdentityStatus(Player* player, ROWOWIdentity& identity) 
     applyRate(status.Critical, bonus.CriticalRate);
     status.Critical = std::clamp<int32>(status.Critical, SHRT_MIN, SHRT_MAX);
     applyRate(status.Flee2, bonus.Flee2Rate);
+
+    // ----- HIT CALCULATION -----
+    // Absolute modifiers from passive skills
+    if ((skill = PCCheckSkill(identity, ROWOW_SKILL_BS_WEAPONRESEARCH)) > 0)
+        status.Hit += skill * 2;
+    if ((skill = PCCheckSkill(identity, ROWOW_SKILL_AC_VULTURE)) > 0)
+    {
+        status.Hit += skill;
+        if (status.WeaponType == ROWOW_WEAPON_TYPE_BOW)
+            status.Range += skill;
+    }
+    if (status.WeaponType >= ROWOW_WEAPON_TYPE_REVOLVER && status.WeaponType <= ROWOW_WEAPON_TYPE_GRENADE)
+    {
+        if ((skill = PCCheckSkill(identity, ROWOW_SKILL_GS_SINGLEACTION)) > 0)
+            status.Hit += 2 * skill;
+        if ((skill = PCCheckSkill(identity, ROWOW_SKILL_GS_SNAKEEYE)) > 0)
+        {
+            status.Hit += skill;
+            status.Range += skill;
+        }
+    }
+
+    // ----- FLEE CALCULATION -----
+    // Absolute modifiers from passive skills (a second job of the Thief line gets more of Improve Dodge)
+    if ((skill = PCCheckSkill(identity, ROWOW_SKILL_TF_MISS)) > 0)
+        status.Flee += skill * ((job != nullptr && job->FirstJobID == ROWOW_JOB_THIEF) ? 4 : 3);
+    if ((skill = PCCheckSkill(identity, ROWOW_SKILL_MO_DODGE)) > 0)
+        status.Flee += (skill * 3) / 2;
 
     // ----- EQUIPMENT-DEF CALCULATION -----
     if (bonus.DefRate < 0)
@@ -586,8 +713,17 @@ void ROWOWMod::CalculateIdentityStatus(Player* player, ROWOWIdentity& identity) 
     // ----- ASPD CALCULATION -----
     // pc_maxaspd / AMOTION_DIVIDER_PC and MIN_ASPD / AMOTION_DIVIDER_PC
     // (status_calc_bl_main then applies the ASPD rate, which the gear's bAspdRate lowered, and caps it again)
-    status.AttackMotion = std::clamp(StatusBaseAmotionPC(identity, status), BattleConfig.MaxAspdAmotion / 2, 8000 / 2);
-    status.AttackMotion = std::clamp(status.AttackMotion * status.AspdRate / 1000, BattleConfig.MaxAspdAmotion / 2, 8000 / 2);
+    status.AttackMotion = std::clamp(StatusBaseAmotionPC(identity, status), BattleConfig.MaxAspdAmotion / 2, ROWOW_MIN_ASPD / 2);
+    // Relative modifiers from passive skills, and riding a Peco (slower but for Cavalier Mastery)
+    if ((skill = PCCheckSkill(identity, ROWOW_SKILL_SA_ADVANCEDBOOK)) > 0 && status.WeaponType == ROWOW_WEAPON_TYPE_BOOK)
+        status.AspdRate -= 5 * skill;
+    if ((skill = PCCheckSkill(identity, ROWOW_SKILL_SG_DEVIL)) > 0 && PCIsMaxJobLevel(identity) == true)
+        status.AspdRate -= 30 * skill;
+    if ((skill = PCCheckSkill(identity, ROWOW_SKILL_GS_SINGLEACTION)) > 0 && status.WeaponType >= ROWOW_WEAPON_TYPE_REVOLVER &&
+        status.WeaponType <= ROWOW_WEAPON_TYPE_GRENADE)
+        status.AspdRate -= ((skill + 1) / 2) * 10;
+    if (PCIsRiding(player) == true)
+        status.AspdRate += 500 - 100 * PCCheckSkill(identity, ROWOW_SKILL_KN_CAVALIERMASTERY);
     status.AttackDelay = 2 * status.AttackMotion;
 
     // ----- DMOTION -----
@@ -595,7 +731,49 @@ void ROWOWMod::CalculateIdentityStatus(Player* player, ROWOWIdentity& identity) 
     if (BattleConfig.PCDamageDelayRate != 100)
         status.DamageMotion = status.DamageMotion * BattleConfig.PCDamageDelayRate / 100;
 
-    identity.Status = status;
+    // ----- MISC CALCULATIONS -----
+    // Skill SP cost
+    if ((skill = PCCheckSkill(identity, ROWOW_SKILL_HP_MANARECHARGE)) > 0)
+        bonus.UseSPRate -= 4 * skill;
+    if (sc != nullptr && sc->HasSCE(ROWOW_SC_SERVICE4U) == true)
+        bonus.UseSPRate -= sc->GetSCE(ROWOW_SC_SERVICE4U)->Val3;
+    bonus.UseSPRate = std::max(0, bonus.UseSPRate);
+    bonus.CastRate = std::max(0, bonus.CastRate);
+    bonus.HPRecovRate = std::max(0, bonus.HPRecovRate);
+    bonus.SPRecovRate = std::max(0, bonus.SPRecovRate);
+
+    // Anti-element and anti-race
+    if ((skill = PCCheckSkill(identity, ROWOW_SKILL_CR_TRUST)) > 0)
+        bonus.SubEle[ROWOW_ELEMENT_HOLY] += skill * 5;
+    if ((skill = PCCheckSkill(identity, ROWOW_SKILL_BS_SKINTEMPER)) > 0)
+    {
+        bonus.SubEle[ROWOW_ELEMENT_NEUTRAL] += skill;
+        bonus.SubEle[ROWOW_ELEMENT_FIRE] += skill * 5;
+    }
+    if ((skill = PCCheckSkill(identity, ROWOW_SKILL_SA_DRAGONOLOGY)) > 0)
+    {
+        bonus.RightWeapon.AddRace[ROWOW_RACE_DRAGON] += skill * 4;
+        bonus.LeftWeapon.AddRace[ROWOW_RACE_DRAGON] += skill * 4; // left_cardfix_to_right is off
+        bonus.SubRace[ROWOW_RACE_DRAGON] += skill * 4;
+        bonus.Deferred.push_back({ "bMagicAddRace", { ROWOW_RACE_DRAGON, skill * 2 } }); // magic_addrace, for magic (R6)
+    }
+    if (sc != nullptr)
+    {
+        if (ROWOWStatusChangeEntry const* sce = sc->GetSCE(ROWOW_SC_SIEGFRIED))
+        {
+            for (int32 element : { ROWOW_ELEMENT_WATER, ROWOW_ELEMENT_EARTH, ROWOW_ELEMENT_FIRE, ROWOW_ELEMENT_WIND, ROWOW_ELEMENT_POISON, ROWOW_ELEMENT_HOLY,
+                ROWOW_ELEMENT_DARK, ROWOW_ELEMENT_GHOST, ROWOW_ELEMENT_UNDEAD })
+                bonus.SubEle[element] += sce->Val2;
+        }
+        if (ROWOWStatusChangeEntry const* sce = sc->GetSCE(ROWOW_SC_PROVIDENCE))
+        {
+            bonus.SubEle[ROWOW_ELEMENT_HOLY] += sce->Val2;
+            bonus.SubRace[ROWOW_RACE_DEMON] += sce->Val2;
+        }
+    }
+
+    identity.BaseStatus = status;
+    StatusCalcBLMain(player, identity.BaseStatus, sc, identity.Status);
 }
 
 int32 ROWOWMod::StatusBaseAmotionPC(ROWOWIdentity const& identity, ROWOWStatus const& status) const
@@ -672,12 +850,12 @@ void ROWOWMod::StatusCalcMisc(ROWOWStatus& status, uint32 level) const
 
     // Only players regenerate here (BL_REGEN has no monsters)
     if (status.IsPlayer == true)
-        StatusCalcRegen(status);
+        StatusCalcRegen(nullptr, status);
 }
 
-uint32 ROWOWMod::StatusCalcMaxHPPC(ROWOWIdentity const& identity, ROWOWStatus const& status) const
+uint32 ROWOWMod::StatusCalcMaxHPPC(ROWOWIdentity const& identity, ROWOWStatus const& status, ROWOWStatusChange const* sc) const
 {
-    // status_calc_maxhp_pc.  (The max HP of passive skills and statuses come with them, R6)
+    // status_calc_maxhp_pc, with the bonuses of status_get_hpbonus (the gear's, Faith's and the statuses')
     int32 vit = status.Stats[ROWOW_STAT_VIT];
     ROWOWJob const* job = GetJob(identity.JobID);
     if (job == nullptr || job->BaseHPByLevel.empty() == true)
@@ -690,16 +868,20 @@ uint32 ROWOWMod::StatusCalcMaxHPPC(ROWOWIdentity const& identity, ROWOWStatus co
         dmax *= 1.25;
     // Vit from equip gives +1 additional HP
     dmax += status.Bonus.ParamEquip[ROWOW_STAT_VIT];
-    dmax += status.Bonus.HP;
-    dmax += dmax * (status.Bonus.HPRate - 100) / 100;
+    int32 skill = PCCheckSkill(identity, ROWOW_SKILL_CR_TRUST);
+    dmax += status.Bonus.HP + (skill > 0 ? skill * 200 : 0) + StatusGetHPBonus(sc, ROWOW_STATUS_BONUS_FIX);
+    double equipBonus = dmax * (status.Bonus.HPRate - 100) / 100;
+    dmax += equipBonus;
+    // Aegis accuracy
+    dmax += double(int64(dmax * StatusGetHPBonus(sc, ROWOW_STATUS_BONUS_RATE) / 100));
     if (dmax < 1.0)
         dmax = 1.0;
     return std::max<uint32>(1, uint32(dmax));
 }
 
-uint32 ROWOWMod::StatusCalcMaxSPPC(ROWOWIdentity const& identity, ROWOWStatus const& status) const
+uint32 ROWOWMod::StatusCalcMaxSPPC(ROWOWIdentity const& identity, ROWOWStatus const& status, ROWOWStatusChange const* sc) const
 {
-    // status_calc_maxsp_pc
+    // status_calc_maxsp_pc, with the bonuses of status_get_spbonus (the gear's, Kaina's and the statuses')
     int32 int_ = status.Stats[ROWOW_STAT_INT];
     ROWOWJob const* job = GetJob(identity.JobID);
     if (job == nullptr || job->BaseSPByLevel.empty() == true)
@@ -712,23 +894,62 @@ uint32 ROWOWMod::StatusCalcMaxSPPC(ROWOWIdentity const& identity, ROWOWStatus co
         dmax *= 1.25;
     // Int from equip gives +1 additional SP
     dmax += status.Bonus.ParamEquip[ROWOW_STAT_INT];
-    dmax += status.Bonus.SP;
-    dmax += dmax * (status.Bonus.SPRate - 100) / 100;
+    int32 skill = PCCheckSkill(identity, ROWOW_SKILL_SL_KAINA);
+    dmax += status.Bonus.SP + (skill > 0 ? 30 * skill : 0) + StatusGetSPBonus(sc, ROWOW_STATUS_BONUS_FIX);
+    double equipBonus = dmax * (status.Bonus.SPRate - 100) / 100;
+    double itemBonus = dmax * std::max(-100, StatusGetSPBonus(sc, ROWOW_STATUS_BONUS_ITEM)) / 100;
+    dmax += equipBonus + itemBonus;
+    // The rate of the passive skills and the statuses (Aegis accuracy)
+    int32 rate = PCCheckSkill(identity, ROWOW_SKILL_HP_MEDITATIO) + 2 * PCCheckSkill(identity, ROWOW_SKILL_HW_SOULDRAIN) + StatusGetSPBonus(sc, ROWOW_STATUS_BONUS_RATE);
+    dmax += double(int64(dmax * std::max(-100, rate) / 100));
     if (dmax < 1.0)
         dmax = 1.0;
     return std::max<uint32>(1, uint32(dmax));
 }
 
-void ROWOWMod::StatusCalcRegen(ROWOWStatus& status)
+void ROWOWMod::StatusCalcRegen(Unit const* unit, ROWOWStatus& status) const
 {
-    // status_calc_regen, for a player.  (The regen skills and the recovery rate bonuses come with the skills and gear)
+    // status_calc_regen, for a player: the natural regen with the recovery rate bonuses, then (with the unit) the regen skills: Meditatio's
+    // SP, Increase HP Recovery and Increase SP Recovery (and the Ninja's Ninpou) every 10 s standing still, Spiritual Cadence sitting, and
+    // Moving HP-Recovery's walking regen
     int32 value = (status.Stats[ROWOW_STAT_VIT] / 5) + std::max<int32>(1, int32(status.MaxHP / 200));
+    if (status.Bonus.HPRecovRate != 100)
+        value = value * status.Bonus.HPRecovRate / 100;
     status.RegenHP = std::clamp<int32>(value, 0, SHRT_MAX);
 
     value = 1 + (status.Stats[ROWOW_STAT_INT] / 6) + int32(status.MaxSP / 100);
     if (status.Stats[ROWOW_STAT_INT] >= 120)
         value += ((status.Stats[ROWOW_STAT_INT] - 120) / 2) + 4;
+    if (status.Bonus.SPRecovRate != 100)
+        value = value * status.Bonus.SPRecovRate / 100;
     status.RegenSP = std::clamp<int32>(value, 0, SHRT_MAX);
+    if (unit == nullptr)
+        return;
+
+    int32 skill = 0;
+    if ((skill = PCCheckSkill(unit, ROWOW_SKILL_HP_MEDITATIO)) > 0)
+        status.RegenSP = std::clamp<int32>(status.RegenSP * (100 + 3 * skill) / 100, 1, SHRT_MAX);
+    // Only players have skill/sitting skill regen for now.
+    value = 0;
+    if ((skill = PCCheckSkill(unit, ROWOW_SKILL_SM_RECOVERY)) > 0)
+        value += skill * 5 + skill * int32(status.MaxHP) / 500;
+    status.SkillRegenHP = std::clamp<int32>(value, 0, SHRT_MAX);
+    value = 0;
+    if ((skill = PCCheckSkill(unit, ROWOW_SKILL_MG_SRECOVERY)) > 0)
+        value += skill * 3 + skill * int32(status.MaxSP) / 500;
+    if ((skill = PCCheckSkill(unit, ROWOW_SKILL_NJ_NINPOU)) > 0)
+        value += skill * 3 + skill * int32(status.MaxSP) / 500;
+    status.SkillRegenSP = std::clamp<int32>(value, 0, SHRT_MAX);
+    // Skill-related recovery (only when sit)
+    value = 0;
+    if ((skill = PCCheckSkill(unit, ROWOW_SKILL_MO_SPIRITSRECOVERY)) > 0)
+        value += skill * 4 + skill * int32(status.MaxHP) / 500;
+    status.SitSkillRegenHP = std::clamp<int32>(value, 0, SHRT_MAX);
+    value = 0;
+    if ((skill = PCCheckSkill(unit, ROWOW_SKILL_MO_SPIRITSRECOVERY)) > 0)
+        value += skill * 2 + skill * int32(status.MaxSP) / 500;
+    status.SitSkillRegenSP = std::clamp<int32>(value, 0, SHRT_MAX);
+    status.IsRegenWalk = PCCheckSkill(unit, ROWOW_SKILL_SM_MOVINGRECOVERY) > 0;
 }
 
 int32 ROWOWMod::PCMaxParameter(ROWOWIdentity const& identity) const
@@ -1111,32 +1332,82 @@ void ROWOWMod::MobDeadExp(Creature* creature)
 
 void ROWOWMod::UpdateNaturalRegen(Player* player, uint32 diff)
 {
-    // status_natural_heal for a player with no regen skills or statuses yet: HP every natural_healhp_interval and SP every
-    // natural_healsp_interval, twice as often sitting.  Walking stops HP regen (and starts its interval over), not SP
+    // status_natural_heal for a player with no regen skills: HP every natural_healhp_interval and SP every natural_healsp_interval, twice as
+    // often sitting and as fast as the statuses' regen rates.  Walking stops HP regen (and starts its interval over), not SP.  Statuses stop
+    // either (status_calc_regen_rate's flag), and nothing regenerates while hidden or cloaked
     ROWOWIdentity* identity = player->CustomData.Get<ROWOWIdentity>("ROWOWIdentity");
     if (identity == nullptr || identity->IsInForm == false || player->IsAlive() == false)
         return;
+    ROWOWStatus const& status = identity->Status;
+    uint8 flag = status.RegenFlag;
+    // Only skill-based regen is disabled at max HP/SP
+    if ((flag & ROWOW_RGN_SHP) != 0 && player->GetHealth() >= player->GetMaxHealth())
+        flag &= ~ROWOW_RGN_SHP;
+    if ((flag & ROWOW_RGN_SSP) != 0 && player->GetPower(POWER_MANA) >= player->GetMaxPower(POWER_MANA))
+        flag &= ~ROWOW_RGN_SSP;
+    if (ROWOWStatusChange const* sc = GetStatusChange(static_cast<Unit const*>(player)); sc != nullptr &&
+        (sc->Option & (ROWOW_OPTION_HIDE | ROWOW_OPTION_CLOAK | ROWOW_OPTION_CHASEWALK)) != 0)
+        flag = 0;
     int32 multi = player->IsSitState() == true ? 2 : 1;
 
+    // Apply sitting regen bonus (ssregen), every natural_heal_skill_interval of rate-scaled time
+    auto skillRegen = [this, player](uint32& timer, uint32 diffTime, int32 rate, int32 hp, int32 sp)
+    {
+        timer += uint32(diffTime * (rate / 100.));
+        while (timer >= uint32(BattleConfig.NaturalHealSkillInterval))
+        {
+            timer -= uint32(BattleConfig.NaturalHealSkillInterval);
+            if (StatusHeal(player, hp, sp, 3, player, 0) < hp + sp)
+                break; // Full
+        }
+    };
+    if (player->IsSitState() == true && player->isMoving() == false)
+    {
+        if ((flag & ROWOW_RGN_SHP) != 0 && status.SitSkillRegenHP != 0)
+            skillRegen(identity->SitSkillRegenHPTimer, diff, 100, status.SitSkillRegenHP, 0);
+        if ((flag & ROWOW_RGN_SSP) != 0 && status.SitSkillRegenSP != 0)
+            skillRegen(identity->SitSkillRegenSPTimer, diff, 100, 0, status.SitSkillRegenSP);
+    }
+    // Walking stops the skill regen, and HP regen but with Moving HP-Recovery
     if (player->isMoving() == true)
+    {
+        flag &= ~(ROWOW_RGN_SHP | ROWOW_RGN_SSP);
+        if (status.IsRegenWalk == false)
+            flag &= ~ROWOW_RGN_HP;
+    }
+
+    if ((flag & ROWOW_RGN_HP) == 0)
         identity->RegenHPTimer = 0;
     else
     {
         identity->RegenHPTimer += diff;
-        if (identity->RegenHPTimer >= uint32(BattleConfig.NaturalHealHPInterval / multi))
+        // Half recovery while moving only applies to players with certain traits
+        uint32 interval = uint32(BattleConfig.NaturalHealHPInterval / (status.RegenRateHP / 100. * multi)) * (player->isMoving() == true ? 2 : 1);
+        if (identity->RegenHPTimer >= interval)
         {
             identity->RegenHPTimer = 0;
             if (player->GetHealth() < player->GetMaxHealth())
-                player->ModifyHealth(identity->Status.RegenHP);
+                player->ModifyHealth(status.RegenHP);
         }
     }
 
-    identity->RegenSPTimer += diff;
-    if (identity->RegenSPTimer >= uint32(BattleConfig.NaturalHealSPInterval / multi))
-    {
+    // Skill regen (sregen)
+    if ((flag & ROWOW_RGN_SHP) != 0 && status.SkillRegenHP != 0)
+        skillRegen(identity->SkillRegenHPTimer, diff, 100, status.SkillRegenHP, 0);
+    if ((flag & ROWOW_RGN_SSP) != 0 && status.SkillRegenSP != 0)
+        skillRegen(identity->SkillRegenSPTimer, diff, 100, 0, status.SkillRegenSP);
+
+    if ((flag & ROWOW_RGN_SP) == 0)
         identity->RegenSPTimer = 0;
-        if (player->GetPower(POWER_MANA) < player->GetMaxPower(POWER_MANA))
-            player->ModifyPower(POWER_MANA, identity->Status.RegenSP);
+    else
+    {
+        identity->RegenSPTimer += diff;
+        if (identity->RegenSPTimer >= uint32(BattleConfig.NaturalHealSPInterval / (status.RegenRateSP / 100. * multi)))
+        {
+            identity->RegenSPTimer = 0;
+            if (player->GetPower(POWER_MANA) < player->GetMaxPower(POWER_MANA))
+                player->ModifyPower(POWER_MANA, status.RegenSP);
+        }
     }
 
     // Kept in step, for the SP a respawn keeps (death empties the power)
@@ -1147,26 +1418,27 @@ void ROWOWMod::UpdateNaturalRegen(Player* player, uint32 diff)
 void ROWOWMod::SendROStatusToClient(Player* player)
 {
     // "ROWOWSTATUS\t<job>\t<base level>,<base exp>,<next base exp>,<job level>,<job exp>,<next job exp>,<status points>,<skill points>\t
-    // <STR>,..,<LUK>\t<job bonus STR>,..\t<raise cost STR>,..\t<the status window's right side>", the window's values as rAthena's
-    // pre-renewal pc_leftside_* / pc_rightside_* show them
+    // <STR>,..,<LUK>\t<bonus STR>,..\t<raise cost STR>,..\t<the status window's right side>", the window's values as rAthena's
+    // pre-renewal clif_couplestatus (the bonus is the battle status's stat over the base stat: job bonus, gear and statuses) and
+    // pc_leftside_* / pc_rightside_* show them
     ROWOWIdentity* identity = GetIdentity(player);
     if (identity->IsInForm == false)
         return;
     ROWOWJob const* job = GetJob(identity->JobID);
     ROWOWStatus const& status = identity->Status;
     std::string stats;
-    std::string jobBonusStats;
+    std::string bonusStats;
     std::string raiseCosts;
     for (uint8 statIndex = 0; statIndex < ROWOW_STAT_COUNT; statIndex++)
     {
         char const* separator = statIndex == 0 ? "" : ",";
         stats += fmt::format("{}{}", separator, identity->Stats[statIndex]);
-        jobBonusStats += fmt::format("{}{}", separator, status.JobBonusStats[statIndex]);
+        bonusStats += fmt::format("{}{}", separator, status.Stats[statIndex] - int32(identity->Stats[statIndex]));
         raiseCosts += fmt::format("{}{}", separator, PCNeedStatusPoint(*identity, statIndex, 1));
     }
     std::string addonMessage = fmt::format("ROWOWSTATUS\t{}\t{},{},{},{},{},{},{},{}\t{}\t{}\t{}\t{},{},{},{},{},{},{},{},{},{},{},{},{}",
         job != nullptr ? job->Name : "?", identity->BaseLevel, identity->BaseExp, PCNextBaseExp(*identity), identity->JobLevel, identity->JobExp, PCNextJobExp(*identity),
-        identity->StatusPoints, identity->SkillPoints, stats, jobBonusStats, raiseCosts,
+        identity->StatusPoints, identity->SkillPoints, stats, bonusStats, raiseCosts,
         status.BaseAttack + status.WeaponAttack + status.LeftWeaponAttack, status.WeaponRefineAttack + status.LeftWeaponRefineAttack, status.MagicAttackMin,
         status.MagicAttackMax, status.Def, status.Def2, status.MDef, status.MDef2 - (status.Stats[ROWOW_STAT_VIT] / 2), status.Hit, status.Flee, status.Flee2 / 10,
         status.Critical / 10, (2000 - status.AttackMotion) / 10);

@@ -51,7 +51,8 @@ namespace
         BONUS2_ADD_ELE, BONUS2_ADD_RACE, BONUS2_ADD_CLASS, BONUS2_ADD_SIZE, BONUS2_SUB_ELE, BONUS2_SUB_RACE, BONUS2_SUB_CLASS, BONUS2_SUB_SIZE,
         BONUS2_ADD_DAMAGE_CLASS, BONUS2_ADD_DEF_MONSTER, BONUS2_WEAPON_ATK, BONUS2_WEAPON_DAMAGE_RATE, BONUS2_CRITICAL_ADDRACE,
         BONUS2_IGNORE_DEF_RACE_RATE, BONUS2_IGNORE_DEF_CLASS_RATE, BONUS2_EXP_ADDRACE, BONUS2_EXP_ADDCLASS, BONUS_CRITICAL_RANGEATK,
-        BONUS_NOT_PRE_RENEWAL, BONUS_DEFERRED,
+        BONUS_ADD_EFF, BONUS_ADD_EFF2, BONUS_ADD_EFF_WHEN_HIT, BONUS_ADD_EFF_ON_SKILL, BONUS2_RES_EFF, BONUS_AUTO_SPELL, BONUS_AUTO_SPELL_WHEN_HIT,
+        BONUS_AUTO_SPELL_ON_SKILL, BONUS_NOT_PRE_RENEWAL, BONUS_DEFERRED,
     };
 
     std::unordered_map<std::string, ROWOWBonusType> const BonusTypesByName =
@@ -81,9 +82,10 @@ namespace
         { "bCriticalLong", BONUS_CRITICAL_RANGEATK }, { "bAtkRate", BONUS_NOT_PRE_RENEWAL },
 
         // Skills (R6): autospells and skill bonuses, casting, healing, SP and HP use
-        { "bAutoSpell", BONUS_DEFERRED }, { "bAutoSpellWhenHit", BONUS_DEFERRED }, { "bAutoSpellOnSkill", BONUS_DEFERRED }, { "bSkillAtk", BONUS_DEFERRED },
+        { "bAutoSpell", BONUS_AUTO_SPELL }, { "bAutoSpellWhenHit", BONUS_AUTO_SPELL_WHEN_HIT }, { "bAutoSpellOnSkill", BONUS_AUTO_SPELL_ON_SKILL }, { "bSkillAtk", BONUS_DEFERRED },
         { "bSkillHeal", BONUS_DEFERRED }, { "bSkillHeal2", BONUS_DEFERRED }, { "bSkillUseSP", BONUS_DEFERRED }, { "bSkillUseSPrate", BONUS_DEFERRED },
         { "bSkillCooldown", BONUS_DEFERRED }, { "bSkillFixCast", BONUS_DEFERRED }, { "bSkillVariableCast", BONUS_DEFERRED }, { "bDelayRate", BONUS_DEFERRED },
+        { "bSkillDelay", BONUS_DEFERRED }, { "bSubSkill", BONUS_DEFERRED }, { "bVariableCast", BONUS_DEFERRED }, { "bVariableCastrate", BONUS_DEFERRED },
         { "bHealPower", BONUS_DEFERRED }, { "bHealPower2", BONUS_DEFERRED }, { "bAddSkillBlow", BONUS_DEFERRED }, { "bNoCastCancel", BONUS_DEFERRED },
         { "bNoCastCancel2", BONUS_DEFERRED }, { "bNoGemStone", BONUS_DEFERRED }, { "bIntravision", BONUS_DEFERRED }, { "bNoKnockback", BONUS_DEFERRED },
         // Magic (R6)
@@ -94,9 +96,9 @@ namespace
         { "bMagicHPGainValue", BONUS_DEFERRED }, { "bMagicSPGainValue", BONUS_DEFERRED },
         // Monster race groups (race2, R10)
         { "bAddRace2", BONUS_DEFERRED }, { "bSubRace2", BONUS_DEFERRED },
-        // Statuses (R6): their chances on hit and when hit, resistances, and the like
-        { "bAddEff", BONUS_DEFERRED }, { "bAddEff2", BONUS_DEFERRED }, { "bAddEffWhenHit", BONUS_DEFERRED }, { "bAddEffOnSkill", BONUS_DEFERRED },
-        { "bResEff", BONUS_DEFERRED }, { "bComaRace", BONUS_DEFERRED }, { "bComaClass", BONUS_DEFERRED }, { "bWeaponComaRace", BONUS_DEFERRED },
+        // Statuses: their chances on hit and when hit, resistances, and (R6.5) the like
+        { "bAddEff", BONUS_ADD_EFF }, { "bAddEff2", BONUS_ADD_EFF2 }, { "bAddEffWhenHit", BONUS_ADD_EFF_WHEN_HIT }, { "bAddEffOnSkill", BONUS_ADD_EFF_ON_SKILL },
+        { "bResEff", BONUS2_RES_EFF }, { "bComaRace", BONUS_DEFERRED }, { "bComaClass", BONUS_DEFERRED }, { "bWeaponComaRace", BONUS_DEFERRED },
         { "bWeaponComaEle", BONUS_DEFERRED }, { "bWeaponComaClass", BONUS_DEFERRED }, { "bBreakWeaponRate", BONUS_DEFERRED },
         { "bBreakArmorRate", BONUS_DEFERRED }, { "bUnbreakableWeapon", BONUS_DEFERRED }, { "bUnbreakableArmor", BONUS_DEFERRED },
         { "bUnbreakableHelm", BONUS_DEFERRED }, { "bUnbreakableShield", BONUS_DEFERRED }, { "bUnbreakableGarment", BONUS_DEFERRED },
@@ -183,6 +185,50 @@ namespace
         auto firstJobIter = firstJobsBySecondJob.find(baseJobID);
         return firstJobIter != firstJobsBySecondJob.end() ? firstJobIter->second : baseJobID;
     }
+
+    // pc_bonus_autospell: an autospell, its battle flags filled in (both ranges, weapon, normal attacks or the skills for magic and misc);
+    // the same autospell of the same card adds its rate only with autospell_stacking
+    void AddAutoSpell(std::vector<ROWOWAutoSpell>& spells, uint16 id, uint16 lv, int16 rate, int16 battleFlag, uint32 cardID, uint8 flag)
+    {
+        if (rate == 0)
+            return;
+        if ((battleFlag & (ROWOW_BF_SHORT | ROWOW_BF_LONG)) == 0)
+            battleFlag |= ROWOW_BF_SHORT | ROWOW_BF_LONG; // No range defined? Use both.
+        if ((battleFlag & (ROWOW_BF_WEAPON | ROWOW_BF_MAGIC | ROWOW_BF_MISC)) == 0)
+            battleFlag |= ROWOW_BF_WEAPON; // No attack type defined? Use weapon.
+        if ((battleFlag & (ROWOW_BF_SKILL | ROWOW_BF_NORMAL)) == 0)
+        {
+            if ((battleFlag & (ROWOW_BF_MAGIC | ROWOW_BF_MISC)) != 0)
+                battleFlag |= ROWOW_BF_SKILL; // These two would never trigger without BF_SKILL
+            if ((battleFlag & ROWOW_BF_WEAPON) != 0)
+                battleFlag |= ROWOW_BF_NORMAL; // By default autospells should only trigger on normal weapon attacks.
+        }
+        for (ROWOWAutoSpell& spell : spells)
+        {
+            if ((spell.CardID == cardID || spell.Rate < 0 || rate < 0) && spell.SkillID == id && spell.Level == lv && spell.BattleFlag == battleFlag && spell.Flag == flag)
+            {
+                if (ROWOW->BattleConfig.AutospellStacking == 0 && spell.Rate > 0 && rate > 0) // Stacking disabled
+                    return;
+                spell.Rate = int16(std::min<int32>(spell.Rate + rate, 1000));
+                return;
+            }
+        }
+        ROWOWAutoSpell entry;
+        entry.SkillID = id;
+        entry.Level = lv;
+        entry.Rate = int16(std::clamp<int32>(rate, -1000, 1000));
+        entry.BattleFlag = battleFlag;
+        entry.CardID = cardID;
+        entry.Flag = flag;
+        spells.push_back(entry);
+    }
+
+    // A bonus's text argument: the skills' bonuses (bSkillAtk, bSkillHeal, the skill command...) name a skill, as rAthena's skill_name2id
+    // reads it; any other text is 0
+    int64 GetSkillValue(std::string const& text)
+    {
+        return int64(ROWOW->GetSkillIDByName(text));
+    }
 }
 
 void ROWOWMod::LoadBonusData()
@@ -191,6 +237,7 @@ void ROWOWMod::LoadBonusData()
     ItemCombos.clear();
     ItemComboIndexesByItemID.clear();
     UnknownBonusItemIDs.clear();
+    AutoBonusScriptTexts.clear();
     for (auto& refineBonuses : RefineBonuses)
         for (ROWOWRefineBonus& refineBonus : refineBonuses)
             refineBonus = ROWOWRefineBonus();
@@ -245,7 +292,7 @@ void ROWOWMod::LoadBonusData()
             return false;
         typeOut = arguments[0].IsString == true ? arguments[0].Text : ROWOWSCRIPT->GetSymbolName(arguments[0].Number);
         for (size_t argumentIndex = 1; argumentIndex < arguments.size(); argumentIndex++)
-            valuesOut.push_back(arguments[argumentIndex].IsString == true ? 0 : arguments[argumentIndex].Number);
+            valuesOut.push_back(arguments[argumentIndex].IsString == true ? GetSkillValue(arguments[argumentIndex].Text) : arguments[argumentIndex].Number);
         return typeOut.empty() == false;
     };
     auto checkBonusType = [this](std::vector<ROWOWScriptValue> const& arguments)
@@ -270,9 +317,67 @@ void ROWOWMod::LoadBonusData()
             return ROWOWScriptValue::FromNumber(0);
         }, checkBonusType);
     }
-    for (char const* deferredCommandName : { "autobonus", "autobonus2", "autobonus3", "skill" })
+    for (char const* autoBonusCommandName : { "autobonus", "autobonus2", "autobonus3" })
     {
-        // Autobonuses and the skills cards grant come with the skills (R6), which read them from the deferred bonuses
+        // BUILDIN_FUNC(autobonus), autobonus2 and autobonus3: pc_addautobonus on the worn item's positions.  Their scripts are compiled once
+        // at startup (script_add_autobonus), so the compile check keeps the texts the items name
+        std::string commandName = autoBonusCommandName;
+        ROWOWSCRIPT->RegisterCommand(autoBonusCommandName, [commandName](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+        {
+            if (context.BonusStatus == nullptr || arguments.size() < 3 || arguments[0].IsString == false)
+                return ROWOWScriptValue::FromNumber(0);
+            uint32 pos = context.EquipPositions;
+            int16 rate = int16(arguments[1].GetNumber());
+            uint32 dur = uint32(std::max<int64>(0, arguments[2].GetNumber()));
+            std::string const& bonusScript = arguments[0].Text;
+            if (rate == 0 || dur == 0 || pos == 0 || bonusScript.empty() == true)
+                return ROWOWScriptValue::FromNumber(0);
+            bool isOnSkill = commandName == "autobonus3";
+            uint16 flag = 0;
+            if (arguments.size() >= 4)
+                flag = uint16(arguments[3].IsString == true ? GetSkillValue(arguments[3].Text) : arguments[3].GetNumber());
+            std::string otherScript = (arguments.size() >= 5 && arguments[4].IsString == true) ? arguments[4].Text : "";
+            std::vector<ROWOWAutoBonus>& autoBonuses = commandName == "autobonus" ? context.BonusStatus->Bonus.AutoBonus :
+                (commandName == "autobonus2" ? context.BonusStatus->Bonus.AutoBonus2 : context.BonusStatus->Bonus.AutoBonus3);
+            // pc_addautobonus: one bonus per position and script
+            for (ROWOWAutoBonus const& autoBonus : autoBonuses)
+                if (autoBonus.Pos == pos && autoBonus.BonusScript == bonusScript)
+                    return ROWOWScriptValue::FromNumber(0);
+            if (isOnSkill == false)
+            {
+                if ((flag & (ROWOW_BF_SHORT | ROWOW_BF_LONG)) == 0)
+                    flag |= ROWOW_BF_SHORT | ROWOW_BF_LONG; // No range defined? Use both.
+                if ((flag & (ROWOW_BF_WEAPON | ROWOW_BF_MAGIC | ROWOW_BF_MISC)) == 0)
+                    flag |= ROWOW_BF_WEAPON; // No attack type defined? Use weapon.
+                if ((flag & (ROWOW_BF_SKILL | ROWOW_BF_NORMAL)) == 0)
+                {
+                    if ((flag & (ROWOW_BF_MAGIC | ROWOW_BF_MISC)) != 0)
+                        flag |= ROWOW_BF_SKILL; // These two would never trigger without BF_SKILL
+                    if ((flag & ROWOW_BF_WEAPON) != 0)
+                        flag |= ROWOW_BF_NORMAL | ROWOW_BF_SKILL;
+                }
+            }
+            ROWOWAutoBonus autoBonus;
+            autoBonus.BonusScript = bonusScript;
+            autoBonus.Rate = int16(std::clamp<int32>(rate, -10000, 10000));
+            autoBonus.Duration = dur;
+            autoBonus.AtkType = flag;
+            autoBonus.OtherScript = otherScript;
+            autoBonus.Pos = pos;
+            autoBonuses.push_back(autoBonus);
+            return ROWOWScriptValue::FromNumber(0);
+        }, [this](std::vector<ROWOWScriptValue> const& arguments)
+        {
+            if (arguments.empty() == false && arguments[0].IsString == true)
+                AutoBonusScriptTexts.insert(arguments[0].Text);
+            if (arguments.size() >= 5 && arguments[4].IsString == true)
+                AutoBonusScriptTexts.insert(arguments[4].Text);
+            return true;
+        });
+    }
+    for (char const* deferredCommandName : { "skill" })
+    {
+        // The skills cards grant come with the skills, which read them from the deferred bonuses
         std::string commandName = deferredCommandName;
         ROWOWSCRIPT->RegisterCommand(deferredCommandName, [commandName](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
         {
@@ -282,7 +387,7 @@ void ROWOWMod::LoadBonusData()
             deferredBonus.Type = commandName;
             deferredBonus.LRFlag = context.BonusLRFlag;
             for (ROWOWScriptValue const& argument : arguments)
-                deferredBonus.Values.push_back(argument.IsString == true ? 0 : argument.Number);
+                deferredBonus.Values.push_back(argument.IsString == true ? GetSkillValue(argument.Text) : argument.Number);
             context.BonusStatus->Bonus.Deferred.push_back(deferredBonus);
             return ROWOWScriptValue::FromNumber(0);
         });
@@ -466,6 +571,15 @@ void ROWOWMod::LoadBonusData()
     std::string unavailableCommandsText;
     for (auto const& unavailableCommandCount : unavailableCommandCounts)
         unavailableCommandsText += fmt::format("{}{} ({})", unavailableCommandsText.empty() == true ? "" : ", ", unavailableCommandCount.first, unavailableCommandCount.second);
+    // The autobonus scripts the items name (script_add_autobonus, which rAthena does as an autobonus is first added)
+    AutoBonusScriptsByText.clear();
+    for (std::string const& text : AutoBonusScriptTexts)
+    {
+        std::shared_ptr<ROWOWScript> script = ROWOWSCRIPT->Compile(text, "autobonus");
+        if (script->Error.empty() == false)
+            LOG_ERROR("module.ROWOW", "ROWOWMod::LoadBonusData: the autobonus script '{}' didn't compile: {}", text, script->Error);
+        AutoBonusScriptsByText[text] = script;
+    }
     LOG_INFO("module.ROWOW", "ROWOWMod::LoadBonusData loaded {} equipment, card and ammo scripts, {} item combos and {} card enchantments", bonusScriptCount,
         ItemCombos.size(), CardItemIDsByEnchantmentID.size());
     if (unknownBonusesText.empty() == false)
@@ -496,8 +610,136 @@ void ROWOWMod::PCBonus(ROWOWScriptContext& context, std::string const& type, std
     ROWOWWeaponBonus& weaponBonus = lrFlag == ROWOW_LR_FLAG_WEAPON ? bonus.LeftWeapon : bonus.RightWeapon;
     auto capValue = [](int64 value, int64 minimum, int64 maximum) { return int32(std::clamp(value, minimum, maximum)); };
     auto addParam = [&](uint8 statIndex) { if (isArrow == false) bonus.ParamBonus[statIndex] += int32(val); };
+    // pc_bonus_addeff and pc_bonus_addeff_onskill (PC_BONUS_CHK_SC: a status the status database has).  Without a duration, the duration is
+    // the status's skill's level 7 Duration2
+    auto isStatus = [this](int64 type) { return GetStatusChangeDB(int32(type)) != nullptr; };
+    auto addEffect = [this](std::vector<ROWOWAddEffect>& effects, int32 type, int32 rate, int32 arrowRate, uint8 flag, uint32 duration)
+    {
+        if ((flag & (ROWOW_ATF_SHORT | ROWOW_ATF_LONG)) == 0)
+            flag |= ROWOW_ATF_SHORT | ROWOW_ATF_LONG; // Default range: both
+        if ((flag & (ROWOW_ATF_TARGET | ROWOW_ATF_SELF)) == 0)
+            flag |= ROWOW_ATF_TARGET; // Default target: enemy.
+        if ((flag & (ROWOW_ATF_WEAPON | ROWOW_ATF_MAGIC | ROWOW_ATF_MISC)) == 0)
+            flag |= ROWOW_ATF_WEAPON; // Default type: weapon.
+        if (duration == 0)
+            duration = uint32(std::max<int64>(0, SkillGetTime2(StatusDBGetSkill(type), 7)));
+        for (ROWOWAddEffect& effect : effects)
+        {
+            if (effect.Type == type && effect.Flag == flag)
+            {
+                effect.Rate = int32(std::min<int64>(int64(effect.Rate) + rate, INT_MAX));
+                effect.ArrowRate = int32(std::min<int64>(int64(effect.ArrowRate) + arrowRate, SHRT_MAX));
+                effect.Duration = std::max(effect.Duration, duration);
+                return;
+            }
+        }
+        effects.push_back({ type, rate, arrowRate, flag, duration });
+    };
+    auto addEffectOnSkill = [this](int32 type, int32 rate, uint16 skillID, uint8 target, uint32 duration, ROWOWBonus& onSkillBonus)
+    {
+        if (duration == 0)
+            duration = uint32(std::max<int64>(0, SkillGetTime2(StatusDBGetSkill(type), 7)));
+        for (ROWOWAddEffectOnSkill& effect : onSkillBonus.AddEffOnSkill)
+        {
+            if (effect.Type == type && effect.SkillID == skillID && effect.Target == target)
+            {
+                effect.Rate = int32(std::min<int64>(int64(effect.Rate) + rate, INT_MAX));
+                effect.Duration = std::max(effect.Duration, duration);
+                return;
+            }
+        }
+        onSkillBonus.AddEffOnSkill.push_back({ type, rate, skillID, target, duration });
+    };
     switch (typeIter->second)
     {
+        case BONUS_ADD_EFF:
+            // bonus2 bAddEff,eff,n; bonus3 bAddEff,eff,n,y; bonus4 bAddEff,eff,n,y,t
+            if (values.size() >= 2 && isStatus(values[0]) == true)
+            {
+                int32 rate = int32(values[1]);
+                uint8 flag = values.size() >= 3 ? uint8(values[2]) : 0;
+                uint32 duration = values.size() >= 4 ? uint32(std::max<int64>(0, values[3])) : 0;
+                addEffect(bonus.AddEff, int32(values[0]), isArrow == false ? rate : 0, isArrow == true ? rate : 0, flag, duration);
+            }
+            break;
+        case BONUS_ADD_EFF2:
+            // bonus2 bAddEff2,eff,n
+            if (values.size() >= 2 && isStatus(values[0]) == true)
+                addEffect(bonus.AddEff, int32(values[0]), isArrow == false ? int32(values[1]) : 0, isArrow == true ? int32(values[1]) : 0, ROWOW_ATF_SELF, 0);
+            break;
+        case BONUS_ADD_EFF_WHEN_HIT:
+            // bonus2 bAddEffWhenHit,eff,n; bonus3 bAddEffWhenHit,eff,n,y; bonus4 bAddEffWhenHit,eff,n,y,t
+            if (values.size() >= 2 && isStatus(values[0]) == true && isArrow == false)
+                addEffect(bonus.AddEffAtked, int32(values[0]), int32(values[1]), 0, values.size() >= 3 ? uint8(values[2]) : 0,
+                    values.size() >= 4 ? uint32(std::max<int64>(0, values[3])) : 0);
+            break;
+        case BONUS_ADD_EFF_ON_SKILL:
+            // bonus3 bAddEffOnSkill,sk,eff,n; bonus4 bAddEffOnSkill,sk,eff,n,y; bonus5 bAddEffOnSkill,sk,eff,n,y,t
+            if (values.size() >= 3 && isStatus(values[1]) == true && isArrow == false)
+                addEffectOnSkill(int32(values[1]), int32(values[2]), uint16(values[0]), values.size() >= 4 ? uint8(values[3]) : uint8(ROWOW_ATF_TARGET),
+                    values.size() >= 5 ? uint32(std::max<int64>(0, values[4])) : 0, bonus);
+            break;
+        case BONUS2_RES_EFF:
+            // bonus2 bResEff,eff,n (pc_bonus_itembonus: they add up)
+            if (values.size() >= 2 && isArrow == false)
+                bonus.ResEff[int32(values[0])] += int32(values[1]);
+            break;
+        case BONUS_AUTO_SPELL:
+        case BONUS_AUTO_SPELL_WHEN_HIT:
+        {
+            // bonus3 bAutoSpell,sk,y,n; bonus4 bAutoSpell,sk,y,n,i; bonus5 bAutoSpell,sk,y,n,bf,i (and the same of bAutoSpellWhenHit, triggered by
+            // normal attacks and skills).  Without i, a support or self skill (that isn't a combo) goes on the caster, others on the target
+            if (values.size() < 3 || isArrow == true)
+                break;
+            uint16 skillID = uint16(values[0]);
+            uint8 flag = 0;
+            int16 battleFlag = typeIter->second == BONUS_AUTO_SPELL_WHEN_HIT ? int16(ROWOW_BF_NORMAL | ROWOW_BF_SKILL) : 0;
+            if (values.size() == 3)
+            {
+                ROWOWSkill const* autoSkill = GetSkill(skillID);
+                bool isSelf = autoSkill != nullptr && ((autoSkill->Inf & ROWOW_INF_SUPPORT_SKILL) != 0 ||
+                    ((autoSkill->Inf & ROWOW_INF_SELF_SKILL) != 0 && autoSkill->Inf2[ROWOW_INF2_NOTARGETSELF] == false)); // Support or Self (non-auto-target) skills should pick self.
+                flag = isSelf == true ? ROWOW_AUTOSPELL_FORCE_SELF : ROWOW_AUTOSPELL_FORCE_TARGET;
+            }
+            else
+            {
+                flag = uint8(values.back() & ROWOW_AUTOSPELL_FORCE_ALL);
+                if (values.size() >= 5)
+                    battleFlag = int16(values[3]);
+            }
+            AddAutoSpell(typeIter->second == BONUS_AUTO_SPELL ? bonus.AutoSpell : bonus.AutoSpell2, skillID, uint16(values[1]), int16(values[2]), battleFlag,
+                context.EquipCardID, flag);
+            break;
+        }
+        case BONUS_AUTO_SPELL_ON_SKILL:
+        {
+            // bonus4 bAutoSpellOnSkill,sk,x,y,n; bonus5 bAutoSpellOnSkill,sk,x,y,n,i: when using sk, skill x at level y (n in 1000).  Without i, a
+            // support or self skill goes on the target of sk, others on the caster
+            if (values.size() < 4 || isArrow == true)
+                break;
+            uint8 flag = 0;
+            if (values.size() == 4)
+            {
+                ROWOWSkill const* autoSkill = GetSkill(uint16(values[1]));
+                bool isSupport = autoSkill != nullptr && ((autoSkill->Inf & ROWOW_INF_SUPPORT_SKILL) != 0 ||
+                    ((autoSkill->Inf & ROWOW_INF_SELF_SKILL) != 0 && autoSkill->Inf2[ROWOW_INF2_NOTARGETSELF] == false));
+                flag = isSupport == true ? ROWOW_AUTOSPELL_FORCE_TARGET : ROWOW_AUTOSPELL_FORCE_SELF;
+            }
+            else
+                flag = uint8(values[4] & ROWOW_AUTOSPELL_FORCE_ALL);
+            // pc_bonus_autospell_onskill
+            if (values[3] == 0)
+                break;
+            ROWOWAutoSpell autoSpell;
+            autoSpell.TriggerSkillID = uint16(values[0]);
+            autoSpell.SkillID = uint16(values[1]);
+            autoSpell.Level = uint16(values[2]);
+            autoSpell.Rate = int16(std::clamp<int64>(values[3], -1000, 1000));
+            autoSpell.CardID = context.EquipCardID;
+            autoSpell.Flag = flag;
+            bonus.AutoSpell3.push_back(autoSpell);
+            break;
+        }
         case BONUS_STR: addParam(ROWOW_STAT_STR); break;
         case BONUS_AGI: addParam(ROWOW_STAT_AGI); break;
         case BONUS_VIT: addParam(ROWOW_STAT_VIT); break;
@@ -625,7 +867,7 @@ void ROWOWMod::PCBonus(ROWOWScriptContext& context, std::string const& type, std
         case BONUS_CASTRATE:
             if (values.size() >= 2)
             {
-                // bonus2 bCastrate,<skill>,<rate> is a skill's own (R6)
+                // bonus2 bCastrate,<skill>,<rate> is a skill's own, which skill_castfix reads
                 ROWOWDeferredBonus deferredBonus;
                 deferredBonus.Type = type;
                 deferredBonus.Values = values;
@@ -712,12 +954,14 @@ void ROWOWMod::StatusCalcPCItems(Player* player, ROWOWIdentity const& identity, 
     context.AttachedPlayer = player;
     context.Identity = const_cast<ROWOWIdentity*>(&identity);
     context.BonusStatus = &status;
-    auto runScript = [&](ROWOWScript const* script, Item const* item, uint8 lrFlag)
+    auto runScript = [&](ROWOWScript const* script, Item const* item, uint8 lrFlag, uint32 equipPositions, uint32 cardID)
     {
         if (script == nullptr || script->Error.empty() == false)
             return;
         context.EquipItem = item;
         context.BonusLRFlag = lrFlag;
+        context.EquipPositions = equipPositions;
+        context.EquipCardID = cardID;
         context.Stack.clear();
         context.InstructionIndex = 0;
         context.InstructionCount = 0;
@@ -806,7 +1050,7 @@ void ROWOWMod::StatusCalcPCItems(Player* player, ROWOWIdentity const& identity, 
         uint8 lrFlag = ROWOW_LR_FLAG_NONE;
         if (wornItem.Positions == ROWOW_EQUIP_POSITION_HAND_L)
             lrFlag = wornItem.RO->IsWeapon == true ? ROWOW_LR_FLAG_WEAPON : ROWOW_LR_FLAG_SHIELD;
-        runScript(wornItem.RO->BonusScript.get(), wornItem.ItemObject, lrFlag);
+        runScript(wornItem.RO->BonusScript.get(), wornItem.ItemObject, lrFlag, wornItem.Positions, 0);
     }
 
     // The ammo: its ATK, and its script as the ammo's
@@ -814,7 +1058,7 @@ void ROWOWMod::StatusCalcPCItems(Player* player, ROWOWIdentity const& identity, 
     {
         status.ArrowAttack += roAmmo->Attack;
         status.AmmoType = roAmmo->AmmoType;
-        runScript(roAmmo->BonusScript.get(), ammoItem, ROWOW_LR_FLAG_ARROW);
+        runScript(roAmmo->BonusScript.get(), ammoItem, ROWOW_LR_FLAG_ARROW, ROWOW_EQUIP_POSITION_AMMO, 0);
     }
 
     // Item combos: every combo whose items are all worn
@@ -833,8 +1077,14 @@ void ROWOWMod::StatusCalcPCItems(Player* player, ROWOWIdentity const& identity, 
             if (ranComboIndexes.insert(comboIndex).second == false)
                 continue;
             bool isComplete = std::all_of(combo.ItemIDs.begin(), combo.ItemIDs.end(), [&wornItemIDs](uint32 itemID) { return wornItemIDs.count(itemID) != 0; });
-            if (isComplete == true)
-                runScript(combo.Script.get(), nullptr, ROWOW_LR_FLAG_NONE);
+            if (isComplete == false)
+                continue;
+            // current_equip_combo_pos: where the combo's items are worn
+            uint32 comboPositions = 0;
+            for (WornItem const& wornItem : wornItems)
+                if (std::find(combo.ItemIDs.begin(), combo.ItemIDs.end(), wornItem.RO->ItemID) != combo.ItemIDs.end())
+                    comboPositions |= wornItem.Positions;
+            runScript(combo.Script.get(), nullptr, ROWOW_LR_FLAG_NONE, comboPositions, 0);
         }
     }
 
@@ -856,8 +1106,27 @@ void ROWOWMod::StatusCalcPCItems(Player* player, ROWOWIdentity const& identity, 
             if (cardIter == ItemsByItemTemplateID.end())
                 continue;
             uint8 lrFlag = (wornItem.Positions == ROWOW_EQUIP_POSITION_HAND_L && wornItem.RO->IsWeapon == true) ? ROWOW_LR_FLAG_WEAPON : ROWOW_LR_FLAG_NONE;
-            runScript(cardIter->second.BonusScript.get(), wornItem.ItemObject, lrFlag);
+            runScript(cardIter->second.BonusScript.get(), wornItem.ItemObject, lrFlag, wornItem.Positions, cardItemID);
         }
+    }
+
+    // The autobonuses going (pc_delautobonus's restore)
+    StatusCalcPCAutoBonuses(player, identity, status);
+
+    // The statuses' scripts (status.yml's Script, like the foods' bonus bStr, getstatus(SC_STRFOOD, 1)), and the usable item an
+    // SC_ITEMSCRIPT runs the script of
+    if (ROWOWStatusChange const* sc = GetStatusChange(static_cast<Unit const*>(player)))
+    {
+        if (ROWOWStatusChangeEntry const* sce = sc->GetSCE(ROWOW_SC_ITEMSCRIPT))
+        {
+            auto itemTemplateIDIter = ItemTemplateIDsByItemID.find(uint32(sce->Val1));
+            auto itemIter = itemTemplateIDIter != ItemTemplateIDsByItemID.end() ? ItemsByItemTemplateID.find(itemTemplateIDIter->second) : ItemsByItemTemplateID.end();
+            if (itemIter != ItemsByItemTemplateID.end())
+                runScript(itemIter->second.UseScript.get(), nullptr, ROWOW_LR_FLAG_NONE, 0, 0);
+        }
+        for (auto const& entryByType : sc->EntriesByType)
+            if (ROWOWStatusChangeDB const* scdb = GetStatusChangeDB(entryByType.first))
+                runScript(scdb->Script.get(), nullptr, ROWOW_LR_FLAG_NONE, 0, 0);
     }
 }
 
@@ -1008,9 +1277,12 @@ void ROWOWMod::RunItemScript(Player* player, ROWOWScript const* script, Item con
     ROWOWSCRIPT->Run(*script, context, true);
 }
 
-int64 ROWOWMod::BattleCalcCardFix(Unit* src, Unit* target, int32 rhEle, int32 lhEle, int64 damage, int32 left, int32 flag) const
+int64 ROWOWMod::BattleCalcCardFix(int32 attackType, Unit* src, Unit* target, std::bitset<ROWOW_NK_MAX> nk, uint16 skillID, int32 rhEle, int32 lhEle, int64 damage,
+    int32 left, int32 flag) const
 {
-    // battle_calc_cardfix, BF_WEAPON: left&2 is the attacker's cards (left&1 the left hand), otherwise the target's.  Returns the change
+    // battle_calc_cardfix: for a weapon attack, left&2 is the attacker's cards (left&1 the left hand), otherwise the target's; a magic or misc
+    // attack takes both.  Returns the change.  (The race2 groups, the element bonuses by attack kind (subele2) and the debuff statuses
+    // aren't in yet)
     if (damage == 0)
         return 0;
     ROWOWStatus const* sstatus = GetROStatus(src);
@@ -1021,96 +1293,173 @@ int64 ROWOWMod::BattleCalcCardFix(Unit* src, Unit* target, int32 rhEle, int32 lh
     int32 cardfix = 1000;
     // Official servers apply the cardfix value on a base of 1000 and round down the reduction/increase
     auto applyCardFix = [&damage](int32 fix) { damage = damage - (damage * (1000 - std::max(0, fix))) / 1000; };
+    uint32 sourceMobID = src->IsCreature() == true ? GetROMobID(src->ToCreature()) : 0;
+    uint32 targetMobID = target->IsCreature() == true ? GetROMobID(target->ToCreature()) : 0;
 
-    if (sstatus->IsPlayer == true && (left & 2) != 0)
+    switch (attackType)
     {
-        // Affected by attacker ATK bonuses
-        ROWOWBonus const& bonus = sstatus->Bonus;
-        int32 cardfixLeft = 1000;
-        if (sstatus->IsArrowAttack == true)
+        case ROWOW_BF_MAGIC:
         {
-            // Ranged attack
-            cardfix = cardfix * (100 + bonus.RightWeapon.AddRace[tstatus->Race] + bonus.ArrowAddRace[tstatus->Race] + bonus.RightWeapon.AddRace[ROWOW_RACE_ALL]
-                + bonus.ArrowAddRace[ROWOW_RACE_ALL]) / 100;
-            int32 eleFix = bonus.RightWeapon.AddEle[tstatus->DefElement] + bonus.ArrowAddEle[tstatus->DefElement] + bonus.RightWeapon.AddEle[ROWOW_ELEMENT_ALL]
-                + bonus.ArrowAddEle[ROWOW_ELEMENT_ALL];
-            cardfix = cardfix * (100 + eleFix) / 100;
-            cardfix = cardfix * (100 + bonus.RightWeapon.AddSize[tstatus->Size] + bonus.ArrowAddSize[tstatus->Size] + bonus.RightWeapon.AddSize[ROWOW_SIZE_ALL]
-                + bonus.ArrowAddSize[ROWOW_SIZE_ALL]) / 100;
-            cardfix = cardfix * (100 + bonus.RightWeapon.AddClass[tstatus->Class] + bonus.ArrowAddClass[tstatus->Class] + bonus.RightWeapon.AddClass[ROWOW_CLASS_ALL]
-                + bonus.ArrowAddClass[ROWOW_CLASS_ALL]) / 100;
-        }
-        else
-        {
-            // Melee attack: each hand's bonuses on their own (left_cardfix_to_right is off)
-            cardfix = cardfix * (100 + bonus.RightWeapon.AddRace[tstatus->Race] + bonus.RightWeapon.AddRace[ROWOW_RACE_ALL]) / 100;
-            cardfix = cardfix * (100 + bonus.RightWeapon.AddEle[tstatus->DefElement] + bonus.RightWeapon.AddEle[ROWOW_ELEMENT_ALL]) / 100;
-            cardfix = cardfix * (100 + bonus.RightWeapon.AddSize[tstatus->Size] + bonus.RightWeapon.AddSize[ROWOW_SIZE_ALL]) / 100;
-            cardfix = cardfix * (100 + bonus.RightWeapon.AddClass[tstatus->Class] + bonus.RightWeapon.AddClass[ROWOW_CLASS_ALL]) / 100;
-            if ((left & 1) != 0)
+            // Affected by attacker ATK bonuses
+            if (sstatus->IsPlayer == true && nk[ROWOW_NK_IGNOREATKCARD] == false)
             {
-                // Left-handed weapon
-                cardfixLeft = cardfixLeft * (100 + bonus.LeftWeapon.AddRace[tstatus->Race] + bonus.LeftWeapon.AddRace[ROWOW_RACE_ALL]) / 100;
-                cardfixLeft = cardfixLeft * (100 + bonus.LeftWeapon.AddEle[tstatus->DefElement] + bonus.LeftWeapon.AddEle[ROWOW_ELEMENT_ALL]) / 100;
-                cardfixLeft = cardfixLeft * (100 + bonus.LeftWeapon.AddSize[tstatus->Size] + bonus.LeftWeapon.AddSize[ROWOW_SIZE_ALL]) / 100;
-                cardfixLeft = cardfixLeft * (100 + bonus.LeftWeapon.AddClass[tstatus->Class] + bonus.LeftWeapon.AddClass[ROWOW_CLASS_ALL]) / 100;
-            }
-            // (Advanced Katar Mastery, R6)
-        }
-        uint32 targetMobID = target->IsCreature() == true ? GetROMobID(target->ToCreature()) : 0;
-        for (auto const& addDamage : bonus.RightWeapon.AddDamageClass)
-        {
-            if (addDamage.first == targetMobID)
-            {
-                cardfix = cardfix * (100 + addDamage.second) / 100;
-                break;
-            }
-        }
-        if ((left & 1) != 0)
-        {
-            for (auto const& addDamage : bonus.LeftWeapon.AddDamageClass)
-            {
-                if (addDamage.first == targetMobID)
+                cardfix = cardfix * (100 + GetDeferredBonus2(src, "bMagicAddRace", tstatus->Race) + GetDeferredBonus2(src, "bMagicAddRace", ROWOW_RACE_ALL)) / 100;
+                if (nk[ROWOW_NK_IGNOREELEMENT] == false)
                 {
-                    cardfixLeft = cardfixLeft * (100 + addDamage.second) / 100;
-                    break;
+                    // Affected by Element modifier bonuses
+                    cardfix = cardfix * (100 + GetDeferredBonus2(src, "bMagicAddEle", tstatus->DefElement) + GetDeferredBonus2(src, "bMagicAddEle", ROWOW_ELEMENT_ALL)) / 100;
+                    cardfix = cardfix * (100 + GetDeferredBonus2(src, "bMagicAtkEle", rhEle) + GetDeferredBonus2(src, "bMagicAtkEle", ROWOW_ELEMENT_ALL)) / 100;
                 }
+                cardfix = cardfix * (100 + GetDeferredBonus2(src, "bMagicAddSize", tstatus->Size) + GetDeferredBonus2(src, "bMagicAddSize", ROWOW_SIZE_ALL)) / 100;
+                cardfix = cardfix * (100 + GetDeferredBonus2(src, "bMagicAddClass", tstatus->Class) + GetDeferredBonus2(src, "bMagicAddClass", ROWOW_CLASS_ALL)) / 100;
+                int32 addMagicDamage = GetDeferredBonus2(src, "bAddMagicDamageClass", targetMobID);
+                if (targetMobID != 0 && addMagicDamage != 0)
+                    cardfix = cardfix * (100 + addMagicDamage) / 100;
+                applyCardFix(cardfix);
             }
-        }
-        if ((flag & ROWOW_BF_SHORT) != 0)
-            cardfix = cardfix * (100 + bonus.ShortAttackAtkRate) / 100;
-        if ((flag & ROWOW_BF_LONG) != 0)
-            cardfix = cardfix * (100 + bonus.LongAttackAtkRate) / 100;
-        applyCardFix((left & 1) != 0 ? cardfixLeft : cardfix);
-    }
-    else if (tstatus->IsPlayer == true && (left & 2) == 0)
-    {
-        // Affected by target DEF bonuses
-        ROWOWBonus const& bonus = tstatus->Bonus;
-        int32 eleFix = bonus.SubEle[rhEle] + bonus.SubEle[ROWOW_ELEMENT_ALL];
-        cardfix = cardfix * (100 - eleFix) / 100;
-        if ((left & 1) != 0 && lhEle != rhEle)
-        {
-            int32 eleFixLeft = bonus.SubEle[lhEle] + bonus.SubEle[ROWOW_ELEMENT_ALL];
-            cardfix = cardfix * (100 - eleFixLeft) / 100;
-        }
-        cardfix = cardfix * (100 - bonus.SubSize[sstatus->Size] - bonus.SubSize[ROWOW_SIZE_ALL]) / 100;
-        cardfix = cardfix * (100 - bonus.SubRace[sstatus->Race] - bonus.SubRace[ROWOW_RACE_ALL]) / 100;
-        cardfix = cardfix * (100 - bonus.SubClass[sstatus->Class] - bonus.SubClass[ROWOW_CLASS_ALL]) / 100;
-        uint32 sourceMobID = src->IsCreature() == true ? GetROMobID(src->ToCreature()) : 0;
-        for (auto const& addDef : bonus.AddDefMonster)
-        {
-            if (addDef.first == sourceMobID)
+
+            // Affected by target DEF bonuses
+            if (tstatus->IsPlayer == true && nk[ROWOW_NK_IGNOREDEFCARD] == false)
             {
-                cardfix = cardfix * (100 - addDef.second) / 100;
-                break;
+                ROWOWBonus const& bonus = tstatus->Bonus;
+                cardfix = 1000; // reset var for target
+                if (nk[ROWOW_NK_IGNOREELEMENT] == false) // Affected by Element modifier bonuses
+                    cardfix = cardfix * (100 - bonus.SubEle[rhEle] - bonus.SubEle[ROWOW_ELEMENT_ALL]) / 100;
+                cardfix = cardfix * (100 - bonus.SubSize[sstatus->Size] - bonus.SubSize[ROWOW_SIZE_ALL]) / 100;
+                cardfix = cardfix * (100 - bonus.SubRace[sstatus->Race] - bonus.SubRace[ROWOW_RACE_ALL]) / 100;
+                cardfix = cardfix * (100 - bonus.SubClass[sstatus->Class] - bonus.SubClass[ROWOW_CLASS_ALL]) / 100;
+                int32 addMagicDefense = GetDeferredBonus2(target, "bAddMDefMonster", sourceMobID);
+                if (sourceMobID != 0 && addMagicDefense != 0)
+                    cardfix = cardfix * (100 - addMagicDefense) / 100;
+
+                // It was discovered that ranged defense also counts vs magic! [Skotlex]
+                if ((flag & ROWOW_BF_SHORT) != 0)
+                    cardfix = cardfix * (100 - bonus.NearAttackDefRate) / 100;
+                else if (nk[ROWOW_NK_IGNORELONGCARD] == false)
+                    cardfix = cardfix * (100 - bonus.LongAttackDefRate) / 100;
+                cardfix = cardfix * (100 - bonus.MagicDefRate) / 100;
+                applyCardFix(cardfix);
             }
+            break;
         }
-        if ((flag & ROWOW_BF_SHORT) != 0)
-            cardfix = cardfix * (100 - bonus.NearAttackDefRate) / 100;
-        else // BF_LONG (there's no other choice)
-            cardfix = cardfix * (100 - bonus.LongAttackDefRate) / 100;
-        applyCardFix(cardfix);
+        case ROWOW_BF_WEAPON:
+        {
+            if (sstatus->IsPlayer == true && nk[ROWOW_NK_IGNOREATKCARD] == false && (left & 2) != 0)
+            {
+                // Affected by attacker ATK bonuses
+                ROWOWBonus const& bonus = sstatus->Bonus;
+                int32 cardfixLeft = 1000;
+                if (IsSkillUsingArrow(src, skillID) == true)
+                {
+                    // Ranged attack
+                    cardfix = cardfix * (100 + bonus.RightWeapon.AddRace[tstatus->Race] + bonus.ArrowAddRace[tstatus->Race] + bonus.RightWeapon.AddRace[ROWOW_RACE_ALL]
+                        + bonus.ArrowAddRace[ROWOW_RACE_ALL]) / 100;
+                    if (nk[ROWOW_NK_IGNOREELEMENT] == false)
+                    {
+                        // Affected by Element modifier bonuses
+                        int32 eleFix = bonus.RightWeapon.AddEle[tstatus->DefElement] + bonus.ArrowAddEle[tstatus->DefElement] + bonus.RightWeapon.AddEle[ROWOW_ELEMENT_ALL]
+                            + bonus.ArrowAddEle[ROWOW_ELEMENT_ALL];
+                        cardfix = cardfix * (100 + eleFix) / 100;
+                    }
+                    cardfix = cardfix * (100 + bonus.RightWeapon.AddSize[tstatus->Size] + bonus.ArrowAddSize[tstatus->Size] + bonus.RightWeapon.AddSize[ROWOW_SIZE_ALL]
+                        + bonus.ArrowAddSize[ROWOW_SIZE_ALL]) / 100;
+                    cardfix = cardfix * (100 + bonus.RightWeapon.AddClass[tstatus->Class] + bonus.ArrowAddClass[tstatus->Class] + bonus.RightWeapon.AddClass[ROWOW_CLASS_ALL]
+                        + bonus.ArrowAddClass[ROWOW_CLASS_ALL]) / 100;
+                }
+                else
+                {
+                    // Melee attack: each hand's bonuses on their own (left_cardfix_to_right is off)
+                    cardfix = cardfix * (100 + bonus.RightWeapon.AddRace[tstatus->Race] + bonus.RightWeapon.AddRace[ROWOW_RACE_ALL]) / 100;
+                    if (nk[ROWOW_NK_IGNOREELEMENT] == false)
+                        cardfix = cardfix * (100 + bonus.RightWeapon.AddEle[tstatus->DefElement] + bonus.RightWeapon.AddEle[ROWOW_ELEMENT_ALL]) / 100;
+                    cardfix = cardfix * (100 + bonus.RightWeapon.AddSize[tstatus->Size] + bonus.RightWeapon.AddSize[ROWOW_SIZE_ALL]) / 100;
+                    cardfix = cardfix * (100 + bonus.RightWeapon.AddClass[tstatus->Class] + bonus.RightWeapon.AddClass[ROWOW_CLASS_ALL]) / 100;
+                    if ((left & 1) != 0)
+                    {
+                        // Left-handed weapon
+                        cardfixLeft = cardfixLeft * (100 + bonus.LeftWeapon.AddRace[tstatus->Race] + bonus.LeftWeapon.AddRace[ROWOW_RACE_ALL]) / 100;
+                        if (nk[ROWOW_NK_IGNOREELEMENT] == false)
+                            cardfixLeft = cardfixLeft * (100 + bonus.LeftWeapon.AddEle[tstatus->DefElement] + bonus.LeftWeapon.AddEle[ROWOW_ELEMENT_ALL]) / 100;
+                        cardfixLeft = cardfixLeft * (100 + bonus.LeftWeapon.AddSize[tstatus->Size] + bonus.LeftWeapon.AddSize[ROWOW_SIZE_ALL]) / 100;
+                        cardfixLeft = cardfixLeft * (100 + bonus.LeftWeapon.AddClass[tstatus->Class] + bonus.LeftWeapon.AddClass[ROWOW_CLASS_ALL]) / 100;
+                    }
+                    // (Advanced Katar Mastery comes with the Assassin Cross, which isn't a pre-renewal job here)
+                }
+                for (auto const& addDamage : bonus.RightWeapon.AddDamageClass)
+                {
+                    if (addDamage.first == targetMobID)
+                    {
+                        cardfix = cardfix * (100 + addDamage.second) / 100;
+                        break;
+                    }
+                }
+                if ((left & 1) != 0)
+                {
+                    for (auto const& addDamage : bonus.LeftWeapon.AddDamageClass)
+                    {
+                        if (addDamage.first == targetMobID)
+                        {
+                            cardfixLeft = cardfixLeft * (100 + addDamage.second) / 100;
+                            break;
+                        }
+                    }
+                }
+                if ((flag & ROWOW_BF_SHORT) != 0)
+                    cardfix = cardfix * (100 + bonus.ShortAttackAtkRate) / 100;
+                if ((flag & ROWOW_BF_LONG) != 0)
+                    cardfix = cardfix * (100 + bonus.LongAttackAtkRate) / 100;
+                applyCardFix((left & 1) != 0 ? cardfixLeft : cardfix);
+            }
+            else if (tstatus->IsPlayer == true && nk[ROWOW_NK_IGNOREDEFCARD] == false && (left & 2) == 0)
+            {
+                // Affected by target DEF bonuses
+                ROWOWBonus const& bonus = tstatus->Bonus;
+                if (nk[ROWOW_NK_IGNOREELEMENT] == false)
+                {
+                    // Affected by Element modifier bonuses
+                    cardfix = cardfix * (100 - bonus.SubEle[rhEle] - bonus.SubEle[ROWOW_ELEMENT_ALL]) / 100;
+                    if ((left & 1) != 0 && lhEle != rhEle)
+                        cardfix = cardfix * (100 - bonus.SubEle[lhEle] - bonus.SubEle[ROWOW_ELEMENT_ALL]) / 100;
+                }
+                cardfix = cardfix * (100 - bonus.SubSize[sstatus->Size] - bonus.SubSize[ROWOW_SIZE_ALL]) / 100;
+                cardfix = cardfix * (100 - bonus.SubRace[sstatus->Race] - bonus.SubRace[ROWOW_RACE_ALL]) / 100;
+                cardfix = cardfix * (100 - bonus.SubClass[sstatus->Class] - bonus.SubClass[ROWOW_CLASS_ALL]) / 100;
+                for (auto const& addDef : bonus.AddDefMonster)
+                {
+                    if (addDef.first == sourceMobID)
+                    {
+                        cardfix = cardfix * (100 - addDef.second) / 100;
+                        break;
+                    }
+                }
+                if ((flag & ROWOW_BF_SHORT) != 0)
+                    cardfix = cardfix * (100 - bonus.NearAttackDefRate) / 100;
+                else if (nk[ROWOW_NK_IGNORELONGCARD] == false) // BF_LONG (there's no other choice)
+                    cardfix = cardfix * (100 - bonus.LongAttackDefRate) / 100;
+                applyCardFix(cardfix);
+            }
+            break;
+        }
+        case ROWOW_BF_MISC:
+        {
+            // Affected by target DEF bonuses
+            if (tstatus->IsPlayer == true && nk[ROWOW_NK_IGNOREDEFCARD] == false)
+            {
+                ROWOWBonus const& bonus = tstatus->Bonus;
+                if (nk[ROWOW_NK_IGNOREELEMENT] == false) // Affected by Element modifier bonuses
+                    cardfix = cardfix * (100 - bonus.SubEle[rhEle] - bonus.SubEle[ROWOW_ELEMENT_ALL]) / 100;
+                cardfix = cardfix * (100 - bonus.SubRace[sstatus->Race] - bonus.SubRace[ROWOW_RACE_ALL]) / 100;
+                cardfix = cardfix * (100 - bonus.SubSize[sstatus->Size] - bonus.SubSize[ROWOW_SIZE_ALL]) / 100;
+                cardfix = cardfix * (100 - bonus.SubClass[sstatus->Class] - bonus.SubClass[ROWOW_CLASS_ALL]) / 100;
+                cardfix = cardfix * (100 - bonus.MiscDefRate) / 100;
+                if ((flag & ROWOW_BF_SHORT) != 0)
+                    cardfix = cardfix * (100 - bonus.NearAttackDefRate) / 100;
+                else if (nk[ROWOW_NK_IGNORELONGCARD] == false) // BF_LONG (there's no other choice)
+                    cardfix = cardfix * (100 - bonus.LongAttackDefRate) / 100;
+                applyCardFix(cardfix);
+            }
+            break;
+        }
     }
     return damage - originalDamage;
 }

@@ -24,10 +24,12 @@
 #include "SharedDefines.h"
 
 #include "DataMap.h"
+#include "ROWOW_Skill.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <deque>
+#include <functional>
 #include <iterator>
 #include <map>
 #include <memory>
@@ -40,9 +42,11 @@
 
 class Creature;
 class Item;
+class Map;
 class Player;
 class SpellInfo;
 class Unit;
+class WorldLocation;
 struct CalcDamageInfo;
 struct ROWOWScript;
 struct ROWOWScriptContext;
@@ -90,37 +94,12 @@ struct ROWOWItemVisual
     uint32 VisualSpellID = 0; // Aura that attaches the headgear model, 0 for none
 };
 
-// What the RO skill script does for a skill spell (from mod_rowow_skill_effect)
-#define ROWOW_SKILL_EFFECT_STATUS_CHANCE            1
-#define ROWOW_SKILL_EFFECT_ZENY_COST                2
-#define ROWOW_SKILL_EFFECT_STEAL                    3
-#define ROWOW_SKILL_EFFECT_TELEPORT_RANDOM          4
-#define ROWOW_SKILL_EFFECT_CELL_LAYOUT              5
-#define ROWOW_SKILL_EFFECT_STEAL_ZENY               6
-#define ROWOW_SKILL_EFFECT_TRAP                     7
-struct ROWOWSkillEffect
-{
-    uint8 EffectType = 0;
-    uint32 TriggerSpellID = 0; // Cast on the target when the chance succeeds
-    float Chance = 0; // Percent
-    float ChancePerCasterLevel = 0;
-    bool IsChanceByLevelDifference = false; // Plus the caster's level less the target's
-    int32 ValueA = 0; // Zeny cost (copper)
-    int32 ValueB = 0;
-};
-
-// The cells an RO ground skill puts its cell spell on (from mod_rowow_skill_cell), as RO cell offsets from the target cell (x east,
-// y north).  A wall's cells turn with RO's direction from the caster to the target (0 north, then counter-clockwise)
+// RO's directions from one cell to another (0 north, then counter-clockwise: rAthena's enum directions)
 #define ROWOW_RO_DIRECTION_COUNT                    8
-#define ROWOW_RO_DIRECTION_ANY                      255
+#define ROWOW_RO_DIRECTION_WEST                     2
 #define ROWOW_RO_DIRECTION_EAST                     6
-#define ROWOW_SKILL_CELL_GROUND_SEARCH_HEIGHT       3.0f    // How far above the target spot the ground search for a skill cell starts
+#define ROWOW_SKILL_CELL_GROUND_SEARCH_HEIGHT       3.0f    // How far above a ground skill's spot the ground search for its units' cells starts
 #define ROWOW_SKILL_CELL_GROUND_SEARCH_DISTANCE     10.0f   // How far down it looks
-struct ROWOWSkillCellLayout
-{
-    bool IsDirectional = false;
-    std::vector<std::pair<int16, int16>> CellsByDirection[ROWOW_RO_DIRECTION_COUNT]; // Only the first is used when it isn't directional
-};
 
 // The RO cell grid of an RO map (from mod_rowow_map_grid).  RO's x runs against WoW's Y, and RO's y along WoW's X
 struct ROWOWMapGrid
@@ -135,11 +114,13 @@ struct ROWOWMapGrid
     float GetCellCenterWorldY(int32 cellX) const { return OriginY - (float(cellX) + 0.5f) * CellSize; }
 };
 
-// Per creature: whether a player has stolen from it (RO allows one successful steal per monster)
+// A monster's steal state (mob_data's state.steal_flag and state.steal_coin_flag): the steal tries made on it, UCHAR_MAX once it can't be
+// stolen from any more (one item per monster), and whether its zeny was stolen.  Kept on the creature as "ROWOWStealState" for one life;
+// only its map's thread touches it
 struct ROWOWStealState : public DataMap::Base
 {
-    bool IsStolenFrom = false;
-    bool IsZenyStolenFrom = false;
+    uint8 StealFlag = 0;
+    bool IsStealCoinFlag = false;
 };
 
 // A copy of one Ragnarok WorldData table, the rAthena pre-renewal data the RO rules read (from a mod_rowow_db_* table, which the converter
@@ -177,6 +158,9 @@ struct ROWOWDataTable
 #define ROWOW_DATA_TABLE_CHAR_CONFIG                "mod_rowow_db_char_config"
 #define ROWOW_DATA_TABLE_ATTR_FIX                   "mod_rowow_db_attr_fix"
 #define ROWOW_DATA_TABLE_SIZE_FIX                   "mod_rowow_db_size_fix"
+#define ROWOW_DATA_TABLE_SKILL                      "mod_rowow_db_skill"
+#define ROWOW_DATA_TABLE_SKILL_TREE                 "mod_rowow_db_skill_tree"
+#define ROWOW_DATA_TABLE_STATUS                     "mod_rowow_db_status"
 
 // The fixed RO spells (200000-200099, the converter's RO_SPELL_ID_* values)
 #define ROWOW_SPELL_WORLD_TRAVEL                    200000  // Every character's 8 second cast into the RO world and back
@@ -189,8 +173,15 @@ struct ROWOWDataTable
 #define ROWOW_SPELL_ID_RO_END                       248999
 #define ROWOW_SPELL_AUTO_ATTACK                     6603    // WoW's Attack, which the RO form keeps for auto attack
 
+// The items the skills make or use by ID (rAthena's ITEMID_*)
+#define ROWOW_ITEMID_HOLY_WATER                     523
+#define ROWOW_ITEMID_EMPTY_BOTTLE                   713
+#define ROWOW_ITEMID_STONE                          7049
+
 // rAthena's job IDs (e_job in mmo.hpp)
 #define ROWOW_JOB_NOVICE                            0
+#define ROWOW_JOB_THIEF                             6
+#define ROWOW_JOB_NINJA                             25
 #define ROWOW_JOB_NOVICE_HIGH                       4001
 #define ROWOW_JOB_UPPER_START                       4001    // Novice_High, the first transcendent job
 #define ROWOW_JOB_UPPER_END                         4022    // Paladin2, the last
@@ -326,12 +317,19 @@ struct ROWOWDataTable
 #define ROWOW_MAX_REFINE                            10
 #define ROWOW_MAX_SLOTS                             4       // Card slots on an item
 
-// The monster modes the battle rules read so far (rAthena's e_mode bits).  The AI modes come with the monster AI (R10)
+// The monster modes the battle and status rules read (rAthena's e_mode bits).  The AI modes come with the monster AI (R10)
+#define ROWOW_MODE_CANMOVE                          0x0000001
+#define ROWOW_MODE_CANATTACK                        0x0000080
 #define ROWOW_MODE_IGNORE_MELEE                     0x0010000
 #define ROWOW_MODE_IGNORE_MAGIC                     0x0020000
 #define ROWOW_MODE_IGNORE_RANGED                    0x0040000
 #define ROWOW_MODE_MVP                              0x0080000
 #define ROWOW_MODE_IGNORE_MISC                      0x0100000
+#define ROWOW_MODE_KNOCKBACK_IMMUNE                 0x0200000
+#define ROWOW_MODE_DETECTOR                         0x2000000
+#define ROWOW_MODE_STATUS_IMMUNE                    0x4000000
+#define ROWOW_MODE_SKILL_IMMUNE                     0x8000000
+#define ROWOW_MODE_PC                               0x000B7FF // A player's modes: MD_MASK less the monster-only ones (status_calc_pc_)
 
 // rAthena's object types (BL_*), as the battle config values name them
 #define ROWOW_BL_PC                                 0x0001
@@ -345,6 +343,9 @@ struct ROWOWDataTable
 #define ROWOW_BF_LONG                               0x0040
 #define ROWOW_BF_SKILL                              0x0100
 #define ROWOW_BF_NORMAL                             0x0200
+#define ROWOW_BF_WEAPONMASK                         0x000F
+#define ROWOW_BF_RANGEMASK                          0x00F0
+#define ROWOW_BF_SKILLMASK                          0x0F00
 #define ROWOW_DMG_NORMAL                            0
 #define ROWOW_DMG_MULTI_HIT                         8
 #define ROWOW_DMG_CRITICAL                          10
@@ -363,27 +364,6 @@ struct ROWOWDataTable
 #define ROWOW_BDMG_MAGIC                            0x0004
 #define ROWOW_BDMG_NOSIZE                           0x0008
 
-// The skills a normal attack reads (rAthena's skill IDs).  The identity learns skills in R6, so until then none is known
-#define ROWOW_SKILL_SM_SWORD                        2
-#define ROWOW_SKILL_SM_TWOHAND                      3
-#define ROWOW_SKILL_AL_DP                           22
-#define ROWOW_SKILL_AL_DEMONBANE                    23
-#define ROWOW_SKILL_TF_DOUBLE                       48
-#define ROWOW_SKILL_KN_SPEARMASTERY                 55
-#define ROWOW_SKILL_PR_MACEMASTERY                  65
-#define ROWOW_SKILL_BS_HILTBINDING                  105
-#define ROWOW_SKILL_BS_WEAPONRESEARCH               107
-#define ROWOW_SKILL_HT_BEASTBANE                    126
-#define ROWOW_SKILL_AS_RIGHT                        132
-#define ROWOW_SKILL_AS_LEFT                         133
-#define ROWOW_SKILL_AS_KATAR                        134
-#define ROWOW_SKILL_AM_AXEMASTERY                   226
-#define ROWOW_SKILL_MO_IRONHAND                     259
-#define ROWOW_SKILL_SA_ADVANCEDBOOK                 274
-#define ROWOW_SKILL_BA_MUSICALLESSON                315
-#define ROWOW_SKILL_DC_DANCINGLESSON                323
-#define ROWOW_SKILL_TK_RUN                          411
-#define ROWOW_SKILL_GS_CHAINACTION                  511
 
 #define ROWOW_MAX_LEVEL_BASE_EXP                    99999999    // rAthena's MAX_LEVEL_BASE_EXP, the base exp kept at the max level
 #define ROWOW_MAX_LEVEL_JOB_EXP                     999999999   // MAX_LEVEL_JOB_EXP
@@ -405,6 +385,7 @@ struct ROWOWJob
     std::vector<std::array<int32, ROWOW_STAT_COUNT>> BonusStatsByJobLevel; // The job's stat bonus at each job level (index is the level less 1)
     int32 BaseASPDByWeaponType[ROWOW_WEAPON_TYPE_MAX]; // Attack motion with each weapon type, 2000 (no attacks) for those it can't use
     int32 ItemJobIndex = -1; // The item_db Jobs name it uses items as (ROWOWItemJobNames), -1 for none
+    int32 FirstJobID = -1; // A second job's first job, as a normal job (rAthena's MAPID_FIRSTMASK of a JOBL_2 job), -1 for the others
 
     ROWOWJob() { std::fill(std::begin(BaseASPDByWeaponType), std::end(BaseASPDByWeaponType), 2000); }
 };
@@ -476,6 +457,10 @@ struct ROWOWItem
     int32 Defense = 0;
     int32 Range = 0;
     int32 WeaponLevel = 0;
+    int32 Weight = 0; // In tenths
+    int32 Buy = 0; // The NPC shops' price (zeny)
+    bool IsNoTrade = false; // item_db's Trade restrictions the cart and the shops read (itemdb_cantrade, itemdb_cancartstore)
+    bool IsNoCart = false;
 };
 
 // An item group (rAthena's item_group_db, by its name without IG_): its subgroups, each giving one item picked at random, or all of them
@@ -575,6 +560,85 @@ struct ROWOWBattleConfig
     int32 AreaSize = 14; // The cells around a unit it sees (area_size)
     int32 ItemUseInterval = 100;
     int32 AmmoUnequip = 1;
+    int32 SkillUpLimit = 1; // A job's skills can't be raised until the jobs before it used their skill points (pc_calc_skilltree_normalize_job)
+    int32 SkillFree = 0; // No skill prerequisites
+    int32 QuestSkillLearn = 0; // Quest skills can be learned with skill points
+    int32 CastRate = 100; // casting_rate
+    int32 CastrateDexScale = 150; // The DEX at which casting is instant
+    int32 DelayRate = 100;
+    int32 DelayDependOnDex = 0;
+    int32 DelayDependOnAgi = 0;
+    int32 MinSkillDelayLimit = 100;
+    int32 NoSkillDelay = ROWOW_BL_MOB; // Who has no after-cast delay (min_skill_delay_limit instead)
+    int32 MaxHeal = 9999;
+    int32 MaxHealLv = 11; // From this skill level on, a heal heals max_heal
+    int32 DelayBattleDamage = 1; // A hit lands its attack motion after the attack
+    int32 KnockbackLeft = 1; // A knockback from the same cell goes east
+    int32 SkillrangeByDistance = ROWOW_BL_MOB; // Whose skills are near or far by the distance to the target, not by the skill's range
+    int32 SkillrangeFromWeapon = 0; // use_weapon_skill_range
+    int32 SkillCasterCheck = 1;
+    int32 CardfixMonsterPhysical = 1;
+    int32 PathBlownHalt = 1;
+    int32 ExpBonusNodamageAttacker = 0;
+    int32 HealExp = 0;
+    int32 SkillAddRange = 0;
+    int32 PCScDefRate = 100; // pc_status_def_rate: how much of a player's status resistance counts
+    int32 MobScDefRate = 100;
+    int32 PCMaxScDef = 100; // pc_max_status_def: the most resistance there is, in percent
+    int32 MobMaxScDef = 100;
+    int32 ScCastCancel = 0; // status_cast_cancel: who a stopping status (stun, freeze) stops the cast of (BL_*)
+    int32 MaxWalkSpeed = 300; // max_walk_speed: a player's fastest walk, in percent of the default walk speed
+    int32 GtbScImmunity = 50; // gtb_sc_immunity: from how much bNoMagicDamage on magic skills stop statuses
+    int32 PCCloakCheckType = 1; // player_cloak_check_type: 1 needs a wall, 2 attacking doesn't end it, 4 skills don't
+    int32 MonsterCloakCheckType = 4;
+    int32 InfiniteEndure = 0; // Whose kind always has endure (BL_*)
+    int32 UndeadDetectType = 0; // 0: the undead element, 1: the undead race, 2: either
+    int32 DebuffOnLogout = 0; // debuff_on_logout: 1 keeps the debuffs saved over a logout, 2 the buffs
+    int32 AutoCounterType = 15; // auto_counter_type: whose Auto Counter is always critical (BL_*)
+    int32 EquipNaturalBreakRate = 0;
+    int32 EquipSelfBreakRate = 100;
+    int32 EquipSkillBreakRate = 100;
+    int32 BreakMobEquip = 0; // Whether monsters' "equipment" breaks (their ATK and DEF statuses)
+    int32 StormgustKnockback = 1; // Storm Gust pushes back from its center (0: a random way)
+    int32 CartRevoKnockback = 1; // Cart Revolution pushes west, as officially
+    int32 ArrowShowerKnockback = 1; // Arrow Shower pushes away from where the arrows fall (0: away from the archer)
+    int32 PCInvincibleTime = 3000; // player_invincible_time: ms a player can't be targeted after arriving on a map or reviving
+    int32 MaxCartWeight = 80000; // In tenths: max_cart_weight (8000) times 10
+    int32 VendingMaxValue = 1000000000;
+    int32 VendingOverMax = 1; // A sale may take the vendor past the zeny cap (what's over is lost)
+    int32 VendingTax = 500; // In hundredths of a percent, on sales of vending_tax_min and up
+    int32 VendingTaxMin = 100000000;
+    int32 SkillStealMaxTries = 0; // How often a monster can be tried (0: until stolen from)
+    int32 AutospellCheckRange = 0; // Autospells check their range to the target
+    int32 AutospellStacking = 0; // Several autospells of one skill can go off on the same hit
+    int32 SkipTeleportLv1Menu = 0; // Teleport level 1 goes without asking (the menu offers only "Random" then)
+    int32 BasicSkillCheck = 1; // Basic Skill gates trading, emotions, sitting, parties and the storage
+    int32 NaturalHealSkillInterval = 10000; // natural_heal_skill_interval: how often the regen skills heal (ms)
+    int32 DevotionLevelDifference = 10; // devotion_level_difference: the base levels a Crusader and the one it devotes itself to may be apart
+    int32 DevotionRDamage = 0; // devotion_rdamage: the chance (%) that damage reflected onto a devoted attacker goes to its Crusader
+    int32 DevotionRDamageSkillOnly = 1; // devotion_rdamage_skill_only: an inherited Reflect Shield reflects only skills
+    int32 DevotionStandupFix = 1; // devotion_standup_fix: a sitting devoted player (and its Crusader) stands up when hit
+    int32 BowlingBashArea = 0; // bowling_bash_area: 0 the gutter lines (40x40 squares), 1 without the demi-gutter bug, else a square around the caster
+    int32 GxAllHit = 0; // gx_allhit: Grand Cross hits every target in each cell (else each cell hits three times in all)
+    int32 SkillEightpathSameCell = 1; // skill_eightpath_same_cell: a path skill (Brandish Spear) also hits on the caster's own cell
+};
+
+// A skill of a job's skill tree (skill_tree.yml's s_skill_tree_entry)
+struct ROWOWSkillTreeEntry
+{
+    uint16 SkillID = 0;
+    uint16 MaxLevel = 0;
+    uint32 BaseLevel = 0;
+    uint32 JobLevel = 0;
+    std::vector<std::pair<uint16, uint16>> Needs; // The skills and levels it needs first
+    bool IsExcludedFromInherit = false; // A job inheriting the tree doesn't get it
+};
+
+// A job's skill tree, its own skills and those of the jobs it inherits from (s_skill_tree once loadingFinished merged them)
+struct ROWOWSkillTree
+{
+    std::vector<uint16> InheritJobIDs;
+    std::map<uint16, ROWOWSkillTreeEntry> SkillsByID;
 };
 
 // One weapon hand's bonuses (rAthena's weapon_data): what its cards and scripts add against races, elements, sizes and classes
@@ -662,8 +726,24 @@ struct ROWOWBonus
     int32 SplashRange = 0;
     int32 SplashAddRange = 0;
     bool NoSizeFix = false;
+    std::vector<ROWOWAddEffect> AddEff; // addeff: statuses its attacks may give
+    std::vector<ROWOWAddEffect> AddEffAtked; // addeff_atked: statuses being hit may give the attacker
+    std::vector<ROWOWAddEffectOnSkill> AddEffOnSkill; // addeff_onskill
+    std::vector<ROWOWAutoSpell> AutoSpell; // autospell: bAutoSpell, cast as it attacks
+    std::vector<ROWOWAutoSpell> AutoSpell2; // autospell2: bAutoSpellWhenHit, as it's hit
+    std::vector<ROWOWAutoSpell> AutoSpell3; // autospell3: bAutoSpellOnSkill, as it uses a skill
+    std::vector<ROWOWAutoBonus> AutoBonus; // autobonus, autobonus2 and autobonus3: scripts run for a while on the same triggers
+    std::vector<ROWOWAutoBonus> AutoBonus2;
+    std::vector<ROWOWAutoBonus> AutoBonus3;
+    std::unordered_map<int32, int32> ResEff; // reseff: resistance to statuses, in hundredths of a percent, by ROWOW_SC_*
     std::vector<ROWOWDeferredBonus> Deferred;
 };
+
+// What natural regen gives (regen_data's flag): HP and SP, and the regen skills' (sregen, ssregen)
+#define ROWOW_RGN_HP                                0x01
+#define ROWOW_RGN_SP                                0x02
+#define ROWOW_RGN_SHP                               0x04
+#define ROWOW_RGN_SSP                               0x08
 
 // An RO combatant's status (rAthena's status_data): a player's from status_calc_pc_sub, the stats with their bonuses and what follows
 // from them, or a monster's from its mob_db row.  Gear scripts and cards (R5), skills (R6) and statuses come in with their milestones
@@ -717,7 +797,23 @@ struct ROWOWStatus
     uint8 LeftWeaponType = ROWOW_WEAPON_TYPE_FIST; // weapontype2
     int32 RegenHP = 1; // HP and SP each natural regen tick (status_calc_regen)
     int32 RegenSP = 1;
+    uint8 RegenFlag = ROWOW_RGN_HP | ROWOW_RGN_SP; // What regenerates (regen_data's flag, from status_calc_regen_rate)
+    int32 RegenRateHP = 100; // The regen speeds in percent (regen_data's rate), from statuses
+    int32 RegenRateSP = 100;
+    int32 SkillRegenHP = 0; // The regen skills' HP and SP every natural_heal_skill_interval (sregen: Increase HP and SP Recovery)
+    int32 SkillRegenSP = 0;
+    int32 SitSkillRegenHP = 0; // ... only while sitting (ssregen: Spiritual Cadence; the Taekwon's rests come with the Taekwon)
+    int32 SitSkillRegenSP = 0;
+    bool IsRegenWalk = false; // regen_data's state.walk: HP regenerates while walking (Moving HP-Recovery), at half speed
+    int32 Speed = ROWOW_DEFAULT_WALK_SPEED; // Walk speed, ms per cell
     ROWOWBonus Bonus; // A player's, from its gear
+};
+
+// A monster's own status while statuses change it (its battle status; the mob_db one stays its base status), kept on the creature as
+// "ROWOWMobStatus" from its first status change.  Only the creature's map thread touches it
+struct ROWOWMobStatus : public DataMap::Base
+{
+    ROWOWStatus Status;
 };
 
 // One attack's result (rAthena's struct Damage)
@@ -733,6 +829,7 @@ struct ROWOWDamage
     uint8 DmgLv = ROWOW_ATK_DEF; // ROWOW_ATK_*
     int32 Flag = 0; // ROWOW_BF_*
     int32 MiscFlag = 0;
+    int32 BlewCount = 0; // blewcount: the cells a skill hit knocks the target back
 };
 
 // The attackers an RO monster remembers (rAthena's dmglog), for sharing its exp
@@ -755,6 +852,36 @@ struct ROWOWPosition
     float Y = 0;
     float Z = 0;
     float O = 0;
+};
+
+// An item in the identity's cart (rAthena's items_cart entry), kept as what makes the RO item: its template, count and enchantments (its
+// refine, broken and unidentified state, and its cards), since a cart item isn't an item in the bags
+#define ROWOW_MAX_CART                              100     // MAX_CART
+#define ROWOW_MAX_CARTS                             5       // MAX_CARTS: the cart looks (pre-renewal's five)
+#define ROWOW_ITEM_ENCHANTMENT_SLOT_COUNT           12      // MAX_ENCHANTMENT_SLOT, the WoW item's enchantment slots
+struct ROWOWCartItem
+{
+    uint32 ItemTemplateID = 0; // 0 for an empty slot
+    uint32 Count = 0;
+    std::array<uint32, ROWOW_ITEM_ENCHANTMENT_SLOT_COUNT> Enchantments = { };
+};
+
+// A shop a Merchant opened from its cart (rAthena's s_vending): the cart slot, how many and the price of each item for sale
+#define ROWOW_MAX_VENDING                           12      // MAX_VENDING
+struct ROWOWVendingItem
+{
+    uint16 CartSlot = 0;
+    uint32 Amount = 0;
+    uint32 Value = 0; // Zeny each
+};
+
+// A memorized Warp Portal destination (rAthena's s_point_str memo_point)
+#define ROWOW_MAX_MEMOPOINTS                        3       // MAX_MEMOPOINTS
+struct ROWOWMemoPoint
+{
+    uint32 MapID = 0; // 0 for none
+    int32 CellX = 0;
+    int32 CellY = 0;
 };
 
 // An item a new RO identity starts with (rAthena's start_items_pre)
@@ -797,12 +924,50 @@ struct ROWOWIdentity : public DataMap::Base
     uint32 CanUseItemTime = 0; // canuseitem_tick: when the next item can be used (game time, milliseconds)
     std::unordered_map<uint32, uint32> ItemDelayEndTimes; // By item_db Id: when each item with a reuse delay can be used again
     bool IsIdentifyMenuOpen = false; // A Magnifier's list of items to appraise is up (menuskill_id MC_IDENTIFY)
+    std::map<uint16, uint16> SkillLevelsByID; // The skills learned (mod_rowow_identity_skill), and their levels
+    bool AreSkillsChanged = false;
+    std::set<uint16> TreeSkillIDs; // The skills of the tree it may use and raise now, learned or not (pc_calc_skilltree sets their id)
+    std::vector<uint32> SkillSpellIDs; // The learned skills' spells, which the character knows while in the form
+    std::string SentSkillsMessage; // What the client's RO interface was last told of the skills
+    std::map<std::string, int64> Variables; // Its character variables (rAthena's char_reg_num, mod_rowow_identity_variable), like jobchange_level
+    bool AreVariablesChanged = false;
+    std::array<ROWOWCartItem, ROWOW_MAX_CART> CartItems; // Its cart's items (mod_rowow_identity_cart), by cart slot
+    int32 CartNum = 0; // cart_num: the slots in use
+    int32 CartWeight = 0; // cart_weight and cart_weight_max, in tenths (item_db's Weight)
+    int32 CartWeightMax = 0;
+    bool AreCartItemsChanged = false;
+    std::string SentCartMessage; // What the client's RO interface was last told of the cart
+    std::array<ROWOWMemoPoint, ROWOW_MAX_MEMOPOINTS> MemoPoints; // memo_point (mod_rowow_identity_memo)
+    bool AreMemoPointsChanged = false;
+    uint16 MenuSkillID = 0; // menuskill_id and menuskill_val: a skill's menu is open (the Warp Portal or Teleport destinations, the Pushcart's
+    int32 MenuSkillValue = 0; // shop setup), and what it was cast with (Warp Portal's cell, x << 16 | y)
+    float MenuSkillZ = 0; // The ground height of a Warp Portal's cell
+    bool IsVending = false; // state.vending: its shop is open
+    std::string VendingTitle; // message
+    std::vector<ROWOWVendingItem> VendingItems; // vending (vend_num items)
+    uint8 VendSkillLevel = 0; // vend_skill_lv
+    std::vector<ROWOWActiveAutoBonus> ActiveAutoBonuses; // The autobonuses going (their active timers)
+    uint64 InvincibleEndTime = 0; // invincible_timer: no monster or skill targets it until then (after arriving on a map or reviving), 0 for none
+    float InvinciblePositionX = 0; // Where it stood when it got it, which moving away from ends it
+    float InvinciblePositionY = 0;
+    bool IsInvincibleSet = false; // The WoW state standing for it is set (immune to NPCs)
+    bool IsSellingToShop = false; // A sell packet is being handled: its money gets Overcharge
+    uint32 Option = 0; // status.option: the options kept with the identity (a Knight's or Crusader's Peco, ROWOW_OPTION_RIDING), saved with it
+    std::array<ObjectGuid, ROWOW_MAX_DEVOTION> DevotionGUIDs; // devotion: the players its Devotion protects, by slot (a slot holds while that
+                                                              // player's SC_DEVOTION names this one and the slot)
 
     bool WasInFormAtLoad = false; // Saved in the form: logged out in the RO world, or the server stopped with the character in it
 
-    ROWOWStatus Status; // Recalculated whenever what it comes from changes (CalculateIdentityStatus)
+    ROWOWStatus BaseStatus; // base_status: from the job, stats, gear and skills (status_calc_pc_sub)
+    ROWOWStatus Status; // battle_status: the base status with the statuses' changes (status_calc_bl_main); what the RO rules read
+    std::vector<ROWOWSavedStatusChange> SavedStatusChanges; // The statuses kept while out of the form (sc_data), and as last saved
+    bool AreStatusChangesChanged = false;
     uint32 RegenHPTimer = 0; // Time since the last natural HP and SP regen tick
     uint32 RegenSPTimer = 0;
+    uint32 SkillRegenHPTimer = 0; // The regen skills' ticks (sregen and ssregen's tick), in ms scaled by the regen rate
+    uint32 SkillRegenSPTimer = 0;
+    uint32 SitSkillRegenHPTimer = 0;
+    uint32 SitSkillRegenSPTimer = 0;
 
     // A form change made before the character was in the world (arriving on a map), finished once it's in the world
     bool IsFormArrivalPending = false;
@@ -862,8 +1027,6 @@ public:
     std::unordered_map<uint32, ROWOWItemVisual> ItemVisualsByItemID;
     std::unordered_map<uint64, uint32> HeadgearSpellIDsByKey; // See GetHeadgearKey
     std::unordered_set<uint32> HeadgearSpellIDs;
-    std::unordered_map<uint32, std::vector<ROWOWSkillEffect>> SkillEffectsBySpellID;
-    std::unordered_map<uint32, ROWOWSkillCellLayout> SkillCellLayoutsBySpellID;
     std::unordered_map<uint32, ROWOWMapGrid> MapGridsByMapID;
     std::unordered_map<std::string, ROWOWDataTable> DataTablesByName; // The rAthena data, by table name (ROWOW_DATA_TABLE_*)
     std::unordered_map<uint32, uint32> MobIDsByCreatureEntry; // The RO monster (mob_db Id) behind each RO creature template
@@ -871,6 +1034,7 @@ public:
     std::unordered_map<uint16, ROWOWJob> JobsByID;
     std::unordered_map<uint32, uint32> StatusPointsByBaseLevel; // Total status points at each base level (rAthena's statpoint.yml)
     std::unordered_map<std::string, uint32> MapIDsByMapName; // RO map names (rAthena's, including its aliases), lowercase
+    std::unordered_map<uint32, std::string> MapNamesByMapID; // Each RO map's own name (not an alias), lowercase
     std::unordered_map<uint32, uint32> ItemTemplateIDsByItemID; // The item template of each converted RO item (item_db Id)
     std::unordered_set<uint32> ItemTemplateIDs; // Every RO item template
     std::unordered_map<uint64, uint32> IllusionSpellIDsByJobKey; // See GetIllusionJobKey
@@ -895,6 +1059,13 @@ public:
     ROWOWRefineBonus RefineBonuses[ROWOW_REFINE_TYPE_COUNT][ROWOW_MAX_REFINE + 1];
     std::map<std::string, std::set<uint32>> UnknownBonusItemIDs; // Bonus types no rule takes yet, and the items that have them (startup)
     uint32 CompilingItemID = 0; // The item whose script is being compiled (startup)
+    std::unordered_map<uint16, ROWOWSkill> SkillsByID;
+    std::unordered_map<std::string, uint16> SkillIDsByName; // By the skill_db Name in uppercase
+    std::unordered_map<uint32, uint16> SkillIDsBySpellID; // The skill each RO skill spell is a level of
+    std::unordered_map<uint32, uint16> SkillLevelsBySpellID; // ... and which level
+    std::unordered_map<uint16, ROWOWSkillTree> SkillTreesByJobID;
+    std::unordered_map<uint16, std::unique_ptr<ROWOWSkillImpl>> SkillImplsBySkillID; // Each skill's own rules (rAthena's skill_db impl)
+    std::unordered_map<int32, ROWOWStatusChangeDB> StatusChangeDBsByType; // status.yml (status_db), by ROWOW_SC_*
 
     void LoadConfigurationFile();
     void LoadDataTables();
@@ -904,21 +1075,13 @@ public:
     void LoadBattleData();
     void LoadCreatureTemplateData();
     void LoadIllusionData();
-    void LoadSkillEffectData();
-    void LoadSkillCellData();
     void LoadMapGridData();
 
     // The RO cell grid of a map, or null when it isn't an RO map
     ROWOWMapGrid const* GetMapGrid(uint32 mapID) const;
 
-    // The cells of a skill spell with a cell layout, or null if it has none
-    ROWOWSkillCellLayout const* GetSkillCellLayout(uint32 spellID) const;
-
     // RO's direction from one cell to another (rAthena's map_calc_dir_xy), east when they're the same cell
     static uint8 GetRODirection(float deltaX, float deltaY);
-
-    // The script parts of an RO skill spell, or null if it has none
-    std::vector<ROWOWSkillEffect> const* GetSkillEffects(uint32 spellID) const;
 
     // RO illusions: while one is the player's transform, the player shows its display for the weapon and shield held
     ROWOWIllusion const* GetActiveIllusion(Player* player) const;
@@ -981,9 +1144,9 @@ public:
     void StatusCalcMisc(ROWOWStatus& status, uint32 level) const; // status_calc_misc
     static int32 GetBattleObjectType(ROWOWStatus const& status) { return status.IsPlayer == true ? ROWOW_BL_PC : ROWOW_BL_MOB; }
     static int32 GetElementByName(std::string const& name); // An element (Ele_* without the prefix, any case), or -1
-    uint32 StatusCalcMaxHPPC(ROWOWIdentity const& identity, ROWOWStatus const& status) const; // status_calc_maxhp_pc
-    uint32 StatusCalcMaxSPPC(ROWOWIdentity const& identity, ROWOWStatus const& status) const; // status_calc_maxsp_pc
-    static void StatusCalcRegen(ROWOWStatus& status); // status_calc_regen, for a player
+    uint32 StatusCalcMaxHPPC(ROWOWIdentity const& identity, ROWOWStatus const& status, ROWOWStatusChange const* sc) const; // status_calc_maxhp_pc
+    uint32 StatusCalcMaxSPPC(ROWOWIdentity const& identity, ROWOWStatus const& status, ROWOWStatusChange const* sc) const; // status_calc_maxsp_pc
+    void StatusCalcRegen(Unit const* unit, ROWOWStatus& status) const; // status_calc_regen, for a player (its regen skills when the unit is given)
     ROWOWItem const* GetROItem(Item const* item) const;
 
     // Status points (pc.cpp): what raising a stat costs, the most it can go to, and raising it
@@ -1008,17 +1171,23 @@ public:
     // RO natural HP and SP regen (status_natural_heal), in place of WoW's while in the form
     void UpdateNaturalRegen(Player* player, uint32 diff);
 
-    // RO battle (ROWOW_Battle.cpp): the port of rAthena's pre-renewal battle code (battle.cpp) for combat between RO combatants, so far
-    // the normal attack.  Skills (R6), cards (R5) and statuses (R6) plug into the marked places
+    // RO battle (ROWOW_Battle.cpp): the port of rAthena's pre-renewal battle code (battle.cpp) for combat between RO combatants: the normal
+    // attack and the weapon, magic and misc attacks of skills.  Statuses (R6.4) and the skill cases of rAthena's switches (R6.5) plug into
+    // the marked places
     ROWOWStatus const* GetROStatus(Unit const* unit) const; // status_get_status_data: a player's form, or a monster's mob_db status
-    int32 PCCheckSkill(Unit const* unit, uint16 skillID) const; // pc_checkskill: the level a player in the form knows a skill at (0 until R6)
-    void ApplyMobStatus(Creature* creature) const; // A spawning RO monster's HP, SP and attack delay (status_calc_mob)
+    int32 PCCheckSkill(Unit const* unit, uint16 skillID) const; // pc_checkskill: the level a player in the form knows a skill at
+    void ApplyMobStatus(Creature* creature); // A spawning RO monster's HP, SP and attack delay (status_calc_mob)
     bool CalculateMeleeDamage(Unit* attacker, Unit* victim, CalcDamageInfo* damageInfo); // An auto attack swing between RO combatants
     uint8 BattleWeaponAttack(Unit* src, Unit* target, ROWOWDamage& wdOut); // battle_weapon_attack, a normal attack
     bool HasNormalAttackAmmo(Player* player) const; // Whether a bow or gun has its ammo (true for every other weapon)
-    ROWOWDamage BattleCalcAttack(int32 attackType, Unit* src, Unit* target, uint16 skillID, uint16 skillLevel, int32 flag) const; // battle_calc_attack
-    ROWOWDamage BattleCalcWeaponAttack(Unit* src, Unit* target, uint16 skillID, uint16 skillLevel, int32 wflag) const; // battle_calc_weapon_attack
-    int64 BattleAttrFix(Unit const* src, Unit const* target, int64 damage, int32 atkElement, int32 defElement, int32 defElementLevel, int32 flag) const; // battle_attr_fix
+    // The attacks change the statuses they meet (Kyrie Eleison's hits, Lex Aeterna, Auto Counter), so they aren't const
+    ROWOWDamage BattleCalcAttack(int32 attackType, Unit* src, Unit* target, uint16 skillID, uint16 skillLevel, int32 flag); // battle_calc_attack
+    ROWOWDamage BattleCalcWeaponAttack(Unit* src, Unit* target, uint16 skillID, uint16 skillLevel, int32 wflag); // battle_calc_weapon_attack
+    ROWOWDamage BattleCalcMagicAttack(Unit* src, Unit* target, uint16 skillID, uint16 skillLevel, int32 mflag); // battle_calc_magic_attack
+    ROWOWDamage BattleCalcMiscAttack(Unit* src, Unit* target, uint16 skillID, uint16 skillLevel, int32 mflag); // battle_calc_misc_attack
+    static bool BattleCheckUndead(int32 race, int32 element); // battle_check_undead
+    bool IsSkillUsingArrow(Unit const* src, uint16 skillID) const; // is_skill_using_arrow (sd->state.arrow_atk: a bow or gun's normal attack, or a skill using ammo)
+    int64 BattleAttrFix(Unit* src, Unit* target, int64 damage, int32 atkElement, int32 defElement, int32 defElementLevel, int32 flag); // battle_attr_fix (either unit may be null)
     float GetAutoAttackExtraRange(Player* player, Unit const* victim) const; // How much further than melee range the form's weapon reaches
     static uint32 GetWeaponHitSoundSpellID(uint8 weaponType); // The spell that plays RO's hit sound of a weapon type on its caster
 
@@ -1081,7 +1250,8 @@ public:
     bool PCInsertCard(Player* player, Item* card, Item* equipment); // pc_insert_card
     void SendCardTargetsToClient(Player* player, Item* card); // clif_use_card: the items a card can go into (ROWOWCARDLIST)
     void SendItemCardsToClient(Player* player, ROWOWIdentity& identity, bool isForced); // The cards in the bags' items (ROWOWCARDS)
-    int64 BattleCalcCardFix(Unit* src, Unit* target, int32 rhEle, int32 lhEle, int64 damage, int32 left, int32 flag) const; // battle_calc_cardfix, BF_WEAPON
+    int64 BattleCalcCardFix(int32 attackType, Unit* src, Unit* target, std::bitset<ROWOW_NK_MAX> nk, uint16 skillID, int32 rhEle, int32 lhEle, int64 damage, int32 left,
+        int32 flag) const; // battle_calc_cardfix
     void RunItemScript(Player* player, ROWOWScript const* script, Item const* item); // An EquipScript or UnEquipScript
 
     // Keeps the worn items true to the bags (one sold, moved to the bank or destroyed is no longer worn) and tells the client's RO interface
@@ -1090,6 +1260,270 @@ public:
     void SendEquipmentToClient(Player* player, ROWOWIdentity& identity, bool isForced);
     static bool GetClientItemPosition(Item const* item, uint32& bagOut, uint32& slotOut); // The client's bag (0-4) and slot (from 1)
     static Item* GetItemByClientPosition(Player* player, uint32 bag, uint32 slot);
+
+    // RO skills (ROWOW_Skills.cpp): the port of rAthena's skill tree and skill learning (pc.cpp).  The identity's learned skills are
+    // known as their WoW spells while in the form, granted for the form only (never saved with the character's own spells)
+    void LoadSkillData();
+    void LoadSkillRow(ROWOWDataTable const& skillTable, size_t rowIndex, ROWOWSkill& skill) const; // A skill_db row's values for the engine
+    ROWOWSkill const* GetSkill(uint16 skillID) const;
+    uint16 GetSkillIDByName(std::string const& skillName) const; // 0 for none
+    ROWOWSkillTreeEntry const* GetSkillTreeEntry(uint16 jobID, uint16 skillID) const;
+    int32 PCCheckSkill(ROWOWIdentity const& identity, uint16 skillID) const; // pc_checkskill
+    uint16 SkillTreeGetMax(uint16 skillID, uint16 jobID) const; // skill_tree_get_max
+    uint32 PCCalcSkillPoint(ROWOWIdentity const& identity) const; // pc_calc_skillpoint: the points spent
+    uint16 PCCalcSkillTreeNormalizeJob(ROWOWIdentity const& identity) const; // pc_calc_skilltree_normalize_job: the job whose tree it may use
+    void PCCalcSkillTree(ROWOWIdentity& identity) const; // pc_calc_skilltree
+    bool PCSkillUp(Player* player, uint16 skillID); // pc_skillup
+    void PCSkill(Player* player, uint16 skillID, uint16 level); // pc_skill (ADDSKILL_PERMANENT): a quest NPC or a GM sets a skill's level
+    void PCJobChange(Player* player, uint16 jobID); // pc_jobchange
+    std::vector<uint16> GetSkillTreeJobIDs(uint16 jobID) const; // The jobs whose skills the skill window shows, Novice first
+    int64 GetIdentityVariable(ROWOWIdentity const& identity, std::string const& name) const;
+    void SetIdentityVariable(ROWOWIdentity& identity, std::string const& name, int64 value) const;
+    void RefreshIdentitySkills(Player* player, ROWOWIdentity& identity); // The tree, then the skill spells the form knows
+    void GrantIdentitySkillSpells(Player* player, ROWOWIdentity& identity); // The learned skills' spells while in the form, none otherwise
+    bool IsIdentitySkillSpell(Player* player, uint32 spellID) const; // A spell of a skill the form knows
+    void SendSkillsToClient(Player* player, ROWOWIdentity& identity, bool isForced); // The skill window's tree (ROWOWSKILLS)
+
+    // The RO skill engine (ROWOW_SkillEngine.cpp): the port of rAthena's skill use (skill.cpp, and unit.cpp's casting).  An RO skill level is
+    // a WoW spell that only shows the cast; ROWOW_SkillSpellScript hands it here: the cast conditions and costs, the cast time and after-cast
+    // delay, the castend dispatch to the skill's ROWOWSkillImpl (one class per skill, registered by job), skill_attack with its delivery and
+    // knockback, area searches in RO cells and healing.  Any RO combatant casts through it (a player in the form or an RO monster); it runs
+    // in the map thread the caster and its targets share, and only reads the skill data loaded at startup
+    void RegisterSkillImpl(ROWOWSkillImpl* impl); // Takes it over (startup only)
+    ROWOWSkillImpl const* GetSkillImpl(uint16 skillID) const;
+    bool GetSkillOfSpell(uint32 spellID, uint16& skillIDOut, uint16& skillLevelOut) const; // The skill and level of an RO skill spell
+    uint32 GetSkillSpellID(uint16 skillID, uint16 skillLevel) const; // 0 when the level has no spell
+    static uint64 GetTick(); // gettick: game time in ms
+    ROWOWSkillUnitData* GetSkillUnitData(Unit* unit) const; // unit_bl2ud
+    void GetUnitCell(Unit const* unit, int32& xOut, int32& yOut) const; // The RO cell a unit stands on
+    void GetWorldCell(uint32 mapID, float worldX, float worldY, int32& xOut, int32& yOut) const;
+    int32 DistanceBL(Unit const* src, Unit const* target) const; // distance_bl, in cells
+    int32 DistanceMathBL(Unit const* src, Unit const* target) const; // distance_math_bl, in cells
+    int32 SkillGetRange2(Unit const* unit, uint16 skillID, uint16 skillLevel, bool isServer) const; // skill_get_range2
+    uint8 SkillGetCastType(uint16 skillID) const; // skill_get_casttype
+    int32 BattleCheckTarget(Unit const* src, Unit const* target, int32 flag) const; // battle_check_target
+    bool StatusCheckSkillUse(Unit const* src, Unit const* target, uint16 skillID, int32 flag) const; // status_check_skilluse
+    int32 MapForEachInArea(Unit* origin, int32 x0, int32 y0, int32 x1, int32 y1, std::function<int32(Unit*)> const& func) const; // map_foreachinarea (BL_CHAR)
+    int32 MapForEachInRange(Unit* center, int32 range, std::function<int32(Unit*)> const& func) const; // map_foreachinallrange (BL_CHAR)
+    int32 MapForEachInDir(Unit* origin, int32 x0, int32 y0, int32 x1, int32 y1, int32 range, int32 length, int32 offset,
+        std::function<int32(Unit*)> const& func) const; // map_foreachindir (BL_CHAR): a path of cells from x0,y0 toward x1,y1
+    int32 SkillAreaSub(Unit* bl, Unit* src, uint16 skillID, uint16 skillLevel, uint64 tick, int32 flag, ROWOWSkillAreaFunc func); // skill_area_sub
+    int32 PartyForEachSameMap(Player* sd, int32 range, std::function<int32(Unit*)> const& func) const; // party_foreachsamemap (ROWOW_Skills.cpp)
+    bool PCCheckWeaponType(Unit const* unit, uint32 weapons) const; // pc_check_weapontype: whether the player holds one of the weapon types
+    ROWOWSkillCondition SkillGetRequirement(Player* sd, uint16 skillID, uint16 skillLevel) const; // skill_get_requirement
+    bool SkillCheckConditionCastBegin(Player* sd, uint16 skillID, uint16 skillLevel); // skill_check_condition_castbegin
+    bool SkillCheckConditionCastEnd(Player* sd, uint16 skillID, uint16 skillLevel); // skill_check_condition_castend
+    void SkillConsumeRequirement(Player* sd, uint16 skillID, uint16 skillLevel, int16 type); // skill_consume_requirement
+    int32 SkillCastFix(Unit* bl, uint16 skillID, uint16 skillLevel, bool isCastBegin = false); // skill_castfix (isCastBegin: the cast starts, Foresight counts it)
+    int32 SkillCastFixSC(Unit* bl, double time, uint8 flag); // skill_castfix_sc
+    int32 SkillDelayFix(Unit* bl, uint16 skillID, uint16 skillLevel) const; // skill_delayfix
+    int32 SkillCastendDamageID(Unit* src, Unit* bl, uint16 skillID, uint16 skillLevel, uint64 tick, int32 flag); // skill_castend_damage_id
+    int32 SkillCastendNoDamageID(Unit* src, Unit* bl, uint16 skillID, uint16 skillLevel, uint64 tick, int32 flag); // skill_castend_nodamage_id
+    int32 SkillCastendPos2(Unit* src, int32 x, int32 y, uint16 skillID, uint16 skillLevel, uint64 tick, int32 flag); // skill_castend_pos2
+    int64 SkillAttack(int32 attackType, Unit* src, Unit* dsrc, Unit* bl, uint16 skillID, uint16 skillLevel, uint64 tick, int32 flag,
+        ROWOWSkillUnit const* dsrcUnit = nullptr); // skill_attack (dsrcUnit: a ground skill's unit is the damage's source, dsrc being its caster)
+    void SkillAttackBlow(Unit* src, Unit* dsrc, Unit* target, uint8 blewcount, uint16 skillID, uint16 skillLevel, int64 damage, uint64 tick, int32 flag,
+        ROWOWSkillUnit const* dsrcUnit = nullptr); // skill_attack_blow
+    int32 SkillBlown(Unit* src, Unit* target, int32 count, int8 dir, int32 flag, ROWOWSkillUnit const* srcUnit = nullptr); // skill_blown, in RO cells (from a unit's cell)
+    bool UnitMovePos(Unit* bl, int32 x, int32 y); // skill_check_unit_movepos and unit_movepos: the unit slides onto an RO cell at once
+    void BattleConsumeAmmo(Player* sd, uint16 skillID, uint16 skillLevel); // battle_consume_ammo: a normal attack's or skill's ammo
+    int32 SkillAdditionalEffect(Unit* src, Unit* bl, uint16 skillID, uint16 skillLevel, int32 attackType, uint8 dmgLv, uint64 tick); // skill_additional_effect
+    int32 SkillCounterAdditionalEffect(Unit* src, Unit* bl, uint16 skillID, uint16 skillLevel, int32 attackType, uint64 tick); // skill_counter_additional_effect
+    int32 SkillCalcHeal(Unit* src, Unit* target, uint16 skillID, uint16 skillLevel, bool heal) const; // skill_calc_heal
+    int64 StatusHeal(Unit* bl, int64 hp, int64 sp, int32 flag, Unit* src, uint32 spellID); // status_heal, shown as the spell's heal
+    void BattleDelayDamage(uint64 tick, int32 amotion, Unit* src, Unit* target, int32 attackType, uint16 skillID, uint16 skillLevel, int64 damage, uint8 dmgLv,
+        int16 div, bool additionalEffects, bool isCritical); // battle_delay_damage
+    void BattleDamage(Unit* src, Unit* target, int64 damage, int16 div, uint16 skillLevel, uint16 skillID, uint8 dmgLv, int32 attackType, bool additionalEffects,
+        uint64 tick, bool isCritical); // battle_damage
+    void ClifSkillFail(Player* sd, uint16 skillID, int32 cause, int32 btype = 0, uint32 itemID = 0) const; // clif_skill_fail: RO's message
+    bool BattleCheckComa(Unit const* src, Unit const* target, int32 attackType) const; // battle_check_coma: the coma bonuses' chance
+    void UnitSetAttackDelay(Unit* unit, uint64 tick, bool isCastBegin); // unit_set_attackdelay, for a normal attack or a cast's start
+
+    // The cast as ROWOW_SkillSpellScript drives it: unit_skilluse_id2/unit_skilluse_pos2 when it starts (the cast time comes from the core's
+    // cast time hook), then skill_castend_id/skill_castend_pos when it ends.  Damage taken stops it (unit_skillcastcancel)
+    SpellCastResult UnitSkillUse(Unit* src, Unit* target, WorldLocation const* dest, uint16 skillID, uint16 skillLevel);
+    int32 UnitSkillCastTime(Unit* src, Unit* target, uint16 skillID, uint16 skillLevel); // The cast time, and the delays set at cast begin
+    SpellCastResult SkillCastEndCheck(Unit* src, Unit* target, WorldLocation const* dest, uint16 skillID, uint16 skillLevel);
+    void SkillCastEnd(Unit* src, Unit* target, WorldLocation const* dest, uint16 skillID, uint16 skillLevel);
+    void UnitSkillCastCancel(Unit* bl, int32 type); // unit_skillcastcancel
+    void SendSkillDelayToClient(Unit* unit, uint16 skillID) const; // The after-cast delay and the skill's cooldown, on the action bars
+
+    // Ground skill units (ROWOW_SkillUnit.cpp): the port of rAthena's skill units (skill.cpp's skill_unitsetting, skill_initunitgroup,
+    // skill_initunit, skill_delunit, skill_delunitgroup, skill_unit_onplace, skill_unit_onplace_timer, skill_unit_onout, skill_unit_onleft,
+    // skill_unit_effect, skill_unit_timer and skill_unit_move).  A map's unit groups live on the map; skill_unit_timer runs from the map's
+    // update every 100 ms, and skill_unit_move from each RO combatant's update when its cell changes.  A unit shows on the ground as a
+    // dynamic object of the skill's unit spell (each cell, or one over the group)
+    std::vector<ROWOWSkillUnitLayout> SkillUnitLayouts; // skill_unit_layout: the square layouts, then the skills' own (startup)
+    int32 FirewallUnitPos = 0; // firewall_unit_pos and icewall_unit_pos: their 8 layouts by direction
+    int32 IcewallUnitPos = 0;
+    void LoadSkillUnitData(); // skill_init_unit_layout and the units' spells (after LoadSkillData)
+    ROWOWMapSkillUnits* GetMapSkillUnits(Map* map, bool isCreated) const;
+    std::shared_ptr<ROWOWSkillUnitGroup> SkillID2Group(Map* map, int32 groupID) const; // skill_id2group, on the map
+    ROWOWSkillUnitLayout const* SkillGetUnitLayout(uint16 skillID, uint16 skillLevel, Unit const* src, int32 x, int32 y) const; // skill_get_unit_layout
+    int32 SkillGetUnitLayoutType(uint16 skillID, uint16 skillLevel) const; // skill_get_unit_layout_type
+    std::shared_ptr<ROWOWSkillUnitGroup> SkillUnitSetting(Unit* src, uint16 skillID, uint16 skillLevel, int32 x, int32 y, int32 flag); // skill_unitsetting
+    std::shared_ptr<ROWOWSkillUnitGroup> SkillInitUnitGroup(Unit* src, int32 count, uint16 skillID, uint16 skillLevel, uint16 unitID, int64 limit,
+        int32 interval); // skill_initunitgroup
+    ROWOWSkillUnit* SkillInitUnit(Unit* src, ROWOWSkillUnitGroup& group, int32 index, int32 x, int32 y, int32 val1, int32 val2, bool hidden, int32 range,
+        int64 limit); // skill_initunit
+    void SkillDelUnit(Map* map, ROWOWSkillUnitGroup& group, int32 index); // skill_delunit
+    void SkillDelUnitGroup(Map* map, std::shared_ptr<ROWOWSkillUnitGroup> group); // skill_delunitgroup
+    void SkillClearUnitGroup(Unit* src); // skill_clear_unitgroup
+    ROWOWSkillUnitGroupTickset* SkillUnitGroupTicksetSearch(Unit* bl, ROWOWSkillUnitGroup const& group, uint64 tick); // skill_unitgrouptickset_search
+    int32 SkillUnitOnPlace(Map* map, ROWOWSkillUnitGroup& group, int32 index, Unit* bl, uint64 tick); // skill_unit_onplace
+    int32 SkillUnitOnPlaceTimer(Map* map, ROWOWSkillUnitGroup& group, int32 index, Unit* bl, uint64 tick); // skill_unit_onplace_timer
+    int32 SkillUnitOnOut(ROWOWSkillUnitGroup& group, int32 index, Unit* bl, uint64 tick); // skill_unit_onout
+    int32 SkillUnitOnLeft(uint16 skillID, Unit* bl, uint64 tick); // skill_unit_onleft
+    void SkillUnitEffect(Map* map, Unit* bl, ROWOWSkillUnitGroup& group, int32 index, uint64 tick, int32 flag); // skill_unit_effect
+    void SkillUnitTimer(Map* map, uint32 diff); // skill_unit_timer, from the map's update
+    void SkillUnitMove(Unit* bl, uint64 tick, int32 flag, int32 cellX, int32 cellY, std::vector<uint16>& skillUnitCell); // skill_unit_move, at a cell of the unit's map
+    void UpdateSkillUnitMove(Unit* unit); // skill_unit_move as the unit's cell changes, from its update
+    int32 BattleCheckTargetSkillUnit(ROWOWSkillUnitGroup const& group, Map* map, Unit const* target, int32 flag) const; // battle_check_target from a skill unit
+    int32 SkillCheckUnitRange(Unit* bl, int32 x, int32 y, uint16 skillID, uint16 skillLevel); // skill_check_unit_range
+    int32 SkillCheckUnitRange2(Unit* bl, int32 x, int32 y, uint16 skillID, uint16 skillLevel); // skill_check_unit_range2 (UF_NOFOOTSET)
+    bool SkillPosMaxcountCheck(Unit* src, int32 x, int32 y, uint16 skillID, uint16 skillLevel, bool displayFailure); // skill_pos_maxcount_check
+    int32 SkillCellOverlap(Map* map, ROWOWSkillUnitGroup& group, int32 index, uint16 skillID, int32& alive); // skill_cell_overlap
+    int32 MapForEachSkillUnitInArea(Map* map, int32 x0, int32 y0, int32 x1, int32 y1, std::function<int32(ROWOWSkillUnitGroup&, int32)> const& func); // map_foreachinallarea (BL_SKILL)
+    int32 MapForEachInCellArea(Map* map, uint32 phaseMask, int32 x0, int32 y0, int32 x1, int32 y1, std::function<int32(Unit*)> const& func) const; // map_foreachinallarea (BL_CHAR), by cells
+    bool GetCellWorldPosition(uint32 mapID, int32 cellX, int32 cellY, float& xOut, float& yOut) const; // An RO cell's middle in WoW's coordinates
+    static uint8 UnitGetDir(Unit const* unit); // unit_getdir: the RO direction a unit faces
+
+    // The cart (ROWOW_Cart.cpp): the port of rAthena's cart (pc.cpp's pc_setcart, pc_cart_additem, pc_cart_delitem, pc_putitemtocart,
+    // pc_getitemfromcart, status_calc_cart_weight), the Pushcart skill's status (SC_PUSH_CART) and the cart window (ROWOWCART).  Its items
+    // are kept as their templates and enchantments in mod_rowow_identity_cart, and only touched in the player's own thread
+    bool PCIsCartOn(Unit const* unit) const; // pc_iscarton
+    bool PCSetCart(Player* player, int32 type); // pc_setcart
+    void StatusCalcCartWeight(Player* player, ROWOWIdentity& identity) const; // status_calc_cart_weight
+    int32 PCCartAddItem(Player* player, ROWOWIdentity& identity, ROWOWCartItem const& item, int32 amount); // pc_cart_additem (e_additem_result)
+    void PCCartDelItem(Player* player, ROWOWIdentity& identity, int32 slot, int32 amount); // pc_cart_delitem
+    void PCPutItemToCart(Player* player, Item* item, int32 amount); // pc_putitemtocart
+    bool PCGetItemFromCart(Player* player, int32 slot, int32 amount); // pc_getitemfromcart
+    void SendCartToClient(Player* player, ROWOWIdentity& identity, bool isForced); // clif_cartlist and SP_CARTINFO (ROWOWCART)
+    void LoadIdentityCart(Player* player, ROWOWIdentity& identity) const;
+    void SaveIdentityCart(Player* player, ROWOWIdentity& identity, CharacterDatabaseTransaction trans) const;
+
+    // Vending (ROWOW_Vending.cpp): the port of rAthena's vending.cpp: a Merchant opens a shop of its cart's items (vending_openvending),
+    // others list it (vending_vendinglistreq) and buy from it (vending_purchasereq), and it closes (vending_closevending).  The buyer and
+    // the vendor are on the same map; everything runs in that map's thread
+    void VendingOpenVendingReq(Player* player, uint8 skillLevel); // clif_openvendingreq (ROWOWVENDREQ)
+    bool VendingOpenVending(Player* player, std::string const& title, std::vector<ROWOWVendingItem> const& items); // vending_openvending
+    void VendingCloseVending(Player* player); // vending_closevending
+    void VendingVendingListReq(Player* player, Player* vendor); // vending_vendinglistreq (ROWOWVENDLIST)
+    void VendingPurchaseReq(Player* player, Player* vendor, std::vector<std::pair<uint16, uint32>> const& purchases); // vending_purchasereq (index, amount)
+
+    // Warp Portal memo points and the warp point menu (ROWOW_Warp.cpp): pc_memo, clif_skill_warppoint (ROWOWWARP) and skill_castend_map
+    bool PCMemo(Player* player, int32 pos); // pc_memo
+    void ClifSkillWarpPoint(Player* player, uint16 skillID, uint16 skillLevel, std::vector<uint32> const& mapIDs); // clif_skill_warppoint
+    void SkillCastendMap(Player* player, uint16 skillID, std::string const& mapName); // skill_castend_map
+    void LoadIdentityMemo(Player* player, ROWOWIdentity& identity) const;
+    void SaveIdentityMemo(Player* player, ROWOWIdentity& identity, CharacterDatabaseTransaction trans) const;
+
+    // Stealing (pc.cpp's pc_steal_item)
+    bool PCStealItem(Player* player, Unit* bl, uint16 skillLevel); // pc_steal_item
+
+    // Making items with skills (skill.cpp's skill_produce_mix for Holy Water, and Arrow Crafting's skill_arrow_create with its list, ROWOWARROW)
+    bool SkillProduceMix(Player* player, uint16 skillID, uint32 nameID, int32 qty); // skill_produce_mix (the parts the first jobs use)
+    void ClifArrowCreateList(Player* player); // clif_arrow_create_list
+    bool SkillArrowCreate(Player* player, uint32 nameID); // skill_arrow_create
+
+    // Autospells and autobonuses (ROWOW_AutoSpell.cpp): the items' bAutoSpell, bAutoSpellWhenHit and bAutoSpellOnSkill bonuses (the
+    // autospell parts of skill_additional_effect, skill_counter_additional_effect and skill_onskillusage) and autobonus/autobonus2/
+    // autobonus3 (pc_addautobonus, pc_exeautobonus, pc_endautobonus): an item's script run for a while, compiled at startup
+    void SkillAutoSpellAdditionalEffect(Unit* src, Unit* bl, uint16 skillID, int32 attackType, uint64 tick); // skill_additional_effect's autospells
+    void SkillAutoSpellCounterAdditionalEffect(Unit* src, Unit* bl, uint16 skillID, int32 attackType, uint64 tick); // skill_counter_additional_effect's
+    void SkillOnSkillUsage(Player* player, Unit* bl, uint16 skillID, uint64 tick); // skill_onskillusage
+    bool SkillAutoCast(Unit* src, Unit* target, uint16 skillID, uint16 skillLevel, uint64 tick); // An autospell's cast: the castend with no SP cost
+    void PCExeAutoBonus(Player* player, ROWOWAutoBonus const& autoBonus); // pc_exeautobonus
+    void UpdateAutoBonuses(Player* player); // pc_endautobonus as the bonuses run out, from the player's update
+    void StatusCalcPCAutoBonuses(Player* player, ROWOWIdentity const& identity, ROWOWStatus& status) const; // The running autobonuses' scripts
+    std::shared_ptr<ROWOWScript> GetAutoBonusScript(std::string const& text) const; // An autobonus's script, compiled at startup
+    std::set<std::string> AutoBonusScriptTexts; // The autobonus scripts the item scripts name (script_add_autobonus), compiled once at startup
+    std::unordered_map<std::string, std::shared_ptr<ROWOWScript>> AutoBonusScriptsByText;
+
+    // Equipment breaking (skill_break_equip, and the bBreakWeaponRate/bBreakArmorRate parts of skill_additional_effect)
+    int32 SkillBreakEquip(Unit* src, Unit* bl, uint32 where, int32 rate, int32 flag); // skill_break_equip (rate in 1/10000)
+
+    // pc_setinvincibletimer and pc_delinvincibletimer: after arriving on a map or reviving, no monster or skill targets the player until it
+    // runs out, it moves or it acts
+    void PCSetInvincibleTimer(Player* player);
+    void PCDelInvincibleTimer(Player* player);
+    void UpdateInvincibleTimer(Player* player);
+    bool PCIsInvincible(Unit const* unit) const;
+
+    // Riding a Peco (pc_isriding, pc_setriding): a Knight's or Crusader's option, kept with the identity.  Its status reads it (speed, ASPD
+    // with Cavalier Mastery, the spear's size modifier), as do Spear Mastery and the skills that need it (ST_RIDING, ST_PECO)
+    bool PCIsRiding(Unit const* unit) const; // pc_isriding
+    void PCSetRiding(Player* player, bool isRiding); // pc_setriding, with pc_setoption's status calculation
+
+    // Devotion (the Crusader's sd->devotion and the devoted unit's SC_DEVOTION): the Crusader keeps a slot per devoted player, the devoted
+    // player's status names the Crusader and the slot.  Both are on one map whenever either reads the other; a slot whose player no longer
+    // names it is free (rAthena clears it from status_change_end, which here may run where the Crusader's map isn't)
+    Player* GetDevotionSource(Unit const* bl, bool isRangeChecked) const; // The devoting Crusader on the unit's map whose slot names it (and in reach)
+    Player* GetDevotedPlayer(Player* sd, int32 slot); // The player a slot devotes the Crusader to, on its map, or null (and the slot is let go)
+    int32 PCDevotionSlot(Player* sd, ObjectGuid targetGUID, int32 count); // unit_skilluse_id2's slot search: the target's own, else a free one, -1
+    void PCDelDevotions(Player* sd); // pc_dead's: every devotion of the Crusader ends
+    Unit* BattleCheckDevotion(Unit* bl) const; // battle_check_devotion: the Crusader who takes reflected damage (devotion_rdamage), or null
+    void BattleFixDamage(Unit* src, Unit* target, int64 damage, uint16 skillID); // battle_fix_damage: the damage alone, shown on the target
+
+    // Merchant prices (pc_modifybuyvalue, pc_modifysellvalue)
+    int32 PCModifyBuyValue(Player const* player, int32 origValue) const;
+    int32 PCModifySellValue(Player const* player, int32 origValue) const;
+
+    // The skill bonuses of worn items (pc_skillatk_bonus, pc_skillheal_bonus...), kept as deferred bonuses by name (bSkillAtk,...)
+    int32 GetDeferredBonus(Unit const* unit, char const* type) const; // The sum of a one-value bonus (bDelayRate), 0 for a monster
+    int32 GetDeferredBonus2(Unit const* unit, char const* type, int64 key) const; // The sum of a bonus2's value for one key (a skill, a race...)
+    bool HasDeferredBonusKey(Unit const* unit, char const* type, int64 key) const; // Whether a bonus names the key (bIgnoreMdefRace,RC_Demon)
+
+    // RO status changes (ROWOW_StatusChange.cpp): the port of rAthena's status changes (status.cpp): status_change_start with its
+    // resistances, status_change_end, status_change_timer, the states that stop a unit (through WoW's root, silence and pacify), and the
+    // client's icons (a marker aura per status).  A unit's statuses live on the unit and are only touched in its map's thread
+    void LoadStatusChangeData();
+    ROWOWStatusChangeDB const* GetStatusChangeDB(int32 type) const; // status_db.find
+    uint16 StatusDBGetSkill(int32 type) const; // status_db.getSkill: the skill whose durations a status takes
+    ROWOWStatusChange* GetStatusChange(Unit* unit) const; // status_get_sc, null when the unit has none
+    ROWOWStatusChange const* GetStatusChange(Unit const* unit) const;
+    ROWOWStatusChangeEntry const* GetSCE(Unit const* unit, int32 type) const; // The unit's status of that type, or null
+    bool StatusChangeStart(Unit* src, Unit* bl, int32 type, int32 rate, int32 val1, int32 val2, int32 val3, int32 val4, int64 duration, uint8 flag,
+        int32 delay = 0); // status_change_start
+    bool SCStart(Unit* src, Unit* bl, int32 type, int32 rate, int32 val1, int64 duration, int32 delay = 0) { return StatusChangeStart(src, bl, type, 100 * rate, val1, 0, 0, 0, duration, ROWOW_SCSTART_NONE, delay); } // sc_start
+    bool SCStart2(Unit* src, Unit* bl, int32 type, int32 rate, int32 val1, int32 val2, int64 duration, int32 delay = 0) { return StatusChangeStart(src, bl, type, 100 * rate, val1, val2, 0, 0, duration, ROWOW_SCSTART_NONE, delay); }
+    bool SCStart4(Unit* src, Unit* bl, int32 type, int32 rate, int32 val1, int32 val2, int32 val3, int32 val4, int64 duration, int32 delay = 0) { return StatusChangeStart(src, bl, type, 100 * rate, val1, val2, val3, val4, duration, ROWOW_SCSTART_NONE, delay); }
+    bool StatusChangeEnd(Unit* bl, int32 type, bool isTimer = false); // status_change_end (tid != INVALID_TIMER when isTimer)
+    int32 StatusChangeClear(Unit* bl, int32 type); // status_change_clear: 0 on death, 1 leaving (logout)
+    int64 StatusGetSCDef(Unit const* src, Unit const* bl, int32 type, int32 rate, int64 tick, uint8 flag) const; // status_get_sc_def
+    int32 StatusIsImmune(Unit const* bl) const; // status_isimmune (Golden Thief Bug's magic immunity)
+    bool StatusIsEndure(Unit const* bl) const; // status_isendure
+    void UpdateStatusChanges(Unit* unit); // The unit's own status_change_timer runs, from its update
+    void StatusDamaged(Unit* attacker, Unit* target, uint32 damage); // status_damage's statuses: what being hit ends (sleep, freeze, stone)
+    bool StatusCheckVisibility(Unit const* src, Unit const* target) const; // status_check_visibility (hiding, cloaking)
+    void SendStatusChangesToClient(Unit* unit); // The marker auras for every status (after a form change or a respawn)
+    void StatusChangeTimerSub(Unit* bl, Unit* src, ROWOWStatusChangeEntry const* sce, int32 type, uint64 tick); // status_change_timer_sub
+
+    // The status calculation of statuses (ROWOW_StatusCalc.cpp): status_calc_bl_ and status_calc_bl_main with the status_calc_* of each
+    // value, the hp and sp bonuses of statuses, regen rates and the WoW speed that follows the RO walk speed
+    void StatusCalcBL(Unit* unit, std::bitset<ROWOW_SCB_MAX> flag); // status_calc_bl_: works the unit's status out again and updates it
+    void StatusCalcBLMain(Unit const* unit, ROWOWStatus const& baseStatus, ROWOWStatusChange const* sc, ROWOWStatus& status) const; // status_calc_bl_main (SCB_ALL)
+    int32 StatusGetHPBonus(ROWOWStatusChange const* sc, int32 type) const; // status_get_hpbonus
+    int32 StatusGetSPBonus(ROWOWStatusChange const* sc, int32 type) const; // status_get_spbonus
+    void StatusCalcRegenRate(ROWOWStatusChange const* sc, ROWOWStatus& status) const; // status_calc_regen_rate
+    void ApplyROSpeed(Unit* unit, uint8 moveType, float& speed) const; // The unit's RO walk speed on its WoW speed (OnUnitUpdateSpeed)
+    static int32 StatusCalcAttackElement(ROWOWStatusChange const* sc, int32 element); // status_calc_attack_element (status_get_attack_sc_element with 0)
+    ROWOWStatus const* GetROBaseStatus(Unit const* unit) const; // status_get_base_status: a player's base status, a monster's mob_db one
+    int64 SkillGetTime(uint16 skillID, uint16 skillLevel) const; // skill_get_time: a skill level's Duration1
+    int64 SkillGetTime2(uint16 skillID, uint16 skillLevel) const; // skill_get_time2: its Duration2
+    bool SkillCheckCloaking(Unit* bl, ROWOWStatusChangeEntry* sce = nullptr); // skill_check_cloaking: whether a wall is next to the unit
+    bool IsCellNoPass(Unit const* unit, ROWOWMapGrid const& mapGrid, int32 cellX, int32 cellY) const; // map_getcell(CELL_CHKNOPASS), near the unit
+    bool MapRandomDir(Unit const* bl, int32& x, int32& y) const; // map_random_dir (Confusion's walk), in RO cells
+    void StatusZap(Unit* bl, uint32 hp, uint32 sp); // status_zap
+    bool StatusCharge(Unit* bl, int64 hp, int64 sp); // status_charge
+
+    // The statuses of the identity while out of the form and in the character database (sc_data): kept on leaving the RO world (RO's
+    // logout), and started again on entering it (as on login)
+    void StoreIdentityStatusChanges(Player* player, ROWOWIdentity& identity);
+    void SaveIdentityStatusChanges(Player* player, ROWOWIdentity& identity, CharacterDatabaseTransaction trans);
+    void LeaveStatusChanges(Player* player, ROWOWIdentity& identity);
+    void RestoreStatusChanges(Player* player, ROWOWIdentity& identity);
+    void StatusChangeClearOnChangeMap(Unit* bl); // status_change_clear_onChangeMap
 
     // The creature template's values, or null if it has none (a melee creature with no attack visual)
     ROWOWCreatureTemplate const* GetCreatureTemplate(uint32 creatureEntry) const;
@@ -1104,30 +1538,57 @@ public:
     bool BuildGroundContouredPath(Creature* creature, float targetX, float targetY, float stopShortDistance, Movement::PointsArray& pathNodesOut);
 
 private:
+    // The rest of the status change port (ROWOW_StatusChange.cpp)
+    bool StatusChangeStartPostDelay(Unit* src, Unit* bl, int32 type, int32 val1, int32 val2, int32 val3, int32 val4, int32 tick, uint8 flag); // status_change_start_post_delay
+    bool StatusChangeStartValues(Unit* src, Unit* bl, int32 type, int32& val1, int32& val2, int32& val3, int32& val4, int32& tick, int32& tickTime,
+        uint8 flag); // status_change_start_post_delay's switch of each status's values
+    void StatusChangeClearBuffs(Unit* bl, uint8 type); // status_change_clear_buffs
+    void StatusChangeStartDevoted(Unit* src, Player* sd, int32 type, int32 val1, int32 val2, int32 val3, int32 val4, int64 tick, uint8 flag); // A Crusader's status passed on to its devoted
+    void StatusChangeTimer(Unit* bl, int32 type, uint64 tick); // status_change_timer
+    void StatusCalcState(Unit* bl, ROWOWStatusChange& sc, ROWOWStatusChangeDB const& scdb, bool start); // status_calc_state
+    void UpdateStatusChangeOptions(Unit* bl, ROWOWStatusChange& sc); // The states and options of the statuses on the unit, through WoW
+    void ShowStatusChangeIcon(Unit* bl, ROWOWStatusChangeDB const& scdb, ROWOWStatusChangeEntry const& sce); // clif_status_change (on)
+    void HideStatusChangeIcon(Unit* bl, ROWOWStatusChangeDB const& scdb); // clif_status_change (off)
+    void StatusChangeSaveNeeded(Player* player);
+
     // The rest of the RO battle port (ROWOW_Battle.cpp), with rAthena's function names
     ROWOWDamage InitializeWeaponData(Unit const* src, Unit const* target, uint16 skillID, uint16 skillLevel, int32 wflag) const; // initialize_weapon_data
-    bool IsAttackCritical(ROWOWDamage& wd, Unit* src, Unit const* target, uint16 skillID, uint16 skillLevel, bool firstCall) const; // is_attack_critical
-    bool IsAttackHitting(ROWOWDamage& wd, Unit* src, Unit* target, uint16 skillID, uint16 skillLevel, bool firstCall) const; // is_attack_hitting
-    bool AttackIgnoresDef(ROWOWDamage& wd, Unit* src, Unit const* target, uint16 skillID, uint16 skillLevel, bool isRightHand) const; // attack_ignores_def
-    int32 IsAttackPiercing(ROWOWDamage& wd, Unit* src, Unit const* target, uint16 skillID, uint16 skillLevel, bool isRightHand) const; // is_attack_piercing
+    bool IsAttackCritical(ROWOWDamage& wd, Unit* src, Unit const* target, uint16 skillID, uint16 skillLevel, bool firstCall); // is_attack_critical (ends Auto Counter)
+    bool IsAttackHitting(ROWOWDamage& wd, Unit* src, Unit* target, uint16 skillID, uint16 skillLevel, bool firstCall); // is_attack_hitting
+    bool AttackIgnoresDef(ROWOWDamage& wd, Unit* src, Unit const* target, uint16 skillID, uint16 skillLevel, bool isRightHand); // attack_ignores_def
+    int32 IsAttackPiercing(ROWOWDamage& wd, Unit* src, Unit const* target, uint16 skillID, uint16 skillLevel, bool isRightHand); // is_attack_piercing
     bool IsInfiniteDefense(Unit const* target, int32 flag) const; // is_infinite_defense
-    bool IsSkillUsingArrow(Unit const* src, uint16 skillID) const; // is_skill_using_arrow
     bool IsAttackRightHanded(Unit const* src, uint16 skillID) const; // is_attack_right_handed
     bool IsAttackLeftHanded(Unit const* src, uint16 skillID) const; // is_attack_left_handed
-    int32 BattleGetWeaponElement(ROWOWDamage const& wd, Unit const* src, Unit const* target, uint16 skillID, uint16 skillLevel, bool isRightHand) const; // battle_get_weapon_element
+    int32 BattleGetWeaponElement(ROWOWDamage const& wd, Unit const* src, Unit const* target, uint16 skillID, uint16 skillLevel, bool isRightHand,
+        bool isCalcForDamageOnly) const; // battle_get_weapon_element
     void BattleCalcMultiAttack(ROWOWDamage& wd, Unit* src, Unit* target, uint16 skillID, uint16 skillLevel) const; // battle_calc_multi_attack
-    void BattleCalcSkillBaseDamage(ROWOWDamage& wd, Unit* src, Unit* target, uint16 skillID, uint16 skillLevel) const; // battle_calc_skill_base_damage
+    void BattleCalcSkillBaseDamage(ROWOWDamage& wd, Unit* src, Unit* target, uint16 skillID, uint16 skillLevel); // battle_calc_skill_base_damage
     int64 BattleCalcBaseDamage(Unit const* src, ROWOWStatus const& status, bool isLeftHand, uint8 targetSize, int32 flag) const; // battle_calc_base_damage
-    void BattleCalcDefenseReduction(ROWOWDamage& wd, Unit* src, Unit* target, uint16 skillID, uint16 skillLevel) const; // battle_calc_defense_reduction
+    void BattleCalcDefenseReduction(ROWOWDamage& wd, Unit* src, Unit* target, uint16 skillID, uint16 skillLevel); // battle_calc_defense_reduction
     void BattleCalcAttackPostDefense(ROWOWDamage& wd, Unit* src, Unit* target, uint16 skillID, uint16 skillLevel) const; // battle_calc_attack_post_defense
     void BattleCalcAttackMasteries(ROWOWDamage& wd, Unit* src, Unit* target, uint16 skillID, uint16 skillLevel) const; // battle_calc_attack_masteries
     int64 BattleAddMastery(Unit const* src, Unit const* target, int64 damage, bool isLeftHand) const; // battle_addmastery
-    void BattleCalcElementDamage(ROWOWDamage& wd, Unit* src, Unit* target, uint16 skillID, uint16 skillLevel) const; // battle_calc_element_damage
-    void BattleCalcAttackPlant(ROWOWDamage& wd, Unit* src, Unit* target, uint16 skillID, uint16 skillLevel) const; // battle_calc_attack_plant
+    void BattleCalcElementDamage(ROWOWDamage& wd, Unit* src, Unit* target, uint16 skillID, uint16 skillLevel); // battle_calc_element_damage
+    void BattleCalcAttackPlant(ROWOWDamage& wd, Unit* src, Unit* target, uint16 skillID, uint16 skillLevel); // battle_calc_attack_plant
     void BattleApplyDivFix(ROWOWDamage& wd, uint16 skillID) const; // battle_apply_div_fix
     void BattleCalcAttackLeftRightHands(ROWOWDamage& wd, Unit* src, Unit* target, uint16 skillID, uint16 skillLevel) const; // battle_calc_attack_left_right_hands
-    int64 BattleCalcDamage(Unit* src, Unit* target, ROWOWDamage const& d, int64 damage, uint16 skillID, uint16 skillLevel) const; // battle_calc_damage
+    int64 BattleCalcDamage(Unit* src, Unit* target, ROWOWDamage& d, int64 damage, uint16 skillID, uint16 skillLevel); // battle_calc_damage
+    bool BattleStatusBlockDamage(Unit* src, Unit* target, ROWOWStatusChange* sc, ROWOWDamage& d, int64& damage, uint16 skillID, uint16 skillLevel); // battle_status_block_damage
+    void BattleCalcWeaponFinalAtkModifiers(ROWOWDamage& wd, Unit* src, Unit* target, uint16 skillID, uint16 skillLevel); // battle_calc_weapon_final_atk_modifiers
+    int64 BattleCalcReturnDamage(Unit* tbl, Unit* src, int64 damage, int32 flag, uint16 skillID, bool isStatusReflect) const; // battle_calc_return_damage
+    void BattleDoReflect(int32 attackType, ROWOWDamage& wd, Unit* src, Unit* target, uint16 skillID, uint16 skillLevel); // battle_do_reflect
+    int32 BattleGetAtkPercent(Unit const* bl, uint16 skillID, ROWOWStatusChange const& sc) const; // battle_get_atkpercent
+    void BattleAttackSCBonus(ROWOWDamage& wd, Unit* src, Unit* target, uint16 skillID, uint16 skillLevel) const; // battle_attack_sc_bonus
     void BattleMinDamage(ROWOWDamage& wd, Unit const* src, uint16 skillID, int64 minimum) const; // battle_min_damage
+    int32 BattleRangeType(Unit const* src, Unit const* target, uint16 skillID, uint16 skillLevel) const; // battle_range_type
+    int32 BattleBlewCountBonus(Unit const* src, uint16 skillID) const; // battle_blewcount_bonus
+    std::bitset<ROWOW_NK_MAX> BattleSkillGetDamageProperties(uint16 skillID, int32 isSplash) const; // battle_skill_get_damage_properties
+    int32 BattleCalcAttackSkillRatio(ROWOWDamage& wd, Unit* src, Unit* target, uint16 skillID, uint16 skillLevel); // battle_calc_attack_skill_ratio (uses Poison React up)
+    int64 BattleCalcSkillConstantAddition(ROWOWDamage& wd, Unit* src, Unit* target, uint16 skillID, uint16 skillLevel) const; // battle_calc_skill_constant_addition
+    static bool BattleSkillStacksMasteriesVVS(uint16 skillID, bool isRefineOrStar); // battle_skill_stacks_masteries_vvs (BCHK_REFINE/BCHK_STAR, or BCHK_ALL)
+    int32 BattleGetMagicElement(ROWOWDamage const& d, Unit const* src, Unit const* target, uint16 skillID, uint16 skillLevel) const; // battle_get_magic_element
+    int32 BattleGetMiscElement(ROWOWDamage const& d, Unit const* src, Unit const* target, uint16 skillID, uint16 skillLevel) const; // battle_get_misc_element
 
     // On an RO map (with cell pathing on), the path goes from cell center to cell center as an RO monster walks: diagonally until
     // in line with the target's cell, then straight, stepping around what's in the way where it can
