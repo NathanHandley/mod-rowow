@@ -51,6 +51,7 @@ public:
         ROWOW->LoadBattleData();
         ROWOW->LoadItemScriptData();
         ROWOW->LoadBonusData();
+        ROWOW->LoadProduceData(); // After the items, which its recipes make and use
         ROWOW->LoadSkillData(); // After the items, whose names the skills' item costs use
         ROWOW->LoadAbraData();
         ROWOW->LoadSkillUnitData();

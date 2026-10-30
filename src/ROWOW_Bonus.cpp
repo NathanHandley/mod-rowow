@@ -244,7 +244,7 @@ void ROWOWMod::LoadBonusData()
     if (IsEnabled == false)
         return;
 
-    // Refine bonuses: armor's, and each weapon level's (refine.yml's Armor and Weapon groups)
+    // Refine bonuses: armor's, and each weapon level's (refine.yml's Armor and Weapon groups), and the normal refine's chance (Upgrade Weapon's)
     if (ROWOWDataTable const* refineTable = GetDataTable(ROWOW_DATA_TABLE_REFINE))
     {
         int32 groupColumnIndex = refineTable->GetColumnIndex("Group");
@@ -252,6 +252,7 @@ void ROWOWMod::LoadBonusData()
         int32 refineColumnIndex = refineTable->GetColumnIndex("Levels_RefineLevels_Level");
         int32 bonusColumnIndex = refineTable->GetColumnIndex("Levels_RefineLevels_Bonus");
         int32 randomBonusColumnIndex = refineTable->GetColumnIndex("Levels_RefineLevels_RandomBonus");
+        int32 chancesColumnIndex = refineTable->GetColumnIndex("Levels_RefineLevels_Chances");
         for (size_t rowIndex = 0; rowIndex < refineTable->Rows.size(); rowIndex++)
         {
             std::string const& group = refineTable->GetCell(rowIndex, groupColumnIndex);
@@ -262,6 +263,13 @@ void ROWOWMod::LoadBonusData()
                 continue;
             RefineBonuses[refineType][refine].Bonus = int32(refineTable->GetInt(rowIndex, bonusColumnIndex, 0));
             RefineBonuses[refineType][refine].RandomBonus = int32(refineTable->GetInt(rowIndex, randomBonusColumnIndex, 0));
+            for (auto const& chance : ROWOWDataTable::ParseMapList(refineTable->GetCell(rowIndex, chancesColumnIndex)))
+            {
+                bool isNormal = std::any_of(chance.begin(), chance.end(), [](auto const& field) { return field.first == "Type" && field.second == "Normal"; });
+                for (auto const& field : chance)
+                    if (isNormal == true && field.first == "Rate")
+                        RefineBonuses[refineType][refine].Chance = int32(strtol(field.second.c_str(), nullptr, 10));
+            }
         }
     }
 
@@ -1051,6 +1059,21 @@ void ROWOWMod::StatusCalcPCItems(Player* player, ROWOWIdentity const& identity, 
         if (wornItem.Positions == ROWOW_EQUIP_POSITION_HAND_L)
             lrFlag = wornItem.RO->IsWeapon == true ? ROWOW_LR_FLAG_WEAPON : ROWOW_LR_FLAG_SHIELD;
         runScript(wornItem.RO->BonusScript.get(), wornItem.ItemObject, lrFlag, wornItem.Positions, 0);
+
+        // A forged weapon (CARD0_FORGE): its Star Crumbs' ATK, and its element unless its script gave it one.  (A famous smith's +10 needs
+        // the fame ranking, which isn't in)
+        int32 starCrumbs = 0, forgeElement = ROWOW_ELEMENT_NEUTRAL;
+        if (wornItem.RO->IsWeapon == true && GetItemForge(wornItem.ItemObject, starCrumbs, forgeElement) == true)
+        {
+            bool isLeftHand = lrFlag == ROWOW_LR_FLAG_WEAPON;
+            ROWOWWeaponBonus& wd = isLeftHand == true ? status.Bonus.LeftWeapon : status.Bonus.RightWeapon;
+            wd.Star += starCrumbs * 5;
+            if (wd.Star >= 15)
+                wd.Star = 40; // 3 Star Crumbs now give +40 dmg
+            uint8& weaponElement = isLeftHand == true ? status.LeftWeaponElement : status.WeaponElement;
+            if (weaponElement == ROWOW_ELEMENT_NEUTRAL) // Do not overwrite element from previous bonuses.
+                weaponElement = uint8(forgeElement);
+        }
     }
 
     // The ammo: its ATK, and its script as the ammo's
@@ -1167,6 +1190,9 @@ bool ROWOWMod::PCInsertCard(Player* player, Item* card, Item* equipment)
         return false; // must be a card
     if (IsItemIdentified(equipment) == false)
         return false; // target must be identified
+    int32 starCrumbs = 0, forgeElement = 0;
+    if (GetItemForge(equipment, starCrumbs, forgeElement) == true)
+        return false; // itemdb_isspecial: a forged weapon's card slots hold its forge
     if ((roEquipment->Locations & roCard->Locations) == 0)
         return false; // card cannot be compounded on this item type
     if (roEquipment->Type == ROWOW_ITEM_TYPE_WEAPON && roCard->Locations == ROWOW_EQUIP_POSITION_HAND_L)
@@ -1208,8 +1234,10 @@ void ROWOWMod::SendCardTargetsToClient(Player* player, Item* card)
         {
             Item* item = GetItemByClientPosition(player, bag, slot);
             ROWOWItem const* roItem = GetROItem(item);
+            int32 starCrumbs = 0, forgeElement = 0;
             if (roItem == nullptr || (roItem->Type != ROWOW_ITEM_TYPE_WEAPON && roItem->Type != ROWOW_ITEM_TYPE_ARMOR) || IsItemIdentified(item) == false
-                || (roItem->Locations & roCard->Locations) == 0 || GetIdentityEquipPosition(*identity, item->GetGUID().GetCounter()) != 0)
+                || (roItem->Locations & roCard->Locations) == 0 || GetIdentityEquipPosition(*identity, item->GetGUID().GetCounter()) != 0 ||
+                GetItemForge(item, starCrumbs, forgeElement) == true)
                 continue;
             if (roItem->Type == ROWOW_ITEM_TYPE_WEAPON && roCard->Locations == ROWOW_EQUIP_POSITION_HAND_L)
                 continue;

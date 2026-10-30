@@ -663,7 +663,7 @@ std::shared_ptr<ROWOWSkillUnitGroup> ROWOWMod::SkillUnitSetting(Unit* src, uint1
                 gravitation->Val3 == ROWOW_BCT_SELF)
                 linkGroupID = gravitation->Val4;
             break;
-        // (Quagmire's targets turn to all on the PvP maps with vs_traps_bctall, which no RO map has here)
+        // (Quagmire's and Demonstration's targets turn to all on the PvP maps with vs_traps_bctall, which no RO map has here)
     }
 
     // Init skill unit group
@@ -1334,6 +1334,10 @@ int32 ROWOWMod::SkillUnitOnPlaceTimer(Map* map, ROWOWSkillUnitGroup& group, int3
         case ROWOW_UNT_GRAVITATION:
         case ROWOW_UNT_MAKIBISHI:
             SkillAttack(skill->AttackType, ss, ss, bl, skillID, group.SkillLevel, tick, 0, &unit);
+            break;
+
+        case ROWOW_UNT_DEMONSTRATION:
+            SkillAttack(ROWOW_BF_WEAPON, ss, ss, bl, skillID, group.SkillLevel, tick, 0, &unit);
             break;
 
         case ROWOW_UNT_DUMMYSKILL:

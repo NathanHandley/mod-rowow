@@ -336,7 +336,13 @@ void ROWOWMod::LoadItemScriptData()
     });
     ROWOWSCRIPT->RegisterCommand("itemheal", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
     {
-        if (context.AttachedPlayer != nullptr)
+        if (context.Potion != nullptr)
+        {
+            // A thrown potion (potion_flag 1): only what it heals
+            context.Potion->HP = GetArgumentNumber(arguments, 0, 0);
+            context.Potion->SP = GetArgumentNumber(arguments, 1, 0);
+        }
+        else if (context.AttachedPlayer != nullptr)
         {
             auto itemIter = ItemsByItemTemplateID.find(context.UsedItemTemplateID);
             PCItemHeal(context.AttachedPlayer, itemIter != ItemsByItemTemplateID.end() ? itemIter->second.ItemID : 0, GetArgumentNumber(arguments, 0, 0), GetArgumentNumber(arguments, 1, 0));
@@ -345,7 +351,12 @@ void ROWOWMod::LoadItemScriptData()
     });
     ROWOWSCRIPT->RegisterCommand("percentheal", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
     {
-        if (context.AttachedPlayer != nullptr)
+        if (context.Potion != nullptr)
+        {
+            context.Potion->PerHP = GetArgumentNumber(arguments, 0, 0);
+            context.Potion->PerSP = GetArgumentNumber(arguments, 1, 0);
+        }
+        else if (context.AttachedPlayer != nullptr)
             PCPercentHeal(context.AttachedPlayer, GetArgumentNumber(arguments, 0, 0), GetArgumentNumber(arguments, 1, 0));
         return ROWOWScriptValue::FromNumber(0);
     });
@@ -360,7 +371,7 @@ void ROWOWMod::LoadItemScriptData()
         // sc_start <type>,<tick>,<val1>{,<rate>,<flag>{,<GID>}}; (sc_start2 adds val2, sc_start4 val2..val4): a status on the attached
         // player, with a 1/10000 rate (100% unless told) and SCSTART_NOAVOID unless told.  No tick takes the status's skill's Duration1 at val1.
         // A worn item's bonus script doesn't start statuses (its status calculation runs it again and again; the throwable items' scripts are
-        // their use)
+        // their use).  A thrown potion's (potion_flag 1 with a potion_target) goes to its target for half its time, marked thrown (val4 1)
         int32 startType = strstr(startCommandName, "4") != nullptr ? 4 : (strstr(startCommandName, "2") != nullptr ? 2 : 1);
         ROWOWSCRIPT->RegisterCommand(startCommandName, [this, startType](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
         {
@@ -377,7 +388,15 @@ void ROWOWMod::LoadItemScriptData()
             uint16 skillID = StatusDBGetSkill(type);
             if (tick == 0 && val1 > 0 && skillID > 0) // When there isn't a duration specified, try to get it from the skill_db
                 tick = SkillGetTime(skillID, uint16(val1));
-            StatusChangeStart(context.AttachedPlayer, context.AttachedPlayer, type, rate, val1, val2, val3, val4, tick, flag);
+            Unit* bl = context.AttachedPlayer;
+            if (context.Potion != nullptr && context.Potion->Target != nullptr)
+            {
+                // skill.cpp set the potion_target variable for a status change.
+                bl = context.Potion->Target;
+                tick /= 2; // Thrown potions only last half.
+                val4 = 1; // Mark that this was a thrown sc_effect
+            }
+            StatusChangeStart(context.AttachedPlayer, bl, type, rate, val1, val2, val3, val4, tick, flag);
             return ROWOWScriptValue::FromNumber(0);
         });
     }
@@ -430,6 +449,13 @@ void ROWOWMod::LoadItemScriptData()
             return ROWOWScriptValue::FromNumber(0);
         });
     }
+    ROWOWSCRIPT->RegisterCommand("produce", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // produce <item level>: the list of what the player can make of that level (a hammer's weapons, the Mini Furnace's metals)
+        if (context.AttachedPlayer != nullptr)
+            ClifSkillProduceMixList(context.AttachedPlayer, -1, GetArgumentNumber(arguments, 0, 0));
+        return ROWOWScriptValue::FromNumber(0);
+    });
     ROWOWSCRIPT->RegisterCommand("getitem", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
     {
         if (context.AttachedPlayer != nullptr && arguments.empty() == false)
@@ -1067,9 +1093,10 @@ bool ROWOWMod::PCGetItemGroup(Player* player, std::string const& groupName)
     return true;
 }
 
-bool ROWOWMod::GiveROItem(Player* player, uint32 itemID, uint32 amount, bool isIdentified)
+bool ROWOWMod::GiveROItem(Player* player, uint32 itemID, uint32 amount, bool isIdentified, Item** itemOut)
 {
-    // pc_additem: into the bags, and what doesn't fit comes by mail (RO drops it on the floor, which comes with the ground items, R10)
+    // pc_additem: into the bags, and what doesn't fit comes by mail (RO drops it on the floor, which comes with the ground items, R10).  The
+    // item stored (none when it all went by mail) is given back for the caller to change
     auto itemTemplateIDIter = ItemTemplateIDsByItemID.find(itemID);
     if (itemTemplateIDIter == ItemTemplateIDsByItemID.end() || amount == 0)
     {
@@ -1085,6 +1112,8 @@ bool ROWOWMod::GiveROItem(Player* player, uint32 itemID, uint32 amount, bool isI
     {
         if (Item* item = player->StoreNewItem(destination, itemTemplateID, true))
         {
+            if (itemOut != nullptr)
+                *itemOut = item;
             if (isIdentified == false)
                 SetItemState(player, item, 0, false, false);
             player->SendNewItem(item, storedCount, true, false);

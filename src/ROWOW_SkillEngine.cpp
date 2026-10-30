@@ -268,13 +268,18 @@ int32 ROWOWMod::BattleCheckTarget(Unit const* src, Unit const* target, int32 fla
 {
     // battle_check_target: 1 when the target is one of the flag's kinds (BCT_ENEMY, BCT_PARTY...), -1 when it isn't, 0 when it can't be
     // targeted at all.  RO combatants are players in the form and RO monsters: a monster is every player's natural enemy, monsters are
-    // each other's friends, and players are enemies only where WoW lets them fight (rAthena's PvP map flags).  (The slaves and summons,
-    // skill units, the immunity statuses and battlegrounds come with their systems)
+    // each other's friends, and players are enemies only where WoW lets them fight (rAthena's PvP map flags).  A monster a player summoned
+    // (an Alchemist's plant) takes its master's side (battle_get_master).  (Slaves of monsters, skill units, the immunity statuses and
+    // battlegrounds come with their systems)
     if (src == nullptr || target == nullptr)
         return 0;
 
+    // t_bl/s_bl hold the 'master' of the attack, while src/target are the actual objects involved.
+    Unit const* tBL = BattleGetMaster(target);
+    Unit const* sBL = BattleGetMaster(src);
+
     // Can't hit self and master, but can hit other slaves
-    if ((flag & ROWOW_BCT_WOS) != 0 && src == target)
+    if ((flag & ROWOW_BCT_WOS) != 0 && (src == target || sBL == target))
         return -1;
     if (GetROStatus(target) == nullptr || target->IsAlive() == false || target->IsInWorld() == false || src->GetMap() != target->GetMap())
         return 0;
@@ -285,21 +290,31 @@ int32 ROWOWMod::BattleCheckTarget(Unit const* src, Unit const* target, int32 fla
 
     int32 state = 0;
     bool stripEnemy = true; // Flag which marks whether to remove the BCT_ENEMY status if it's also friend/ally.
-    if (src->IsPlayer() == true)
+    if (ROWOWMobSummon const* summon = target->IsCreature() == true ? target->CustomData.Get<ROWOWMobSummon>("ROWOWMobSummon") : nullptr)
     {
-        if (target->IsPlayer() == false)
+        // Targettable by players: Marine Spheres and Floras (alchemist_summon_setting)
+        if (((summon->AI == ROWOW_AI_SPHERE && (BattleConfig.AlchemistSummonSetting & 2) != 0) || (summon->AI == ROWOW_AI_FLORA && (BattleConfig.AlchemistSummonSetting & 1) != 0)) &&
+            sBL->IsPlayer() == true && src->IsCreature() == false)
+        {
+            state |= ROWOW_BCT_ENEMY;
+            stripEnemy = false;
+        }
+    }
+    if (sBL->IsPlayer() == true)
+    {
+        if (tBL->IsPlayer() == false)
             state |= ROWOW_BCT_ENEMY; // Natural enemy.
     }
-    else if (target->IsPlayer() == true)
-        state |= ROWOW_BCT_ENEMY;
+    else if (target->IsCreature() == true || tBL->IsCreature() == true)
+        state |= ROWOW_BCT_PARTY; // Normal mobs with no ai are friends, and so are the monsters players summoned to them
     else
-        state |= ROWOW_BCT_PARTY; // Normal mobs with no ai are friends.
+        state |= ROWOW_BCT_ENEMY; // However, all else are enemies.
 
     if ((flag & ROWOW_BCT_ALL) == ROWOW_BCT_ALL)
         return 1; // All actually stands for all attackable chars
     if (flag == ROWOW_BCT_NOONE)
         return -1;
-    if (src == target)
+    if (tBL == sBL)
     {
         // No need for further testing.
         state |= ROWOW_BCT_SELF | ROWOW_BCT_PARTY | ROWOW_BCT_GUILD;
@@ -308,11 +323,11 @@ int32 ROWOWMod::BattleCheckTarget(Unit const* src, Unit const* target, int32 fla
         return (flag & state) != 0 ? 1 : -1;
     }
 
-    Player const* srcPlayer = src->ToPlayer();
-    Player const* targetPlayer = target->ToPlayer();
+    Player const* srcPlayer = sBL->ToPlayer();
+    Player const* targetPlayer = tBL->ToPlayer();
     bool isSameParty = srcPlayer != nullptr && targetPlayer != nullptr && srcPlayer->GetGroup() != nullptr && srcPlayer->GetGroup() == targetPlayer->GetGroup();
     bool isSameGuild = srcPlayer != nullptr && targetPlayer != nullptr && srcPlayer->GetGuildId() != 0 && srcPlayer->GetGuildId() == targetPlayer->GetGuildId();
-    if (srcPlayer != nullptr && targetPlayer != nullptr && src->IsValidAttackTarget(target) == true)
+    if (srcPlayer != nullptr && targetPlayer != nullptr && sBL->IsValidAttackTarget(tBL) == true)
     {
         // mapdata_flag_vs: check rivalry settings
         if ((flag & (ROWOW_BCT_PARTY | ROWOW_BCT_ENEMY)) != 0)
@@ -1246,7 +1261,8 @@ ROWOWSkillCondition ROWOWMod::SkillGetRequirement(Player* sd, uint16 skillID, ui
     req.Statuses = skill->RequiredStatuses;
     req.EquipItemIDs = skill->RequiredEquipment;
 
-    // Normal skill requirements and gemstone checks.  A per-level item cost (Level set) is the level's own
+    // Normal skill requirements and gemstone checks.  A per-level item cost (Level set) is the level's own; the potion throwers and Plant
+    // Cultivation list one item a level and need only the level's (at its place in the list)
     size_t itemIndex = 0;
     bool isLevelDependent = std::any_of(skill->RequiredItems.begin(), skill->RequiredItems.end(), [](ROWOWSkillItemRequirement const& item) { return item.Level != 0; });
     bool isNoGemstone = GetDeferredBonus(sd, "bNoGemStone") != 0;
@@ -1256,6 +1272,12 @@ ROWOWSkillCondition ROWOWMod::SkillGetRequirement(Player* sd, uint16 skillID, ui
             break;
         if (isLevelDependent == true && item.Level != skillLevel)
             continue;
+        if ((skillID == ROWOW_SKILL_AM_POTIONPITCHER || skillID == ROWOW_SKILL_CR_SLIMPITCHER || skillID == ROWOW_SKILL_CR_CULTIVATION) &&
+            int32(itemIndex) != skillLevel % 11 - 1)
+        {
+            itemIndex++;
+            continue;
+        }
         uint32 itemID = item.ItemID;
         int32 amount = item.Amount;
         // Check requirement for gemstone (Blue, Red and Yellow Gemstones): the Mistress card's bonus saves them
@@ -1340,9 +1362,49 @@ bool ROWOWMod::SkillCheckConditionCastBegin(Player* sd, uint16 skillID, uint16 s
         }
     }
 
+    // A brewing list open blocks brewing (and making arrows, mending) again until it's picked from
+    ROWOWIdentity const* identity = GetIdentity(sd);
+    if (identity->MenuSkillID == ROWOW_SKILL_AM_PHARMACY)
+    {
+        switch (skillID)
+        {
+            case ROWOW_SKILL_AM_PHARMACY:
+            case ROWOW_SKILL_AC_MAKINGARROW:
+            case ROWOW_SKILL_BS_REPAIRWEAPON:
+            case ROWOW_SKILL_AM_TWILIGHT1:
+            case ROWOW_SKILL_AM_TWILIGHT2:
+            case ROWOW_SKILL_AM_TWILIGHT3:
+                return false;
+        }
+    }
+
     // The checks of the skills themselves.  (The other jobs' cases of its switch come with them)
     switch (skillID)
     {
+        case ROWOW_SKILL_AM_TWILIGHT2:
+        case ROWOW_SKILL_AM_TWILIGHT3:
+        {
+            // party_skill_check: Twilight Pharmacy needs a Super Novice in the party (2) or a Taekwon (3).  rAthena counts the party online
+            // anywhere; here only the members on the caster's map (another map's identities belong to its own thread)
+            uint16 neededJobID = skillID == ROWOW_SKILL_AM_TWILIGHT2 ? ROWOW_JOB_SUPER_NOVICE : ROWOW_JOB_TAEKWON;
+            bool isInParty = false;
+            if (sd->GetGroup() != nullptr)
+            {
+                PartyForEachSameMap(sd, 0, [this, neededJobID, &isInParty](Unit* member)
+                {
+                    Player* memberPlayer = member->ToPlayer();
+                    if (memberPlayer != nullptr && IsInROForm(memberPlayer) == true && GetIdentity(memberPlayer)->JobID == neededJobID)
+                        isInParty = true;
+                    return 0;
+                });
+            }
+            if (isInParty == false)
+            {
+                ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_LEVEL);
+                return false;
+            }
+            break;
+        }
         case ROWOW_SKILL_BD_ADAPTATION:
         {
             // Only while performing, and not in its last moments (rAthena's own check of the time left: val3>>16 of the seconds left, which is
@@ -1643,14 +1705,37 @@ bool ROWOWMod::SkillCheckConditionCastBegin(Player* sd, uint16 skillID, uint16 s
 
 bool ROWOWMod::SkillCheckConditionCastEnd(Player* sd, uint16 skillID, uint16 skillLevel)
 {
-    // skill_check_condition_castend: HP, weapon, ammo, items and Sight Rasher's status, checked when the cast ends, and what B.S. Sacramenti's
-    // partners give.  (The summon counts of its switch come with their skills)
+    // skill_check_condition_castend: HP, weapon, ammo, items and Sight Rasher's status, checked when the cast ends, what B.S. Sacramenti's
+    // partners give, and how many plants or Marine Spheres an Alchemist may have out
     if (GetSkillUnitData(sd)->SkillItemID == skillID)
         return true; // Casting finished (Item skill or Hocus-Pocus)
 
     // perform skill-specific checks (and actions)
-    if (skillID == ROWOW_SKILL_PR_BENEDICTIO)
-        SkillCheckPCPartner(sd, skillID, skillLevel, 1, 1);
+    switch (skillID)
+    {
+        case ROWOW_SKILL_PR_BENEDICTIO:
+            SkillCheckPCPartner(sd, skillID, skillLevel, 1, 1);
+            break;
+        case ROWOW_SKILL_AM_CANNIBALIZE:
+        case ROWOW_SKILL_AM_SPHEREMINE:
+        {
+            int32 c = 0;
+            ROWOWSkill const* skill = GetSkill(skillID);
+            int32 maxcount = skillID == ROWOW_SKILL_AM_CANNIBALIZE ? 6 - skillLevel : skill->MaxCount[ROWOWSkill::GetLevelIndex(skillLevel)];
+            uint32 mobClass = skillID == ROWOW_SKILL_AM_CANNIBALIZE ? FloraSummonMobIDs[std::clamp<int32>(skillLevel, 1, 5) - 1] : ROWOW_MOBID_MARINE_SPHERE;
+            if (BattleConfig.LandSkillLimit != 0 && maxcount > 0 && (BattleConfig.LandSkillLimit & ROWOW_BL_PC) != 0)
+            {
+                int32 i = SkillCheckConditionMobMaster(sd, skillID, mobClass, c);
+                if (c >= maxcount || (skillID == ROWOW_SKILL_AM_CANNIBALIZE && c != i && (BattleConfig.AlchemistSummonSetting & 4) != 0))
+                {
+                    // Fails when: exceed max limit. There are other plant types already out.
+                    ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_LEVEL);
+                    return false;
+                }
+            }
+            break;
+        }
+    }
 
     ROWOWSkillCondition require = SkillGetRequirement(sd, skillID, skillLevel);
     ROWOWStatus const* status = GetROStatus(sd);
@@ -2110,8 +2195,9 @@ int64 ROWOWMod::SkillAttack(int32 attackType, Unit* src, Unit* dsrc, Unit* bl, u
 
     ROWOWDamage dmg = BattleCalcAttack(attackType, src, bl, skillID, skillLevel, flag & 0xFFF);
 
-    // If the damage source is a unit, the damage is not delayed
-    if (isUnitSource == true)
+    // If the damage source is a unit, the damage is not delayed.  Self Destruction's isn't either: its source is dead by the time it takes
+    // effect. [Skotlex]
+    if (isUnitSource == true || skillID == ROWOW_SKILL_NPC_SELFDESTRUCTION)
         dmg.AMotion = 0;
 
     // Magic Rod takes in a magic skill cast at its user (not a ground skill's unit): no damage, and SP back from the skill's cost.  (Magic
@@ -2508,6 +2594,12 @@ int32 ROWOWMod::SkillAdditionalEffect(Unit* src, Unit* bl, uint16 skillID, uint1
                     StatusChangeStart(src, src, effect.Type, effect.Rate, 7, 0, 0, 0, effect.Duration, ROWOW_SCSTART_NONE, 100);
             }
         }
+        // "While the damage can be blocked by Pneuma, the chance to break armor remains", irowiki. [Cydh]
+        if (dmgLv == ROWOW_ATK_BLOCK && skillID == ROWOW_SKILL_AM_ACIDTERROR)
+        {
+            SCStart2(src, bl, ROWOW_SC_BLEEDING, skillLevel * 3, skillLevel, int32(src->GetGUID().GetCounter()), SkillGetTime2(skillID, skillLevel));
+            SkillBreakEquip(src, bl, ROWOW_EQUIP_POSITION_ARMOR, int32(100 * SkillGetTime(skillID, skillLevel)), ROWOW_BCT_ENEMY);
+        }
     }
     if (dmgLv < ROWOW_ATK_DEF) // no damage, return;
         return 0;
@@ -2690,23 +2782,10 @@ int32 ROWOWMod::SkillCalcHeal(Unit* src, Unit* target, uint16 skillID, uint16 sk
     }
     if (heal == false && skillID != ROWOW_SKILL_NPC_EVILLAND)
         hp /= 2;
-    if (src->IsPlayer() == true)
-    {
-        // pc_skillheal_bonus: bHealPower (skill_add_heal_rate 7: Heal, Sanctuary and Potion Pitcher) and bSkillHeal
-        int32 bonus = GetDeferredBonus(src, "bHealPower");
-        if (skillID != ROWOW_SKILL_AL_HEAL && skillID != ROWOW_SKILL_PR_SANCTUARY && skillID != ROWOW_SKILL_AM_POTIONPITCHER)
-            bonus = 0;
-        bonus += GetDeferredBonus2(src, "bSkillHeal", skillID);
-        if (bonus != 0)
-            hp += hp * bonus / 100;
-    }
-    if (target != nullptr && target->IsPlayer() == true)
-    {
-        // pc_skillheal2_bonus: bHealPower2 and bSkillHeal2
-        int32 bonus = GetDeferredBonus(target, "bHealPower2") + GetDeferredBonus2(target, "bSkillHeal2", skillID);
-        if (bonus != 0)
-            hp += hp * bonus / 100;
-    }
+    if (src->IsPlayer() == true && (skill = PCSkillHealBonus(src, skillID)) > 0)
+        hp += hp * skill / 100;
+    if (target != nullptr && target->IsPlayer() == true && (skill = PCSkillHeal2Bonus(target, skillID)) > 0)
+        hp += hp * skill / 100;
     ROWOWStatusChange const* tsc = target != nullptr ? GetStatusChange(target) : nullptr;
     if (tsc != nullptr && tsc->IsEmpty() == false)
     {
@@ -2729,6 +2808,31 @@ int32 ROWOWMod::SkillCalcHeal(Unit* src, Unit* target, uint16 skillID, uint16 sk
         }
     }
     return hp;
+}
+
+int32 ROWOWMod::PCSkillHealBonus(Unit const* unit, uint16 skillID) const
+{
+    // pc_skillheal_bonus: bHealPower on any heal skill, but the ones skill_add_heal_rate leaves out (1 Heal, 2 Sanctuary, 4 Aid Potion, 8 Slim
+    // Potion Pitcher, 16 Apple of Idun), and the skill's bSkillHeal
+    int32 bonus = GetDeferredBonus(unit, "bHealPower");
+    if (bonus != 0)
+    {
+        switch (skillID)
+        {
+            case ROWOW_SKILL_AL_HEAL: if ((BattleConfig.SkillAddHealRate & 1) == 0) bonus = 0; break;
+            case ROWOW_SKILL_PR_SANCTUARY: if ((BattleConfig.SkillAddHealRate & 2) == 0) bonus = 0; break;
+            case ROWOW_SKILL_AM_POTIONPITCHER: if ((BattleConfig.SkillAddHealRate & 4) == 0) bonus = 0; break;
+            case ROWOW_SKILL_CR_SLIMPITCHER: if ((BattleConfig.SkillAddHealRate & 8) == 0) bonus = 0; break;
+            case ROWOW_SKILL_BA_APPLEIDUN: if ((BattleConfig.SkillAddHealRate & 16) == 0) bonus = 0; break;
+        }
+    }
+    return bonus + GetDeferredBonus2(unit, "bSkillHeal", skillID);
+}
+
+int32 ROWOWMod::PCSkillHeal2Bonus(Unit const* unit, uint16 skillID) const
+{
+    // pc_skillheal2_bonus: bHealPower2 and the skill's bSkillHeal2
+    return GetDeferredBonus(unit, "bHealPower2") + GetDeferredBonus2(unit, "bSkillHeal2", skillID);
 }
 
 int64 ROWOWMod::StatusHeal(Unit* bl, int64 hp, int64 sp, int32 flag, Unit* src, uint32 spellID)
@@ -2904,8 +3008,8 @@ void ROWOWMod::SkillTimerSkill(Unit* src, uint32 timerSkillID)
 {
     // skill_timerskill: a queued part of a skill, if it's still queued (skill_cleartimerskill drops them), the caster and its target are on
     // one map, the caster is alive and the target too (but for Water Ball's, which go on).  Jupitel Thunder's hit, Water Ball's balls (each
-    // uses up one of its cells while the target lives), Frost Joker's and Scream's effect around where they were used, Lex Divina's silence
-    // and Status Recovery's blindness on the undead (type their rate), Raging Palm Strike's hit, and the default: the skill's attack again
+    // uses up one of its cells while the target lives), Frost Joker's and Scream's effect around where they were used, Lex Divina's silence,
+    // Status Recovery's blindness on the undead and Hammer Fall's stun (type their rate), Raging Palm Strike's hit, and the default: the skill's attack again
     // (Double Casting's bolt).  (No pre-renewal skill queues one on a cell)
     ROWOWSkillUnitData* ud = GetSkillUnitData(src);
     auto timerSkillIter = std::find_if(ud->TimerSkills.begin(), ud->TimerSkills.end(), [timerSkillID](ROWOWSkillTimerSkill const& timerSkill)
@@ -2964,8 +3068,7 @@ void ROWOWMod::SkillTimerSkill(Unit* src, uint32 timerSkillID)
         case ROWOW_SKILL_DC_SCREAM:
         {
             // skill_frostjoke_scream on everyone around (enemies and the party alike, the caster aside), but the invisible
-            ROWOWSkill const* skill = GetSkill(skl.SkillID);
-            int32 range = skill != nullptr ? skill->SplashArea[ROWOWSkill::GetLevelIndex(skl.SkillLevel)] : 0;
+            int32 range = SkillGetSplash(skl.SkillID, skl.SkillLevel);
             MapForEachInArea(src, skl.X - range, skl.Y - range, skl.X + range, skl.Y + range, [this, src, &skl, tick](Unit* bl)
             {
                 if (src == bl || bl->IsAlive() == false)
@@ -2988,6 +3091,9 @@ void ROWOWMod::SkillTimerSkill(Unit* src, uint32 timerSkillID)
             break;
         case ROWOW_SKILL_PR_STRECOVERY:
             SCStart(src, target, ROWOW_SC_BLIND, skl.Type, skl.SkillLevel, SkillGetTime2(skl.SkillID, skl.SkillLevel));
+            break;
+        case ROWOW_SKILL_BS_HAMMERFALL:
+            SCStart(src, target, ROWOW_SC_STUN, skl.Type, skl.SkillLevel, SkillGetTime2(skl.SkillID, skl.SkillLevel));
             break;
         case ROWOW_SKILL_CH_PALMSTRIKE:
         {

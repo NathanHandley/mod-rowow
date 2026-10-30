@@ -192,6 +192,7 @@ struct ROWOWDataTable
 #define ROWOW_JOB_MONK                              15
 #define ROWOW_JOB_BARD                              19
 #define ROWOW_JOB_DANCER                            20
+#define ROWOW_JOB_SUPER_NOVICE                      23
 #define ROWOW_JOB_GUNSLINGER                        24
 #define ROWOW_JOB_NINJA                             25
 #define ROWOW_JOB_NOVICE_HIGH                       4001
@@ -199,6 +200,7 @@ struct ROWOWDataTable
 #define ROWOW_JOB_CHAMPION                          4016
 #define ROWOW_JOB_CLOWN                             4020
 #define ROWOW_JOB_GYPSY                             4021
+#define ROWOW_JOB_TAEKWON                           4046
 #define ROWOW_JOB_UPPER_START                       4001    // Novice_High, the first transcendent job
 #define ROWOW_JOB_UPPER_END                         4022    // Paladin2, the last
 
@@ -234,6 +236,13 @@ struct ROWOWDataTable
 #define ROWOW_ITEM_STATE_BROKEN                     16
 #define ROWOW_ITEM_STATE_UNIDENTIFIED               32
 #define ROWOW_ITEM_STATE_COUNT                      64
+
+// A forged weapon (rAthena's card[0] CARD0_FORGE, card[1] (star crumbs * 5) << 8 | element) keeps its Star Crumbs and element stone in its
+// first card slot's enchantment, the converter's fixed enchantments from 8064 (RO_DBCID_SPELLITEMENCHANTMENT_FORGE_*): 8064 plus five times
+// the Star Crumbs (0-3) plus the stone (0 none, 1 Flame Heart, 2 Mystic Frozen, 3 Rough Wind, 4 Great Nature).  Its smith is the item's creator
+#define ROWOW_ITEM_FORGE_ENCHANTMENT_START          8064
+#define ROWOW_ITEM_FORGE_ELEMENT_COUNT              5
+#define ROWOW_ITEM_FORGE_ENCHANTMENT_COUNT          20
 
 // RO weapon types (rAthena's weapon_type in pc.hpp)
 #define ROWOW_WEAPON_TYPE_FIST                      0
@@ -515,6 +524,18 @@ struct ROWOWRefineBonus
 {
     int32 Bonus = 0;
     int32 RandomBonus = 0;
+    int32 Chance = 0; // The normal refine's chance to reach this level, in 10000 (REFINE_COST_NORMAL's)
+};
+
+// A recipe of produce_db (s_skill_produce_db): what it makes, its item level (1-3 weapon levels, 11-20 cooking, 21 smelting, 22 brewing, 23
+// Elemental Converters), the skill and level it needs, and its materials (an amount of 0 is a guide that must be held but isn't used up)
+struct ROWOWProduce
+{
+    uint32 NameID = 0;
+    int32 ItemLevel = 0;
+    uint16 RequireSkillID = 0;
+    int32 RequireSkillLevel = 0;
+    std::vector<std::pair<uint32, int32>> Materials; // item_db Id, amount
 };
 
 // The rAthena battle config values (conf/battle) the RO rules use (from mod_rowow_db_battle_config), with rAthena's defaults
@@ -649,6 +670,14 @@ struct ROWOWBattleConfig
     int32 MultiTriggerTrap = 0; // multi_trigger_trap: a trap that goes off hits everything on it before it's spent
     int32 SkillRemoveTrapType = 0; // skill_removetrap_type: Remove Trap gives back the trap (0) or every item it was made of (1)
     int32 RefreshSong = 0; // refresh_song: a song's effect on someone who stepped out is renewed on stepping back in, not by its timer
+    int32 WeaponProduceRate = 100; // weapon_produce_rate (wp_rate): the percent of a forge's success chance that counts
+    int32 PotionProduceRate = 100; // potion_produce_rate (pp_rate): ... of a brew's
+    int32 OrideconResearchFix = 0; // oridecon_research_fix: Oridecon Research also helps forge level 3 weapons
+    int32 LandSkillLimit = ROWOW_BL_PC | 0x0008; // land_skill_limit: whose ground skills and summons are limited to their skill's count (BL_PC | BL_HOM)
+    int32 AlchemistSummonSetting = 15; // alchemist_summon_setting: 1 players can hit the plants, 2 the Marine Spheres, 4 one plant kind at a time
+    int32 AlchemistSummonReward = 1; // alchemist_summon_reward: 1 Marine Spheres drop their items, 2 the plants too
+    int32 FirstAttackLootBonus = 30; // first_attack_loot_bonus: the percent of all the damage the first attacker adds for the loot priority
+    int32 SkillAddHealRate = 487; // skill_add_heal_rate: the heal skills bHealPower raises (1 Heal, 2 Sanctuary, 4 Aid Potion, 8 Slim Potion Pitcher, 16 Apple of Idun...)
 };
 
 // A skill of a job's skill tree (skill_tree.yml's s_skill_tree_entry)
@@ -683,6 +712,7 @@ struct ROWOWWeaponBonus
     uint32 DefRatioAtkRace = 0;
     uint32 DefRatioAtkClass = 0;
     int32 Overrefine = 0; // The random bonus past the safe refine
+    int32 Star = 0; // star: a forged weapon's Star Crumbs' ATK (5 each, 40 for three)
     std::vector<std::pair<uint32, int32>> AddDamageClass; // add_dmg: percent more damage to a monster (mob_db Id)
 };
 
@@ -969,6 +999,8 @@ struct ROWOWIdentity : public DataMap::Base
     bool AreMemoPointsChanged = false;
     uint16 MenuSkillID = 0; // menuskill_id and menuskill_val: a skill's menu is open (the Warp Portal or Teleport destinations, the Pushcart's
     int32 MenuSkillValue = 0; // shop setup), and what it was cast with (Warp Portal's cell, x << 16 | y)
+    int32 MenuSkillValue2 = 0; // menuskill_val2: Weapon Repair's level
+    ObjectGuid MenuSkillTargetGUID; // menuskill_val as a unit: whose items Weapon Repair's list shows
     float MenuSkillZ = 0; // The ground height of a Warp Portal's cell
     bool IsVending = false; // state.vending: its shop is open
     std::string VendingTitle; // message
@@ -1264,7 +1296,8 @@ public:
     void PCPercentHeal(Player* player, int32 hp, int32 sp); // pc_percentheal
     void StatusHeal(Player* player, int64 hp, int64 sp); // status_heal on a player
     bool PCGetItemGroup(Player* player, std::string const& groupName); // ItemGroupDatabase::pc_get_itemgroup
-    bool GiveROItem(Player* player, uint32 itemID, uint32 amount, bool isIdentified); // pc_additem, mailing what doesn't fit
+    bool GiveROItem(Player* player, uint32 itemID, uint32 amount, bool isIdentified, Item** itemOut = nullptr); // pc_additem, mailing what doesn't fit
+    Item* PCSearchInventory(Player* player, uint32 itemID) const; // pc_search_inventory: an item of an item_db Id in the bags (identified, not worn)
     void SkillIdentify(Player* player, Item* item); // skill_identify
     void SendItemIdentifyList(Player* player); // clif_item_identify_list
     void TeleportToRandomSpot(Player* player); // A random spot on the map (AL_TELEPORT level 1), at one of its monsters' homes
@@ -1457,8 +1490,21 @@ public:
     // Stealing (pc.cpp's pc_steal_item)
     bool PCStealItem(Player* player, Unit* bl, uint16 skillLevel); // pc_steal_item
 
-    // Making items with skills (skill.cpp's skill_produce_mix for Holy Water, and Arrow Crafting's skill_arrow_create with its list, ROWOWARROW)
-    bool SkillProduceMix(Player* player, uint16 skillID, uint32 nameID, int32 qty); // skill_produce_mix (the parts the first jobs use)
+    // Making items with skills (ROWOW_Produce.cpp): skill_produce_mix with produce_db (forging, smelting, brewing, Holy Water, the Elemental
+    // Converters) and its list (ROWOWPRODUCE), mending and refining weapons (skill_repairweapon, skill_weaponrefine and their lists,
+    // ROWOWREPAIR and ROWOWREFINE), and a forged weapon's state.  Arrow Crafting's skill_arrow_create with its list, ROWOWARROW
+    std::vector<ROWOWProduce> ProduceDB; // skill_produce_db (startup)
+    void LoadProduceData(); // produce_db, after the items
+    int32 SkillCanProduceMix(Player* player, uint32 nameID, int32 trigger, int32 qty); // skill_can_produce_mix: the recipe's index plus 1, 0 for none
+    bool SkillProduceMix(Player* player, uint16 skillID, uint32 nameID, int32 slot1, int32 slot2, int32 slot3, int32 qty, int32 produceIndex); // skill_produce_mix
+    int32 SkillProduceMixRate(Player* player, uint16 skillID, uint32 nameID, int32 sc, int32 ele); // skill_produce_mix's make_per for one try (in 10000)
+    void ClifSkillProduceMixList(Player* player, int32 skillID, int32 trigger); // clif_skill_produce_mix_list (ROWOWPRODUCE; skillID -1 for an item's list)
+    void ClifParseProduceMix(Player* player, uint32 nameID, uint32 slot1, uint32 slot2, uint32 slot3); // clif_parse_ProduceMix: the list's pick
+    void ClifItemRepairList(Player* sd, Player* dstsd, uint16 skillLevel); // clif_item_repair_list (ROWOWREPAIR)
+    void SkillRepairWeapon(Player* sd, ObjectGuid::LowType itemGUID); // skill_repairweapon: the repair list's pick
+    void ClifItemRefineList(Player* sd); // clif_item_refine_list (ROWOWREFINE)
+    void SkillWeaponRefine(Player* sd, ObjectGuid::LowType itemGUID); // skill_weaponrefine: the refine list's pick
+    static bool GetItemForge(Item const* item, int32& starCrumbsOut, int32& elementOut); // A forged weapon's Star Crumbs and element (ROWOW_ELEMENT_*)
     void ClifArrowCreateList(Player* player); // clif_arrow_create_list
     bool SkillArrowCreate(Player* player, uint32 nameID); // skill_arrow_create
 
@@ -1563,6 +1609,18 @@ public:
     void SkillUnitMoveUnitGroup(Map* map, std::shared_ptr<ROWOWSkillUnitGroup> group, int32 dx, int32 dy); // skill_unit_move_unit_group
     void ClifTalkieBox(Map* map, ROWOWSkillUnit const& unit, std::string const& message); // clif_talkiebox: the trap's message to those around it
 
+    // The Merchant line's supporting systems (ROWOW_SkillSupport.cpp): the monsters an Alchemist summons (mob_once_spawn_sub with a master:
+    // the plants of Summon Flora and Plant Cultivation, the Marine Sphere), whose master is their side in battle_check_target, and Ore
+    // Discovery's ore.  All of it runs in the map thread of the units involved
+    static uint32 const FloraSummonMobIDs[5]; // Summon Flora's plants by level (Mandragora, Hydra, Flora, Parasite, Geographer)
+    Creature* MobOnceSpawnSub(Unit* src, int32 x, int32 y, uint32 mobID, uint8 ai, int64 duration); // mob_once_spawn_sub + mob_spawn, deleted after duration
+    Unit const* BattleGetMaster(Unit const* bl) const; // battle_get_master: the player a summoned monster answers to (on its map), or itself
+    int32 SkillCheckConditionMobMaster(Player* sd, uint16 skillID, uint32 mobClass, int32& countOut); // skill_check_condition_mob_master_sub's count
+    void MobDeadFindingOre(Creature* md); // mob_dead's Ore Discovery: an ore in the loot for the player with the loot priority who knows it
+    void UpdateMobSummon(Creature* md); // A summoned monster's own AI: a plant's search for its master's enemies, a hit Marine Sphere's blast
+    int32 PCSkillHealBonus(Unit const* unit, uint16 skillID) const; // pc_skillheal_bonus: bHealPower (by skill_add_heal_rate) and bSkillHeal
+    int32 PCSkillHeal2Bonus(Unit const* unit, uint16 skillID) const; // pc_skillheal2_bonus: bHealPower2 and bSkillHeal2
+
     // Merchant prices (pc_modifybuyvalue, pc_modifysellvalue)
     int32 PCModifyBuyValue(Player const* player, int32 origValue) const;
     int32 PCModifySellValue(Player const* player, int32 origValue) const;
@@ -1610,6 +1668,7 @@ public:
     ROWOWStatus const* GetROBaseStatus(Unit const* unit) const; // status_get_base_status: a player's base status, a monster's mob_db one
     int64 SkillGetTime(uint16 skillID, uint16 skillLevel) const; // skill_get_time: a skill level's Duration1
     int64 SkillGetTime2(uint16 skillID, uint16 skillLevel) const; // skill_get_time2: its Duration2
+    int32 SkillGetSplash(uint16 skillID, uint16 skillLevel) const; // skill_get_splash: its SplashArea, a negative one AREA_SIZE
     bool SkillCheckCloaking(Unit* bl, ROWOWStatusChangeEntry* sce = nullptr); // skill_check_cloaking: whether a wall is next to the unit
     bool IsCellNoPass(Unit const* unit, ROWOWMapGrid const& mapGrid, int32 cellX, int32 cellY) const; // map_getcell(CELL_CHKNOPASS), near the unit
     bool MapRandomDir(Unit const* bl, int32& x, int32& y) const; // map_random_dir (Confusion's walk), in RO cells

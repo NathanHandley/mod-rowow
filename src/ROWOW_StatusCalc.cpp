@@ -849,6 +849,14 @@ int64 ROWOWMod::SkillGetTime2(uint16 skillID, uint16 skillLevel) const
     return skill != nullptr ? skill->Duration2[ROWOWSkill::GetLevelIndex(skillLevel)] : 0;
 }
 
+int32 ROWOWMod::SkillGetSplash(uint16 skillID, uint16 skillLevel) const
+{
+    // skill_get_splash: a skill level's SplashArea, a negative one being the whole area a unit sees (AREA_SIZE)
+    ROWOWSkill const* skill = GetSkill(skillID);
+    int32 splash = skill != nullptr ? skill->SplashArea[ROWOWSkill::GetLevelIndex(skillLevel)] : 0;
+    return splash < 0 ? BattleConfig.AreaSize : splash;
+}
+
 int32 ROWOWMod::StatusGetHPBonus(ROWOWStatusChange const* sc, int32 type) const
 {
     // status_get_hpbonus, the statuses' part: the HP they add (STATUS_BONUS_FIX), or their rate.  A player's gear and Faith are added by

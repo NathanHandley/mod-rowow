@@ -405,6 +405,11 @@ public:
 
             events.Update(diff);
 
+            // A summoned plant's search for its master's enemies, a hit Marine Sphere's blast
+            ROWOW->UpdateMobSummon(me);
+            if (me->IsAlive() == false)
+                return;
+
             // Note when a path has been walked
             if (IsMovingOnContouredPath == true && me->GetMotionMaster()->HasMovementGeneratorType(ESCORT_MOTION_TYPE) == false)
             {
@@ -453,6 +458,9 @@ public:
             ScriptedAI::DamageTaken(attacker, damage, damageType, damageSchoolMask);
             if (attacker != nullptr && me->HasUnitFlag(UNIT_FLAG_DISABLE_MOVE) == true)
                 OutOfReachTimeInMS = 0;
+            // A summoned Marine Sphere that loses HP blows up at its next update (its Self Destruction's "alchemist" condition)
+            if (ROWOWMobSummon* summon = me->CustomData.Get<ROWOWMobSummon>("ROWOWMobSummon"); summon != nullptr && summon->AI == ROWOW_AI_SPHERE && damage > 0)
+                summon->IsSelfDestructPending = true;
         }
 
         void JustEngagedWith(Unit* who) override

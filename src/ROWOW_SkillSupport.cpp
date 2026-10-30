@@ -19,14 +19,17 @@
 
 #include "Chat.h"
 #include "Creature.h"
+#include "CreatureAI.h"
 #include "Item.h"
 #include "Log.h"
+#include "LootMgr.h"
 #include "Map.h"
 #include "ObjectAccessor.h"
 #include "Player.h"
 #include "Spell.h"
 #include "SpellInfo.h"
 #include "SpellMgr.h"
+#include "TemporarySummon.h"
 #include "Util.h"
 #include "WorldPacket.h"
 #include "WorldSession.h"
@@ -35,14 +38,14 @@
 
 using namespace std;
 
-// What skills do to items and players outside the skill engine: stealing (pc_steal_item), making items (skill_produce_mix for Holy Water,
-// skill_arrow_create), breaking equipment (skill_break_equip), the invincibility after arriving (pc_setinvincibletimer), riding a Peco
-// (pc_setriding), a Crusader's Devotion links (sd->devotion and the devoted's SC_DEVOTION), the Merchant's prices (pc_modifybuyvalue,
-// pc_modifysellvalue), the Mage line's systems (Abracadabra's abra_db, Hindsight's menu, the Elemental Converter list, Sense's window,
-// Mystical Amplification's toggle, the elemental fields, the cells Ice Wall and Land Protector change), and the Acolyte line's (a Monk's
-// Spirit Spheres, reviving, a Priest's partners) and the Archer line's (a Hunter's falcon, the traps given back and revealed, an ensemble's
-// partner).  All of it runs in the player's own map thread, a Devotion link's or an ensemble's two players being on one map whenever either
-// reads the other
+// What skills do to items and players outside the skill engine: stealing (pc_steal_item), Arrow Crafting (skill_arrow_create), breaking
+// equipment (skill_break_equip), the invincibility after arriving (pc_setinvincibletimer), riding a Peco (pc_setriding), a Crusader's Devotion
+// links (sd->devotion and the devoted's SC_DEVOTION), the Merchant's prices (pc_modifybuyvalue, pc_modifysellvalue), the Mage line's systems
+// (Abracadabra's abra_db, Hindsight's menu, the Elemental Converter list, Sense's window, Mystical Amplification's toggle, the elemental
+// fields, the cells Ice Wall and Land Protector change), the Acolyte line's (a Monk's Spirit Spheres, reviving, a Priest's partners), the
+// Archer line's (a Hunter's falcon, the traps given back and revealed, an ensemble's partner) and the Merchant line's (an Alchemist's summoned
+// plants and Marine Spheres, Ore Discovery).  All of it runs in the player's own map thread, a Devotion link's or an ensemble's two players
+// being on one map whenever either reads the other
 
 namespace
 {
@@ -61,60 +64,12 @@ namespace
         return itemIDIter != ROWOW->ItemIDsByAegisName.end() ? int32(itemIDIter->second) : 0;
     }
 
-    // The item in the bags (identified, not worn) of an item_db Id, or null (pc_search_inventory)
-    Item* FindBagItem(Player* player, ROWOWIdentity const& identity, uint32 itemID)
-    {
-        auto itemTemplateIDIter = ROWOW->ItemTemplateIDsByItemID.find(itemID);
-        if (itemTemplateIDIter == ROWOW->ItemTemplateIDsByItemID.end())
-            return nullptr;
-        for (uint8 bag = 0; bag <= 4; bag++)
-        {
-            for (uint32 slot = 1; slot <= MAX_BAG_SIZE; slot++)
-            {
-                Item* item = ROWOWMod::GetItemByClientPosition(player, bag, slot);
-                if (item != nullptr && item->GetEntry() == itemTemplateIDIter->second && ROWOW->GetIdentityEquipPosition(identity, item->GetGUID().GetCounter()) == 0)
-                    return item;
-            }
-        }
-        return nullptr;
-    }
-
     // A deferred bonus a worn item has (bUnbreakableWeapon and the like, which take no value)
     bool HasDeferredBonus(ROWOWStatus const* status, char const* type)
     {
         if (status == nullptr)
             return false;
         return std::any_of(status->Bonus.Deferred.begin(), status->Bonus.Deferred.end(), [type](ROWOWDeferredBonus const& bonus) { return bonus.Type == type; });
-    }
-
-    // skill_can_produce_mix's part for one produce_db recipe: the skill at its level and every material in the bags, qty times (the materials'
-    // templates and amounts, to take)
-    bool CanProduceRecipe(Player* player, ROWOWDataTable const& produceTable, size_t rowIndex, int32 qty, std::vector<std::pair<uint32, uint32>>& materialsOut)
-    {
-        int32 skillColumnIndex = produceTable.GetColumnIndex("RequireSkill");
-        int32 skillLevelColumnIndex = produceTable.GetColumnIndex("RequireSkillLevel");
-        int32 materialsColumnIndex = produceTable.GetColumnIndex("Materials");
-        if (ROWOW->PCCheckSkill(player, uint16(produceTable.GetInt(rowIndex, skillColumnIndex, 0))) < produceTable.GetInt(rowIndex, skillLevelColumnIndex, 0))
-            return false;
-        materialsOut.clear();
-        for (auto const& material : ROWOWDataTable::ParseMapList(produceTable.GetCell(rowIndex, materialsColumnIndex)))
-        {
-            uint32 materialID = 0, amount = 0;
-            for (auto const& field : material)
-            {
-                if (field.first == "ItemID")
-                    materialID = uint32(strtoul(field.second.c_str(), nullptr, 10));
-                else if (field.first == "Amount")
-                    amount = uint32(strtoul(field.second.c_str(), nullptr, 10));
-            }
-            if (materialID == 0)
-                continue;
-            auto materialTemplateIDIter = ROWOW->ItemTemplateIDsByItemID.find(materialID);
-            if (materialTemplateIDIter == ROWOW->ItemTemplateIDsByItemID.end() || player->GetItemCount(materialTemplateIDIter->second) < amount * uint32(qty))
-                return false;
-            materialsOut.emplace_back(materialTemplateIDIter->second, amount * uint32(qty));
-        }
-        return true;
     }
 
     // The names Sense's window shows a monster's element, race and size by (the client's)
@@ -193,34 +148,6 @@ bool ROWOWMod::PCStealItem(Player* player, Unit* bl, uint16 skillLevel)
     return GiveROItem(player, itemID, 1, isIdentified);
 }
 
-bool ROWOWMod::SkillProduceMix(Player* player, uint16 skillID, uint32 nameID, int32 qty)
-{
-    // skill_produce_mix, the parts the first jobs use (Holy Water, made for sure): the produce_db recipe of the item for the skill, its
-    // materials taken from the bags, and the item made.  (Forging, brewing and their success rates come with the Blacksmith and Alchemist)
-    ROWOWDataTable const* produceTable = GetDataTable("mod_rowow_db_produce");
-    if (produceTable == nullptr)
-        return false;
-    int32 productColumnIndex = produceTable->GetColumnIndex("ProduceItemID");
-    int32 skillColumnIndex = produceTable->GetColumnIndex("RequireSkill");
-    if (qty < 1)
-        qty = 1;
-    for (size_t rowIndex = 0; rowIndex < produceTable->Rows.size(); rowIndex++)
-    {
-        // skill_can_produce_mix: the recipe, the skill at its level, and every material in the bags
-        if (uint32(produceTable->GetInt(rowIndex, productColumnIndex, 0)) != nameID || produceTable->GetInt(rowIndex, skillColumnIndex, 0) != skillID)
-            continue;
-        std::vector<std::pair<uint32, uint32>> materials;
-        if (CanProduceRecipe(player, *produceTable, rowIndex, qty, materials) == false)
-            return false;
-        for (auto const& material : materials)
-            player->DestroyItemCount(material.first, material.second, true);
-        // AL_HOLYWATER and SA_CREATECON: make_per = 100000, 100% success
-        GiveROItem(player, nameID, uint32(qty), true);
-        return true;
-    }
-    return false;
-}
-
 void ROWOWMod::ClifArrowCreateList(Player* player)
 {
     // clif_arrow_create_list: the items in the bags (identified, not worn) that Arrow Crafting makes arrows of, for the RO_Identity addon to
@@ -235,7 +162,7 @@ void ROWOWMod::ClifArrowCreateList(Player* player)
     for (size_t rowIndex = 0; rowIndex < arrowTable->Rows.size(); rowIndex++)
     {
         int32 itemID = GetItemIDByAegisName(arrowTable->GetCell(rowIndex, sourceColumnIndex));
-        Item* item = itemID != 0 ? FindBagItem(player, *identity, uint32(itemID)) : nullptr;
+        Item* item = itemID != 0 ? PCSearchInventory(player, uint32(itemID)) : nullptr;
         if (item == nullptr || IsItemIdentified(item) == false)
             continue;
         itemTemplateIDs += fmt::format("{}{}", itemTemplateIDs.empty() == true ? "" : ",", item->GetEntry());
@@ -266,7 +193,7 @@ bool ROWOWMod::SkillArrowCreate(Player* player, uint32 nameID)
     {
         if (uint32(GetItemIDByAegisName(arrowTable->GetCell(rowIndex, sourceColumnIndex))) != nameID)
             continue;
-        Item* item = FindBagItem(player, *identity, nameID);
+        Item* item = PCSearchInventory(player, nameID);
         if (item == nullptr)
             return false;
         uint32 count = 1;
@@ -813,22 +740,13 @@ void ROWOWMod::ClifElementalConverterList(Player* sd)
 {
     // clif_elementalconverter_list: the Elemental Converters (produce_db's item level 23) the player has the materials for, for the RO_Identity
     // addon to list (ROWOWCONVERTER "<item template>,..."); the one picked comes back as .ro makearrow, as Arrow Crafting's list does
-    ROWOWDataTable const* produceTable = GetDataTable("mod_rowow_db_produce");
-    if (produceTable == nullptr)
-        return;
-    int32 productColumnIndex = produceTable->GetColumnIndex("ProduceItemID");
-    int32 itemLevelColumnIndex = produceTable->GetColumnIndex("ItemLevel");
     std::string itemTemplateIDs;
     int32 count = 0;
-    for (size_t rowIndex = 0; rowIndex < produceTable->Rows.size(); rowIndex++)
+    for (ROWOWProduce const& produce : ProduceDB)
     {
-        std::vector<std::pair<uint32, uint32>> materials;
-        if (produceTable->GetInt(rowIndex, itemLevelColumnIndex, 0) != 23 || CanProduceRecipe(sd, *produceTable, rowIndex, 1, materials) == false)
+        if (SkillCanProduceMix(sd, produce.NameID, 23, 1) == 0)
             continue;
-        auto itemTemplateIDIter = ItemTemplateIDsByItemID.find(uint32(produceTable->GetInt(rowIndex, productColumnIndex, 0)));
-        if (itemTemplateIDIter == ItemTemplateIDsByItemID.end())
-            continue;
-        itemTemplateIDs += fmt::format("{}{}", itemTemplateIDs.empty() == true ? "" : ",", itemTemplateIDIter->second);
+        itemTemplateIDs += fmt::format("{}{}", itemTemplateIDs.empty() == true ? "" : ",", ItemTemplateIDsByItemID.at(produce.NameID));
         count++;
     }
     if (count > 0)
@@ -1391,4 +1309,167 @@ void ROWOWMod::SkillExtremityFistEnd(Unit* src, Unit* target, uint16 skillLevel)
         y = i;
     if (UnitMovePos(src, srcX + x, srcY + y) == true && src->IsPlayer() == true)
         SendSpiritBallsToClient(src->ToPlayer()); // clif_spiritball
+}
+
+uint32 const ROWOWMod::FloraSummonMobIDs[5] = { ROWOW_MOBID_G_MANDRAGORA, ROWOW_MOBID_G_HYDRA, ROWOW_MOBID_G_FLORA, ROWOW_MOBID_G_PARASITE, ROWOW_MOBID_G_GEOGRAPHER };
+
+Creature* ROWOWMod::MobOnceSpawnSub(Unit* src, int32 x, int32 y, uint32 mobID, uint8 ai, int64 duration)
+{
+    // mob_once_spawn_sub and mob_spawn: the monster on the RO cell, gone after the duration (its deletetimer: a timed summon of the caster's).
+    // One with an AI (AI_FLORA, AI_SPHERE) answers to the caster (master_id) and is in its summon list.  A plant takes the caster's faction,
+    // so it can fight the caster's enemies; a Marine Sphere is neutral instead, as only players hitting it (alchemist_summon_setting) set it
+    // off, and WoW lets no one attack a unit of their own side
+    uint32 entry = GetMobCreatureEntry(mobID);
+    if (entry == 0)
+    {
+        LOG_ERROR("module.ROWOW", "ROWOWMod::MobOnceSpawnSub: monster {} has no creature template (run the converter)", mobID);
+        return nullptr;
+    }
+    if (src->IsInWorld() == false)
+        return nullptr;
+    // The ground of the cell near the caster's height (the highest ground can be terrain hidden above an RO map's floor)
+    float cellX = 0, cellY = 0;
+    GetCellWorldPosition(src->GetMapId(), x, y, cellX, cellY);
+    float cellZ = src->GetMap()->GetHeight(src->GetPhaseMask(), cellX, cellY, src->GetPositionZ() + ROWOW_SKILL_CELL_GROUND_SEARCH_HEIGHT, true,
+        ROWOW_SKILL_CELL_GROUND_SEARCH_DISTANCE);
+    if (cellZ <= INVALID_HEIGHT)
+        return nullptr;
+    TempSummon* md = src->SummonCreature(entry, cellX, cellY, cellZ, src->GetOrientation(), TEMPSUMMON_TIMED_DESPAWN, uint32(std::max<int64>(1, duration)));
+    if (md == nullptr)
+        return nullptr;
+    if (ai != ROWOW_AI_NONE)
+    {
+        ROWOWMobSummon* summon = md->CustomData.GetDefault<ROWOWMobSummon>("ROWOWMobSummon");
+        summon->MasterGUID = src->GetGUID();
+        summon->AI = ai;
+        md->SetFaction(ai == ROWOW_AI_SPHERE ? uint32(FACTION_CREATURE) : src->GetFaction());
+        GetSkillUnitData(src)->SummonGUIDs.push_back(md->GetGUID());
+    }
+    return md;
+}
+
+Unit const* ROWOWMod::BattleGetMaster(Unit const* bl) const
+{
+    // battle_get_master: a monster a skill summoned answers to its master, while the master is on its map
+    ROWOWMobSummon const* summon = bl->IsCreature() == true ? bl->CustomData.Get<ROWOWMobSummon>("ROWOWMobSummon") : nullptr;
+    if (summon == nullptr || summon->MasterGUID.IsEmpty() == true)
+        return bl;
+    Unit const* master = ObjectAccessor::GetUnit(*bl, summon->MasterGUID);
+    return master != nullptr && master->IsInWorld() == true ? master : bl;
+}
+
+int32 ROWOWMod::SkillCheckConditionMobMaster(Player* sd, uint16 skillID, uint32 mobClass, int32& countOut)
+{
+    // skill_check_condition_mob_master_sub over the map: the player's summons of the skill's AI (AI_SPHERE for Summon Marine Sphere, AI_FLORA
+    // for Summon Flora) on its map, and in countOut those of the monster asked for.  Summons gone or elsewhere leave the list
+    uint8 ai = skillID == ROWOW_SKILL_AM_SPHEREMINE ? ROWOW_AI_SPHERE : ROWOW_AI_FLORA;
+    std::vector<ObjectGuid>& summonGUIDs = GetSkillUnitData(sd)->SummonGUIDs;
+    int32 i = 0;
+    countOut = 0;
+    for (auto summonGUIDIter = summonGUIDs.begin(); summonGUIDIter != summonGUIDs.end();)
+    {
+        Creature* md = ObjectAccessor::GetCreature(*sd, *summonGUIDIter);
+        ROWOWMobSummon const* summon = md != nullptr ? md->CustomData.Get<ROWOWMobSummon>("ROWOWMobSummon") : nullptr;
+        if (md == nullptr || md->IsAlive() == false || summon == nullptr)
+        {
+            summonGUIDIter = summonGUIDs.erase(summonGUIDIter);
+            continue;
+        }
+        ++summonGUIDIter;
+        if (summon->AI != ai)
+            continue; // Non alchemist summoned mobs have nothing to do here.
+        if (GetROMobID(md) == mobClass)
+            countOut++;
+        i++;
+    }
+    return i;
+}
+
+void ROWOWMod::MobDeadFindingOre(Creature* md)
+{
+    // mob_dead's Ore Discovery (triggers if owner has loot priority, does not require to be the killer): the player first in the loot (the most
+    // damage, the first attacker's raised by first_attack_loot_bonus) who knows it gets a random ore of IG_ORE at its rate (GROUP_ALGORITHM_DROP)
+    // in the monster's loot.  (The loot is the corpse's until the ground drops, R10)
+    ROWOWDamageLog const* damageLog = md->CustomData.Get<ROWOWDamageLog>("ROWOWDamageLog");
+    if (damageLog == nullptr || damageLog->Entries.empty() == true)
+        return;
+    uint64 totalDamage = 0;
+    for (ROWOWDamageLogEntry const& entry : damageLog->Entries)
+        totalDamage += entry.Damage;
+    ROWOWDamageLogEntry const* first = nullptr;
+    uint64 firstDamage = 0;
+    for (size_t i = 0; i < damageLog->Entries.size(); i++)
+    {
+        // Officially, the first player in the damage log gets 30% of total damage as bonus for loot priority
+        uint64 damage = damageLog->Entries[i].Damage + (i == 0 ? totalDamage * uint64(BattleConfig.FirstAttackLootBonus) / 100 : 0);
+        if (first == nullptr || damage > firstDamage)
+        {
+            first = &damageLog->Entries[i];
+            firstDamage = damage;
+        }
+    }
+    Player* firstSD = ObjectAccessor::GetPlayer(*md, first->PlayerGUID);
+    if (firstSD == nullptr || PCCheckSkill(firstSD, ROWOW_SKILL_BS_FINDINGORE) <= 0)
+        return;
+    auto groupIter = ItemGroupsByName.find("ORE");
+    if (groupIter == ItemGroupsByName.end())
+        return;
+    auto subGroupIter = groupIter->second.SubGroupsByID.find(1);
+    if (subGroupIter == groupIter->second.SubGroupsByID.end() || subGroupIter->second.Entries.empty() == true)
+        return;
+    // We pick a random item from the group and then do a drop check based on the rate.  (item_group_rate 100: the rate as it is, at least 1)
+    ROWOWItemGroupEntry const& entry = subGroupIter->second.Entries[urand(0, uint32(subGroupIter->second.Entries.size() - 1))];
+    if (urand(0, 9999) >= std::clamp<uint32>(entry.Rate, 1, 10000))
+        return;
+    auto itemTemplateIDIter = ItemTemplateIDsByItemID.find(entry.ItemID);
+    if (itemTemplateIDIter == ItemTemplateIDsByItemID.end())
+        return;
+    md->loot.AddItem(LootStoreItem(itemTemplateIDIter->second, 0, 100.0f, false, LOOT_MODE_DEFAULT, 0, 1, 1));
+}
+
+void ROWOWMod::UpdateMobSummon(Creature* md)
+{
+    // A summoned monster's own part of mob_ai_sub_hard, from its update: a plant (AI_FLORA) that isn't fighting looks for its master's enemies
+    // within its attack reach (it can't move), and a Marine Sphere that was hit uses Self Destruction (its mob skill, at once on any damage:
+    // the "alchemist" condition).  The rest of monster AI and mob skills come with R10
+    ROWOWMobSummon* summon = md->CustomData.Get<ROWOWMobSummon>("ROWOWMobSummon");
+    if (summon == nullptr || md->IsAlive() == false || md->IsInWorld() == false)
+        return;
+    if (summon->AI == ROWOW_AI_SPHERE)
+    {
+        if (summon->IsSelfDestructPending == true)
+        {
+            summon->IsSelfDestructPending = false;
+            SkillCastendNoDamageID(md, md, ROWOW_SKILL_NPC_SELFDESTRUCTION, 1, GetTick(), 0);
+        }
+        return;
+    }
+    if (summon->AI != ROWOW_AI_FLORA || md->GetVictim() != nullptr || md->HasUnitState(UNIT_STATE_CASTING) == true)
+        return;
+    ROWOWStatus const* status = GetROStatus(md);
+    if (status == nullptr)
+        return;
+    // mob_ai_sub_hard_activesearch: the closest enemy it can see.  It searches its view range, but can't chase, so it only attacks the
+    // closest when that one is within its attack range (one further is locked until mob_unlock_time, and nothing is attacked): the closest
+    // within the attack range is the same
+    Unit* target = nullptr;
+    int32 targetDistance = 0;
+    MapForEachInRange(md, status->Range, [this, md, &target, &targetDistance](Unit* bl)
+    {
+        if (bl == md || StatusCheckSkillUse(md, bl, 0, 0) == false || BattleCheckTarget(md, bl, ROWOW_BCT_ENEMY) <= 0 ||
+            md->IsValidAttackTarget(bl) == false || md->IsWithinLOSInMap(bl) == false)
+            return 0;
+        int32 distance = DistanceBL(md, bl);
+        if (target == nullptr || distance < targetDistance)
+        {
+            target = bl;
+            targetDistance = distance;
+        }
+        return 0;
+    });
+    if (target == nullptr || md->AI() == nullptr)
+        return;
+    // A WoW creature fights what it has threat on (its victim is picked from its threat list)
+    md->AddThreat(target, 1.0f);
+    md->AI()->AttackStart(target);
 }

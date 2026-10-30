@@ -815,7 +815,7 @@ namespace
                 return;
             }
             int32 areaFlag = flag | ROWOW_BCT_PARTY | 1;
-            ROWOW->PartyForEachSameMap(sd, skill->SplashArea[ROWOWSkill::GetLevelIndex(skillLevel)], [this, src, skillLevel, tick, areaFlag](Unit* member)
+            ROWOW->PartyForEachSameMap(sd, ROWOW->SkillGetSplash(SkillID, skillLevel), [this, src, skillLevel, tick, areaFlag](Unit* member)
             {
                 return ROWOW->SkillAreaSub(member, src, SkillID, skillLevel, tick, areaFlag, ROWOWSkillAreaFunc::CastendNoDamageID);
             });

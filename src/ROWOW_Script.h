@@ -28,6 +28,7 @@
 
 class Item;
 class Player;
+class Unit;
 struct ROWOWIdentity;
 struct ROWOWStatus;
 
@@ -100,6 +101,17 @@ struct ROWOWScript
 };
 
 // One run of a script: what it's attached to (rAthena's RID, the player), and its state
+// potion_flag 1 (Aid Potion and the like throwing a potion): what the potion's itemheal and percentheal would heal, kept instead of healing,
+// and the unit its statuses go to instead (potion_target, for half their time)
+struct ROWOWPotionHeal
+{
+    int32 HP = 0; // potion_hp
+    int32 SP = 0;
+    int32 PerHP = 0; // potion_per_hp
+    int32 PerSP = 0;
+    Unit* Target = nullptr; // potion_target, null for none
+};
+
 struct ROWOWScriptContext
 {
     Player* AttachedPlayer = nullptr;
@@ -111,6 +123,7 @@ struct ROWOWScriptContext
     Item const* EquipItem = nullptr; // The worn item whose script (or card's, combo's) runs (current_equip_item_index)
     uint32 EquipPositions = 0; // Where it's worn (its equip, or current_equip_combo_pos for a combo), which an autobonus keeps
     uint32 EquipCardID = 0; // The card whose script runs (current_equip_card_id), 0 for none
+    ROWOWPotionHeal* Potion = nullptr; // potion_flag 1: a thrown potion's heal is only noted here, null otherwise
     std::unordered_map<std::string, ROWOWScriptValue> Variables; // By full name.  Only the run's own for now: lasting variables come with R7
     std::vector<ROWOWScriptValue> Stack;
     size_t InstructionIndex = 0;

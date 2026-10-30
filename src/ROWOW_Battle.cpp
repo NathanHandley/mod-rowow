@@ -1410,6 +1410,9 @@ ROWOWDamage ROWOWMod::BattleCalcMiscAttack(Unit* src, Unit* target, uint16 skill
             md.Damage = 30 + 10 * skillLevel;
             md.Damage += skillLevel * PCCheckSkill(src, ROWOW_SKILL_BA_MUSICALLESSON);
             break;
+        case ROWOW_SKILL_NPC_SELFDESTRUCTION:
+            md.Damage = src->GetHealth();
+            break;
         case ROWOW_SKILL_ASC_BREAKER:
             md.Damage = 500 + int32(urand(0, 499)) + 5 * skillLevel * sstatus->Stats[ROWOW_STAT_INT];
             nk.set(ROWOW_NK_IGNOREFLEE);
@@ -2374,8 +2377,14 @@ void ROWOWMod::BattleCalcElementDamage(ROWOWDamage& wd, Unit* src, Unit* target,
         }
     }
 
-    // These mastery bonuses are non-elemental and should apply even if the attack misses.  (The Star Crumbs of forged weapons come with
-    // forging, R8)
+    // These mastery bonuses are non-elemental and should apply even if the attack misses
+    // They are still increased by the EDP/Magnum Break bonus damage (WATK_ELEMENT)
+    if (src->IsPlayer() == true && BattleSkillStacksMasteriesVVS(skillID, true) == true)
+    {
+        // Star Crumb bonus damage
+        AttackAdd(wd, isLeftHanded, sstatus->Bonus.RightWeapon.Star, sstatus->Bonus.LeftWeapon.Star);
+    }
+    // Check if general mastery bonuses apply (above check is only for Star Crumb)
     if (BattleSkillStacksMasteriesVVS(skillID, false) == true)
     {
         // Spirit Sphere bonus damage
@@ -2426,8 +2435,10 @@ void ROWOWMod::BattleCalcElementDamage(ROWOWDamage& wd, Unit* src, Unit* target,
         ROWOWStatusChangeEntry const* sce = sc->GetSCE(ROWOW_SC_WATK_ELEMENT);
         if (src->IsPlayer() == true && sce != nullptr)
         {
-            // Pretend the normal attack was of the element stored in the status change.  (Star Crumbs come with forging, R8)
+            // Pretend the normal attack was of the element stored in the status change
             wd.BaseDamage = BattleAttrFix(src, target, wd.BaseDamage, sce->Val1, tstatus->DefElement, tstatus->ElementLevel, 1);
+            // Star Crumb bonus damage
+            wd.BaseDamage += sstatus->Bonus.RightWeapon.Star;
             // Spirit Sphere bonus damage
             wd.BaseDamage += BattleGetSpiritBallDamage(wd, src, skillID);
             // Add percent of the base damage to the damage

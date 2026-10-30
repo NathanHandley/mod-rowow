@@ -441,7 +441,10 @@ public:
             }
         }
         if (unit->IsCreature() == true)
+        {
+            ROWOW->MobDeadFindingOre(unit->ToCreature());
             ROWOW->MobDeadExp(unit->ToCreature());
+        }
         else if (unit->IsPlayer() == true)
             ROWOW->PCDeadPenalty(unit->ToPlayer());
     }
@@ -556,12 +559,17 @@ public:
             { "warp",     HandleROWarpCommand,   SEC_PLAYER,     Console::No },
             { "makearrow", HandleROMakeArrowCommand, SEC_PLAYER, Console::No },
             { "autospell", HandleROAutospellCommand, SEC_PLAYER, Console::No },
+            { "produce",  HandleROProduceCommand, SEC_PLAYER,    Console::No },
+            { "repair",   HandleRORepairCommand, SEC_PLAYER,     Console::No },
+            { "weaponrefine", HandleROWeaponRefineCommand, SEC_PLAYER, Console::No },
             { "message",  HandleROMessageCommand, SEC_PLAYER,    Console::No },
             { "mobcast",  HandleROMobCastCommand, SEC_GAMEMASTER, Console::No },
             { "setcart",  HandleROSetCartCommand, SEC_GAMEMASTER, Console::No },
             { "setriding", HandleROSetRidingCommand, SEC_GAMEMASTER, Console::No },
             { "setfalcon", HandleROSetFalconCommand, SEC_GAMEMASTER, Console::No },
             { "spiritball", HandleROSpiritBallCommand, SEC_GAMEMASTER, Console::No },
+            { "breakrate", HandleROBreakRateCommand, SEC_GAMEMASTER, Console::No },
+            { "producerate", HandleROProduceRateCommand, SEC_GAMEMASTER, Console::No },
             { "units",    HandleROUnitsCommand,  SEC_GAMEMASTER, Console::No },
             { "info",     HandleROInfoCommand,   SEC_GAMEMASTER, Console::No },
             { "form",     HandleROFormCommand,   SEC_GAMEMASTER, Console::No },
@@ -862,7 +870,7 @@ public:
         {
             identity->MenuSkillID = 0; // clif_menuskill_clear
             identity->MenuSkillValue = 0;
-            if (itemIter == ROWOW->ItemsByItemTemplateID.end() || ROWOW->SkillProduceMix(player, ROWOW_SKILL_SA_CREATECON, itemIter->second.ItemID, 1) == false)
+            if (itemIter == ROWOW->ItemsByItemTemplateID.end() || ROWOW->SkillProduceMix(player, ROWOW_SKILL_SA_CREATECON, itemIter->second.ItemID, 0, 0, 0, 1, -1) == false)
                 ROWOW->ClifSkillFail(player, ROWOW_SKILL_SA_CREATECON, ROWOW_USESKILL_FAIL_LEVEL);
             return true;
         }
@@ -878,6 +886,83 @@ public:
         if (player == nullptr)
             return false;
         ROWOW->SkillAutospell(player, uint16(skillID));
+        return true;
+    }
+
+    static bool HandleROProduceCommand(ChatHandler* handler, uint32 itemTemplateID, Optional<uint32> slot1, Optional<uint32> slot2, Optional<uint32> slot3)
+    {
+        // The produce list's pick (clif_parse_ProduceMix): the item to make and, for a weapon, up to three additions (Star Crumbs, an element
+        // stone), all by their item templates; 0 closes the list
+        Player* player = GetFormPlayer(handler);
+        if (player == nullptr)
+            return false;
+        auto getItemID = [](Optional<uint32> const& templateID)
+        {
+            auto itemIter = templateID.has_value() == true ? ROWOW->ItemsByItemTemplateID.find(*templateID) : ROWOW->ItemsByItemTemplateID.end();
+            return itemIter != ROWOW->ItemsByItemTemplateID.end() ? itemIter->second.ItemID : 0;
+        };
+        ROWOW->ClifParseProduceMix(player, getItemID(itemTemplateID), getItemID(slot1), getItemID(slot2), getItemID(slot3));
+        return true;
+    }
+
+    static bool HandleRORepairCommand(ChatHandler* handler, uint64 itemGUID)
+    {
+        // Weapon Repair's list pick (clif_parse_RepairItem), the item's GUID; 0 cancels
+        Player* player = GetFormPlayer(handler);
+        if (player == nullptr)
+            return false;
+        ROWOW->SkillRepairWeapon(player, ObjectGuid::LowType(itemGUID));
+        return true;
+    }
+
+    static bool HandleROWeaponRefineCommand(ChatHandler* handler, uint64 itemGUID)
+    {
+        // Upgrade Weapon's list pick (clif_parse_WeaponRefine), the item's GUID; 0 cancels
+        Player* player = GetFormPlayer(handler);
+        if (player == nullptr)
+            return false;
+        ROWOW->SkillWeaponRefine(player, ObjectGuid::LowType(itemGUID));
+        return true;
+    }
+
+    static bool HandleROProduceRateCommand(ChatHandler* handler, uint32 itemID, Optional<uint32> runs, Optional<uint32> starCrumbs, Optional<uint32> stone)
+    {
+        // For comparing with the oracle's @oracleproduce: the player's chance to make an item (item_db Id) of its recipe's skill, with Star Crumbs
+        // and an element stone (1-4: Flame Heart, Mystic Frozen, Rough Wind, Great Nature), over many tries of skill_produce_mix's rate (its random
+        // part rolled each), without making anything
+        Player* player = GetFormPlayer(handler);
+        auto produceIter = std::find_if(ROWOW->ProduceDB.begin(), ROWOW->ProduceDB.end(), [itemID](ROWOWProduce const& produce) { return produce.NameID == itemID; });
+        if (player == nullptr || produceIter == ROWOW->ProduceDB.end())
+        {
+            handler->PSendSysMessage("No produce_db recipe makes {}.", itemID);
+            return false;
+        }
+        int32 const stoneElements[5] = { ROWOW_ELEMENT_NEUTRAL, ROWOW_ELEMENT_FIRE, ROWOW_ELEMENT_WATER, ROWOW_ELEMENT_WIND, ROWOW_ELEMENT_EARTH };
+        uint32 runCount = std::clamp<uint32>(runs.value_or(10000), 1, 1000000);
+        int32 sc = int32(std::min<uint32>(starCrumbs.value_or(0), 3));
+        int32 ele = stoneElements[std::min<uint32>(stone.value_or(0), 4)];
+        uint32 made = 0;
+        int64 totalMakePer = 0;
+        for (uint32 run = 0; run < runCount; run++)
+        {
+            int32 makePer = ROWOW->SkillProduceMixRate(player, produceIter->RequireSkillID, itemID, sc, ele);
+            totalMakePer += makePer;
+            if (int32(urand(0, 9999)) < makePer)
+                made++;
+        }
+        std::string line = fmt::format("produce nameid={} skill={} star_crumbs={} element={} runs={} made={} pct={:.2f} avg_make_per={:.1f}", itemID,
+            produceIter->RequireSkillID, sc, ele, runCount, made, 100.0 * made / runCount, double(totalMakePer) / runCount);
+        handler->SendSysMessage(line);
+        LOG_INFO("module.ROWOW", ".ro producerate: {}", line);
+        return true;
+    }
+
+    static bool HandleROBreakRateCommand(ChatHandler* handler, int32 rate)
+    {
+        // For seeing equipment break: sets equip_self_break_rate (the percent of a self-break chance that counts, 100 normally; at 20000 Over
+        // Thrust's 0.1% a weapon hit is 20%).  A world-thread command, run between the maps' updates; the converter's value is back at restart
+        ROWOW->BattleConfig.EquipSelfBreakRate = std::clamp(rate, 0, 1000000);
+        handler->PSendSysMessage("equip_self_break_rate is now {}.", ROWOW->BattleConfig.EquipSelfBreakRate);
         return true;
     }
 

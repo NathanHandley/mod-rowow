@@ -320,6 +320,14 @@ void ROWOWMod::LoadStatusData()
         readValue("multi_trigger_trap", BattleConfig.MultiTriggerTrap);
         readValue("skill_removetrap_type", BattleConfig.SkillRemoveTrapType);
         readValue("refresh_song", BattleConfig.RefreshSong);
+        readValue("weapon_produce_rate", BattleConfig.WeaponProduceRate);
+        readValue("potion_produce_rate", BattleConfig.PotionProduceRate);
+        readValue("oridecon_research_fix", BattleConfig.OrideconResearchFix);
+        readValue("land_skill_limit", BattleConfig.LandSkillLimit);
+        readValue("alchemist_summon_setting", BattleConfig.AlchemistSummonSetting);
+        readValue("alchemist_summon_reward", BattleConfig.AlchemistSummonReward);
+        readValue("skill_add_heal_rate", BattleConfig.SkillAddHealRate);
+        readValue("first_attack_loot_bonus", BattleConfig.FirstAttackLootBonus);
         BattleConfig.MultiLevelUp = multiLevelUp != 0;
         BattleConfig.MaxAspdAmotion = (2000 - maxAspd * 10) * 2; // As battle.cpp converts it after loading
     }
@@ -625,6 +633,9 @@ void ROWOWMod::CalculateIdentityStatus(Player* player, ROWOWIdentity& identity) 
     // The base ATK bonus of the weapon type held (bWeaponAtk)
     if (status.WeaponType < ROWOW_WEAPON_TYPE_MAX && status.Bonus.WeaponAtk[status.WeaponType] != 0)
         status.BaseAttack += status.Bonus.WeaponAtk[status.WeaponType];
+    // Absolute modifiers from passive skills
+    if (PCCheckSkill(identity, ROWOW_SKILL_BS_HILTBINDING) > 0)
+        status.BaseAttack += 4;
 
     // ----- HP MAX CALCULATION -----
     status.MaxHP = StatusCalcMaxHPPC(identity, status, sc);
@@ -1241,10 +1252,11 @@ void ROWOWMod::PCLostExp(Player* player, uint64 baseExp, uint64 jobExp)
 
 void ROWOWMod::MobLogDamage(Creature* creature, Unit* attacker, uint32 damage)
 {
-    // mob_log_damage: players in the form only (their pets are put away there).  The damage counted is what the monster had left to lose
+    // mob_log_damage: players in the form only (their pets are put away there), a summoned monster's damage counting as its master's.  The
+    // damage counted is what the monster had left to lose
     if (creature == nullptr || attacker == nullptr || damage == 0 || GetROMobID(creature) == 0)
         return;
-    Player* player = attacker->ToPlayer();
+    Player const* player = BattleGetMaster(attacker)->ToPlayer();
     if (player == nullptr || IsInROForm(player) == false)
         return;
     damage = std::min<uint32>(damage, creature->GetHealth());
@@ -1276,6 +1288,13 @@ void ROWOWMod::MobDeadExp(Creature* creature)
     ROWOWDamageLog* damageLog = creature->CustomData.Get<ROWOWDamageLog>("ROWOWDamageLog");
     if (damageLog == nullptr || damageLog->Entries.empty() == true)
         return;
+    // Only player-summoned mobs do not give exp. [Skotlex]
+    if (ROWOWMobSummon const* summon = creature->CustomData.Get<ROWOWMobSummon>("ROWOWMobSummon"); summon != nullptr && summon->AI != ROWOW_AI_NONE &&
+        summon->MasterGUID.IsEmpty() == false)
+    {
+        damageLog->Entries.clear();
+        return;
+    }
     std::deque<ROWOWDamageLogEntry> entries;
     entries.swap(damageLog->Entries);
 

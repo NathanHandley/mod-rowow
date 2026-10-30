@@ -365,6 +365,40 @@ struct ROWOWSkillUnitData : public DataMap::Base
     uint16 SkillLevelDance = 0;
     uint16 EncoreSkillID = 0; // The dance Encore starts for it (unit_skilluse_id from the server, not a client request: no after-cast delay check)
     std::string Message; // sd->message: what its next Talkie Box says (clif_parse_UseSkillToPosMoreInfo's text, here `.ro message`)
+    int32 PotionHP = 0; // potion_hp and potion_sp: the heal its Slim Potion Pitcher gives each it lands on (rAthena's globals, kept per caster)
+    int32 PotionSP = 0;
+    std::vector<ObjectGuid> SummonGUIDs; // The monsters it summoned that answer to it (master_id): an Alchemist's plants and Marine Spheres
+};
+
+// A monster's special AI (e_mob_ai: special_state.ai): AI_NONE a monster of its own, AI_FLORA a summoned plant that attacks its master's
+// enemies, AI_SPHERE a summoned Marine Sphere that blows up when hit
+#define ROWOW_AI_NONE                               0
+#define ROWOW_AI_ATTACK                             1
+#define ROWOW_AI_SPHERE                             2
+#define ROWOW_AI_FLORA                              3
+
+// The monsters skills summon (rAthena's e_mob_bosstype / MOBID_*)
+#define ROWOW_MOBID_RED_PLANT                       1078
+#define ROWOW_MOBID_BLUE_PLANT                      1079
+#define ROWOW_MOBID_GREEN_PLANT                     1080
+#define ROWOW_MOBID_YELLOW_PLANT                    1081
+#define ROWOW_MOBID_WHITE_PLANT                     1082
+#define ROWOW_MOBID_SHINING_PLANT                   1083
+#define ROWOW_MOBID_BLACK_MUSHROOM                  1084
+#define ROWOW_MOBID_MARINE_SPHERE                   1142
+#define ROWOW_MOBID_G_PARASITE                      1555
+#define ROWOW_MOBID_G_FLORA                         1575
+#define ROWOW_MOBID_G_HYDRA                         1579
+#define ROWOW_MOBID_G_MANDRAGORA                    1589
+#define ROWOW_MOBID_G_GEOGRAPHER                    1590
+
+// A monster a skill summoned (mob_once_spawn_sub's master_id and special_state.ai), kept on the creature as "ROWOWMobSummon".  Only the
+// creature's map thread touches it
+struct ROWOWMobSummon : public DataMap::Base
+{
+    ObjectGuid MasterGUID; // master_id: who it answers to (on its map), empty for none
+    uint8 AI = ROWOW_AI_NONE; // ROWOW_AI_*
+    bool IsSelfDestructPending = false; // A Marine Sphere was hit: it blows up at its next update (its mob skill's "alchemist" condition)
 };
 
 // skill_unit: one cell of a ground skill (a Fire Wall's cell, a Safety Wall, a trap), at an RO cell of its group's map
