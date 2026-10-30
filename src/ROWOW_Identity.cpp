@@ -177,7 +177,7 @@ void ROWOWMod::LoadIdentityData()
         job.IllusionJobKey = ToLower(job.Name);
         if (job.IllusionJobKey.size() > 5 && job.IllusionJobKey.compare(job.IllusionJobKey.size() - 5, 5, "_high") == 0)
             job.IllusionJobKey.resize(job.IllusionJobKey.size() - 5); // Transcendent first jobs look like the first job
-        jobIDsByName[job.Name] = job.JobID;
+        jobIDsByName[GetJobNameKey(job.Name)] = job.JobID;
     }
     if (ROWOWDataTable const* jobTable = GetDataTable(ROWOW_DATA_TABLE_JOB))
     {
@@ -192,7 +192,7 @@ void ROWOWMod::LoadIdentityData()
         {
             for (auto const& jobField : ROWOWDataTable::ParseMap(jobTable->GetCell(rowIndex, jobsColumnIndex)))
             {
-                auto jobIDIter = jobIDsByName.find(jobField.first);
+                auto jobIDIter = jobIDsByName.find(GetJobNameKey(jobField.first));
                 if (jobIDIter == jobIDsByName.end() || jobField.second != "true")
                     continue;
                 ROWOWJob& job = JobsByID[jobIDIter->second];
@@ -308,6 +308,16 @@ void ROWOWMod::LoadIdentityData()
 uint64 ROWOWMod::GetIllusionJobKey(std::string const& jobKey, bool isMale)
 {
     return (uint64(std::hash<std::string>{}(jobKey)) << 1) | (isMale == true ? 1 : 0);
+}
+
+std::string ROWOWMod::GetJobNameKey(std::string const& jobName)
+{
+    // The job database names its jobs by rAthena's JOB_ constants, some of which have aliases differing only in underscores
+    std::string jobNameKey;
+    for (char curChar : jobName)
+        if (curChar != '_')
+            jobNameKey.push_back(char(tolower((unsigned char)curChar)));
+    return jobNameKey;
 }
 
 ROWOWJob const* ROWOWMod::GetJob(uint16 jobID) const
@@ -451,41 +461,13 @@ void ROWOWMod::SaveIdentity(Player* player, CharacterDatabaseTransaction trans)
     }
 }
 
-uint32 ROWOWMod::GetIdentityMaxHP(ROWOWIdentity const& identity) const
-{
-    // rAthena's status_calc_maxhp_pc, so far without the bonuses of gear, cards and skills: the job's base HP for the level, raised 1%
-    // per VIT, and by a quarter for transcendent jobs
-    ROWOWJob const* job = GetJob(identity.JobID);
-    if (job == nullptr || job->BaseHPByLevel.empty() == true)
-        return 1;
-    uint32 levelIndex = std::min<uint32>(std::max<uint32>(identity.BaseLevel, 1) - 1, uint32(job->BaseHPByLevel.size()) - 1);
-    double maxHP = double(job->BaseHPByLevel[levelIndex]);
-    maxHP *= 1.0 + identity.Stats[2] * 0.01;
-    if (job->IsUpper == true)
-        maxHP *= 1.25;
-    return std::max<uint32>(1, uint32(maxHP));
-}
-
-uint32 ROWOWMod::GetIdentityMaxSP(ROWOWIdentity const& identity) const
-{
-    // rAthena's status_calc_maxsp_pc, likewise: the job's base SP for the level, raised 1% per INT, and by a quarter for transcendent jobs
-    ROWOWJob const* job = GetJob(identity.JobID);
-    if (job == nullptr || job->BaseSPByLevel.empty() == true)
-        return 1;
-    uint32 levelIndex = std::min<uint32>(std::max<uint32>(identity.BaseLevel, 1) - 1, uint32(job->BaseSPByLevel.size()) - 1);
-    double maxSP = double(job->BaseSPByLevel[levelIndex]);
-    maxSP *= 1.0 + identity.Stats[3] * 0.01;
-    if (job->IsUpper == true)
-        maxSP *= 1.25;
-    return std::max<uint32>(1, uint32(maxSP));
-}
-
 bool ROWOWMod::IsSpellKeptInROForm(SpellInfo const* spellInfo) const
 {
-    // The RO spells (the world travel spell, and in time the identity's skills), auto attack, and languages (so chat still works)
+    // The fixed RO spells (the world travel spell; the identity's own skills come with R6), auto attack, and languages (so chat still
+    // works).  The RO skill spells a character learned as itself (from before the identity) are the character's, not the form's
     if (spellInfo == nullptr)
         return false;
-    if (spellInfo->Id >= ROWOW_SPELL_ID_RO_START && spellInfo->Id <= ROWOW_SPELL_ID_RO_END)
+    if (spellInfo->Id >= ROWOW_SPELL_ID_RO_START && spellInfo->Id <= ROWOW_SPELL_ID_FIXED_END)
         return true;
     if (spellInfo->Id == ROWOW_SPELL_AUTO_ATTACK)
         return true;
@@ -500,8 +482,8 @@ void ROWOWMod::EnterROForm(Player* player)
     if (identity->IsInForm == true)
         return;
 
-    // The first entry makes the identity: a level 1 Novice (rAthena's new character), with the start items in the bags and worn in
-    // their RO equipment positions, saving at the start point
+    // The first entry makes the identity: a level 1 Novice (rAthena's new character), saving at the start point.  The start items are
+    // given once the character is in the world
     bool isNewIdentity = identity->Exists == false;
     if (isNewIdentity == true)
     {
@@ -526,43 +508,12 @@ void ROWOWMod::EnterROForm(Player* player)
         identity->ActionsByButton[1] = ROWOW_SPELL_WORLD_TRAVEL;
         identity->AreActionsChanged = true;
         identity->ItemGUIDsByEquipPosition.clear();
-        for (ROWOWStartItem const& startItem : StartItems)
-        {
-            Item* item = nullptr;
-            ItemPosCountVec itemDestination;
-            if (player->CanStoreNewItem(NULL_BAG, NULL_SLOT, itemDestination, startItem.ItemTemplateID, startItem.Amount) == EQUIP_ERR_OK)
-            {
-                item = player->StoreNewItem(itemDestination, startItem.ItemTemplateID, true);
-                if (item != nullptr)
-                    player->SendNewItem(item, startItem.Amount, true, false);
-            }
-            if (item == nullptr)
-            {
-                // No room: it comes by mail instead (and isn't worn)
-                CharacterDatabaseTransaction mailTrans = CharacterDatabase.BeginTransaction();
-                MailDraft draft("Ragnarok Online", "Your bags were too full for this, so it was sent to you here.");
-                if (Item* mailItem = Item::CreateItem(startItem.ItemTemplateID, startItem.Amount, player))
-                {
-                    mailItem->SaveToDB(mailTrans);
-                    draft.AddItem(mailItem);
-                }
-                draft.SendMailTo(mailTrans, MailReceiver(player), MailSender(MAIL_NORMAL, 0, MAIL_STATIONERY_GM));
-                CharacterDatabase.CommitTransaction(mailTrans);
-                continue;
-            }
-            if (startItem.EquipPosition != 0)
-                identity->ItemGUIDsByEquipPosition[startItem.EquipPosition] = item->GetGUID().GetCounter();
-        }
         identity->IsEquipmentChanged = true;
+        identity->IsNewIdentityPending = true;
     }
 
-    // Leave the character's things behind: what it's casting, its pets and totems, and its buffs, mount and shapeshift
-    player->InterruptNonMeleeSpells(false);
-    player->UnsummonPetTemporaryIfAny();
-    player->UnsummonAllTotems();
-    RemovePositiveAuras(player, [](uint32 /*spellID*/) { return false; });
-
     // The character's own values, put back on leaving
+    player->InterruptNonMeleeSpells(false);
     identity->WoWLevel = player->GetLevel();
     identity->WoWXP = player->GetUInt32Value(PLAYER_XP);
     identity->WoWMoney = player->GetMoney();
@@ -570,6 +521,8 @@ void ROWOWMod::EnterROForm(Player* player)
     for (uint8 powerIndex = 0; powerIndex < MAX_POWERS; powerIndex++)
         identity->WoWPowers[powerIndex] = player->GetPower(Powers(powerIndex));
     identity->WoWPowerType = uint8(player->getPowerType());
+    for (uint8 attackType = 0; attackType < MAX_ATTACK; attackType++)
+        identity->WoWAttackTimes[attackType] = player->GetAttackTime(WeaponAttackType(attackType));
     identity->IsInForm = true;
 
     // The client forgets the character's spells (the server keeps them, and refuses them while in the form), keeping the form's
@@ -592,24 +545,161 @@ void ROWOWMod::EnterROForm(Player* player)
 
     SendROFormClientSpellsAndActions(player, *identity);
 
-    // Zeny, the identity's level, look and maximums, and its HP and SP
+    // Zeny, the identity's level and maximums, and its HP and SP
     player->SetMoney(identity->Zeny);
     player->setPowerType(POWER_MANA);
-    RefreshROForm(player);
+    RefreshROFormValues(player, *identity);
     if (player->IsAlive() == true)
     {
         player->SetHealth(identity->HP == 0 ? player->GetMaxHealth() : std::min(identity->HP, player->GetMaxHealth()));
         player->SetPower(POWER_MANA, (isNewIdentity == true || identity->SP > player->GetMaxPower(POWER_MANA)) ? player->GetMaxPower(POWER_MANA) : identity->SP);
     }
+    identity->RegenHPTimer = 0;
+    identity->RegenSPTimer = 0;
 
-    // A new identity is saved right away, along with its start items
-    if (isNewIdentity == true)
-        player->SaveToDB(false, false);
+    identity->IsFormArrivalPending = true;
+    identity->IsFormDeparturePending = false;
+    if (player->IsInWorld() == true)
+        CompleteROFormChange(player);
+}
 
-    ROWOWJob const* job = GetJob(identity->JobID);
-    ChatHandler(player->GetSession()).PSendSysMessage("You are a Ragnarok Online {}, base level {} and job level {}.", job != nullptr ? job->Name : "?", identity->BaseLevel,
-        identity->JobLevel);
+void ROWOWMod::CompleteROFormChange(Player* player)
+{
+    // A safety net for an arrival that didn't come through OnPlayerSendInitialPacketsBeforeAddToMap
+    ROWOWIdentity* identity = GetIdentity(player);
+    bool isROMap = IsROMap(player->GetMapId());
+    if (isROMap == true && identity->IsInForm == false)
+    {
+        EnterROForm(player);
+        return;
+    }
+    if (isROMap == false && identity->IsInForm == true)
+    {
+        LeaveROForm(player);
+        return;
+    }
+
+    if (identity->IsInForm == true)
+    {
+        if (identity->IsFormArrivalPending == true)
+        {
+            // Leave the character's things behind: its pets and totems, its buffs, mount and shapeshift, and the passive auras of its
+            // hidden spells and talents (no stat, regen or proc of the character's acts on the form).  Taking off an aura that raised
+            // max health also takes that much health, so the form's HP and SP are put back after
+            uint32 formHealth = player->GetHealth();
+            uint32 formSP = player->GetPower(POWER_MANA);
+            player->UnsummonPetTemporaryIfAny();
+            player->UnsummonAllTotems();
+            RemovePositiveAuras(player, [](uint32 /*spellID*/) { return false; });
+            identity->SuspendedPassiveSpellIDs.clear();
+            for (uint32 spellID : identity->HiddenSpellIDs)
+            {
+                SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(spellID);
+                if (spellInfo == nullptr || spellInfo->IsPassive() == false || player->HasAura(spellID) == false)
+                    continue;
+                player->RemoveAurasDueToSpell(spellID);
+                identity->SuspendedPassiveSpellIDs.push_back(spellID);
+            }
+            if (player->IsAlive() == true)
+            {
+                player->SetHealth(std::min(formHealth, player->GetMaxHealth()));
+                player->SetPower(POWER_MANA, std::min(formSP, player->GetMaxPower(POWER_MANA)));
+            }
+
+            // A new identity gets the start items in the bags and worn in their RO equipment positions, and is saved with them
+            if (identity->IsNewIdentityPending == true)
+            {
+                for (ROWOWStartItem const& startItem : StartItems)
+                {
+                    Item* item = nullptr;
+                    ItemPosCountVec itemDestination;
+                    if (player->CanStoreNewItem(NULL_BAG, NULL_SLOT, itemDestination, startItem.ItemTemplateID, startItem.Amount) == EQUIP_ERR_OK)
+                    {
+                        item = player->StoreNewItem(itemDestination, startItem.ItemTemplateID, true);
+                        if (item != nullptr)
+                            player->SendNewItem(item, startItem.Amount, true, false);
+                    }
+                    if (item == nullptr)
+                    {
+                        // No room: it comes by mail instead (and isn't worn)
+                        CharacterDatabaseTransaction mailTrans = CharacterDatabase.BeginTransaction();
+                        MailDraft draft("Ragnarok Online", "Your bags were too full for this, so it was sent to you here.");
+                        if (Item* mailItem = Item::CreateItem(startItem.ItemTemplateID, startItem.Amount, player))
+                        {
+                            mailItem->SaveToDB(mailTrans);
+                            draft.AddItem(mailItem);
+                        }
+                        draft.SendMailTo(mailTrans, MailReceiver(player), MailSender(MAIL_NORMAL, 0, MAIL_STATIONERY_GM));
+                        CharacterDatabase.CommitTransaction(mailTrans);
+                        continue;
+                    }
+                    if (startItem.EquipPosition != 0)
+                        identity->ItemGUIDsByEquipPosition[startItem.EquipPosition] = item->GetGUID().GetCounter();
+                }
+                identity->IsEquipmentChanged = true;
+                identity->IsNewIdentityPending = false;
+                RefreshROFormValues(player, *identity); // The start weapon and armor count from now
+                player->SaveToDB(false, false);
+            }
+
+            ROWOWJob const* job = GetJob(identity->JobID);
+            ChatHandler(player->GetSession()).PSendSysMessage("You are a Ragnarok Online {}, base level {} and job level {}.", job != nullptr ? job->Name : "?",
+                identity->BaseLevel, identity->JobLevel);
+        }
+        RefreshROFormLook(player);
+    }
+    else if (identity->IsFormDeparturePending == true || identity->WasInFormAtLoad == true)
+    {
+        // Off with the form's buffs and the job's look.  Saved in the form but not in the RO world (the server stopped before the
+        // character left it), only the look is left over, since the character row never stops having the character's own values
+        // The character's own health and powers are put back after, as the auras coming and going change them (leaving the form,
+        // the values it entered with: setting them before its passive auras were back held them under the lower maximums)
+        uint32 health = identity->IsFormDeparturePending == true ? std::max<uint32>(1, identity->WoWHealth) : player->GetHealth();
+        uint32 powers[MAX_POWERS];
+        for (uint8 powerIndex = 0; powerIndex < MAX_POWERS; powerIndex++)
+            powers[powerIndex] = identity->IsFormDeparturePending == true ? identity->WoWPowers[powerIndex] : player->GetPower(Powers(powerIndex));
+        if (identity->IsFormDeparturePending == true)
+            RemovePositiveAuras(player, [](uint32 /*spellID*/) { return false; });
+        RemoveROFormAuras(player);
+        if (identity->IsFormDeparturePending == true)
+        {
+            // The character's passive auras back, as learning the spells casts them
+            for (uint32 spellID : identity->SuspendedPassiveSpellIDs)
+            {
+                SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(spellID);
+                if (spellInfo != nullptr && (player->HasSpell(spellID) == true || player->HasTalent(spellID, player->GetActiveSpec()) == true) &&
+                    player->IsNeedCastPassiveSpellAtLearn(spellInfo) == true && player->HasAura(spellID) == false)
+                    player->CastSpell(player, spellID, true);
+            }
+            player->ResummonPetTemporaryUnSummonedIfAny();
+        }
+        identity->SuspendedPassiveSpellIDs.clear();
+        if (player->IsAlive() == true)
+        {
+            player->SetHealth(std::min(health, player->GetMaxHealth()));
+            for (uint8 powerIndex = 0; powerIndex < MAX_POWERS; powerIndex++)
+                player->SetPower(Powers(powerIndex), std::min(powers[powerIndex], player->GetMaxPower(Powers(powerIndex))));
+        }
+    }
+    identity->IsFormArrivalPending = false;
+    identity->IsFormDeparturePending = false;
+    identity->WasInFormAtLoad = false;
     SendROFormStateToClient(player);
+    SendROStatusToClient(player);
+}
+
+void ROWOWMod::RefreshROFormValues(Player* player, ROWOWIdentity& identity)
+{
+    // The level, the experience bar showing the base level's experience, the status, the HP and SP maximums from it (see the max
+    // health and power hooks), and the time between attacks (adelay, from the ASPD)
+    player->SetLevel(uint8(std::min<uint32>(identity.BaseLevel, 255)), true);
+    player->SetUInt32Value(PLAYER_XP, identity.BaseExp);
+    player->SetUInt32Value(PLAYER_NEXT_LEVEL_XP, uint32(std::min<uint64>(PCNextBaseExp(identity), std::numeric_limits<uint32>::max())));
+    CalculateIdentityStatus(player, identity);
+    player->UpdateMaxHealth();
+    player->UpdateMaxPower(POWER_MANA);
+    player->UpdateManaRegen(); // None of Warcraft's (the client's own guess of it included)
+    player->SetAttackTime(BASE_ATTACK, uint32(identity.Status.AttackDelay));
 }
 
 void ROWOWMod::RefreshROForm(Player* player)
@@ -617,17 +707,17 @@ void ROWOWMod::RefreshROForm(Player* player)
     ROWOWIdentity* identity = GetIdentity(player);
     if (identity->IsInForm == false)
         return;
+    RefreshROFormValues(player, *identity);
+    if (player->IsInWorld() == true)
+        RefreshROFormLook(player);
+    SendROStatusToClient(player);
+}
 
-    // The level, and the experience bar showing the base level's experience
-    ROWOWJob const* job = GetJob(identity->JobID);
-    player->SetLevel(uint8(std::min<uint32>(identity->BaseLevel, 255)), true);
-    player->SetUInt32Value(PLAYER_XP, identity->BaseExp);
-    uint64 nextBaseExp = 0;
-    if (job != nullptr && identity->BaseLevel >= 1 && identity->BaseLevel <= job->BaseExpByLevel.size())
-        nextBaseExp = job->BaseExpByLevel[identity->BaseLevel - 1];
-    player->SetUInt32Value(PLAYER_NEXT_LEVEL_XP, uint32(std::min<uint64>(nextBaseExp, std::numeric_limits<uint32>::max())));
-
+void ROWOWMod::RefreshROFormLook(Player* player)
+{
     // The job's look, in the character's gender
+    ROWOWIdentity* identity = GetIdentity(player);
+    ROWOWJob const* job = GetJob(identity->JobID);
     uint32 wantedIllusionSpellID = 0;
     if (job != nullptr)
     {
@@ -644,10 +734,6 @@ void ROWOWMod::RefreshROForm(Player* player)
     if (wantedIllusionSpellID != 0 && player->HasAura(wantedIllusionSpellID) == false)
         player->AddAura(wantedIllusionSpellID, player);
     RefreshIllusionDisplay(player);
-
-    // HP and SP maximums (see the max health and power hooks)
-    player->UpdateMaxHealth();
-    player->UpdateMaxPower(POWER_MANA);
 }
 
 void ROWOWMod::RemoveROFormAuras(Player* player)
@@ -676,12 +762,8 @@ void ROWOWMod::LeaveROForm(Player* player)
         identity->HP = player->GetHealth();
         identity->SP = player->GetPower(POWER_MANA);
     }
-
-    // Off with the job's look, its headgear and the form's buffs
     player->InterruptNonMeleeSpells(false);
-    RemovePositiveAuras(player, [](uint32 /*spellID*/) { return false; });
     identity->IsInForm = false;
-    RemoveROFormAuras(player);
 
     // The character's own values back
     player->SetLevel(identity->WoWLevel, true);
@@ -689,9 +771,13 @@ void ROWOWMod::LeaveROForm(Player* player)
     player->SetUInt32Value(PLAYER_NEXT_LEVEL_XP, sObjectMgr->GetXPForLevel(identity->WoWLevel));
     player->SetMoney(identity->WoWMoney);
     player->setPowerType(Powers(identity->WoWPowerType));
+    for (uint8 attackType = 0; attackType < MAX_ATTACK; attackType++)
+        if (identity->WoWAttackTimes[attackType] != 0)
+            player->SetAttackTime(WeaponAttackType(attackType), identity->WoWAttackTimes[attackType]);
     player->UpdateMaxHealth();
     for (uint8 powerIndex = 0; powerIndex < MAX_POWERS; powerIndex++)
         player->UpdateMaxPower(Powers(powerIndex));
+    player->UpdateManaRegen();
     if (player->IsAlive() == true)
     {
         player->SetHealth(std::max<uint32>(1, identity->WoWHealth));
@@ -699,16 +785,23 @@ void ROWOWMod::LeaveROForm(Player* player)
             player->SetPower(Powers(powerIndex), identity->WoWPowers[powerIndex]);
     }
 
-    // The character's spells and action bars back
-    for (uint32 spellID : identity->HiddenSpellIDs)
-        SendQuietSpellChange(player, spellID, true);
+    // The character's spells and action bars back.  Arriving on a map, the client was just sent them all
+    // (Player::SendInitialPacketsBeforeAddToMap)
+    if (player->IsInWorld() == true)
+    {
+        for (uint32 spellID : identity->HiddenSpellIDs)
+            SendQuietSpellChange(player, spellID, true);
+        WorldPacket clearActionsPacket(SMSG_ACTION_BUTTONS, 1);
+        clearActionsPacket << uint8(2);
+        player->SendDirectMessage(&clearActionsPacket);
+        player->SendInitialActionButtons();
+    }
     identity->HiddenSpellIDs.clear();
-    WorldPacket clearActionsPacket(SMSG_ACTION_BUTTONS, 1);
-    clearActionsPacket << uint8(2);
-    player->SendDirectMessage(&clearActionsPacket);
-    player->SendInitialActionButtons();
-    player->ResummonPetTemporaryUnSummonedIfAny();
-    SendROFormStateToClient(player);
+
+    identity->IsFormDeparturePending = true;
+    identity->IsFormArrivalPending = false;
+    if (player->IsInWorld() == true)
+        CompleteROFormChange(player);
 }
 
 void ROWOWMod::SendROFormStateToClient(Player* player) const
@@ -751,7 +844,9 @@ bool ROWOWMod::GetWorldTravelDestination(Player* player, ROWOWPosition& destinat
 
 void ROWOWMod::RespawnAtSavePoint(Player* player)
 {
-    // rAthena's pc_respawn: standing again with full HP and SP (pc_setrestartvalue), at the save point
+    // rAthena's pc_respawn: standing again at the save point with the restart HP and SP (pc_setrestartvalue, from the respawn values
+    // status_calc_pc_sub works out).  With restart_hp_rate below 50 a Novice comes back with half its HP and everyone else with 1, healed
+    // on top of the 1 HP a resurrection starts from, and SP stays as it was unless that's below the restart SP
     ROWOWIdentity* identity = GetIdentity(player);
     ROWOWPosition savePoint = identity->SavePoint;
     if (savePoint.IsSet == false && GetCellPosition(StartMapID, StartCellX, StartCellY, savePoint) == false)
@@ -763,11 +858,22 @@ void ROWOWMod::RespawnAtSavePoint(Player* player)
         savePoint.Z = player->GetPositionZ();
         savePoint.O = player->GetOrientation();
     }
+    uint32 maxHP = identity->Status.MaxHP;
+    uint32 maxSP = identity->Status.MaxSP;
+    uint32 restartHP = 0;
+    if ((identity->JobID == ROWOW_JOB_NOVICE || identity->JobID == ROWOW_JOB_NOVICE_HIGH) && BattleConfig.RestartHPRate < 50)
+        restartHP = maxHP / 2;
+    else
+        restartHP = uint32(uint64(maxHP) * BattleConfig.RestartHPRate / 100);
+    restartHP = std::max<uint32>(1, restartHP);
+    uint32 restartSP = std::max<uint32>(1, uint32(uint64(maxSP) * BattleConfig.RestartSPRate / 100));
+    uint32 sp = std::max(identity->SP, restartSP);
+
     if (player->getDeathState() == DeathState::JustDied)
         player->KillPlayer();
     player->ResurrectPlayer(1.0f);
-    player->SetHealth(player->GetMaxHealth());
-    player->SetPower(POWER_MANA, player->GetMaxPower(POWER_MANA));
+    player->SetHealth(std::min(1 + restartHP, player->GetMaxHealth()));
+    player->SetPower(POWER_MANA, std::min(sp, player->GetMaxPower(POWER_MANA)));
     player->TeleportTo(savePoint.MapID, savePoint.X, savePoint.Y, savePoint.Z, savePoint.O);
 }
 
@@ -811,8 +917,9 @@ Item* ROWOWMod::GetIdentityEquippedItem(Player* player, uint32 equipPosition) co
     ROWOWIdentity const* identity = player->CustomData.Get<ROWOWIdentity>("ROWOWIdentity");
     if (identity == nullptr)
         return nullptr;
-    auto itemGUIDIter = identity->ItemGUIDsByEquipPosition.find(equipPosition);
-    if (itemGUIDIter == identity->ItemGUIDsByEquipPosition.end())
-        return nullptr;
-    return player->GetItemByGuid(ObjectGuid::Create<HighGuid::Item>(itemGUIDIter->second));
+    // An item worn in several positions (a two-handed weapon, a headgear covering two) is kept under all of them together
+    for (auto const& itemGUIDByEquipPosition : identity->ItemGUIDsByEquipPosition)
+        if ((itemGUIDByEquipPosition.first & equipPosition) == equipPosition)
+            return player->GetItemByGuid(ObjectGuid::Create<HighGuid::Item>(itemGUIDByEquipPosition.second));
+    return nullptr;
 }

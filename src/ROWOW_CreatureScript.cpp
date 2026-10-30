@@ -263,6 +263,18 @@ public:
             if (victim == nullptr)
                 return;
 
+            // An RO monster has no leash to its spawn point: it chases its target while it sees it (within area_size cells), and drops
+            // it where it stands once it doesn't (mob_unlocktarget).  Meanwhile mod-everquest's leash for creatures off its maps is held off
+            if (ROWOW->GetROMobID(me) != 0)
+            {
+                if (me->GetExactDist2d(victim) > float(ROWOW->BattleConfig.AreaSize) * ROWOW->CellSize + me->GetCombatReach() + victim->GetCombatReach())
+                {
+                    EnterEvadeMode(EVADE_REASON_OTHER);
+                    return;
+                }
+                me->UpdateLeashExtensionTime();
+            }
+
             // The out of reach time is for one victim, so a new victim starts over
             if (OutOfReachVictimGUID != victim->GetGUID())
             {

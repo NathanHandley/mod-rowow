@@ -49,6 +49,8 @@ public:
         ROWOW->LoadSkillCellData();
         ROWOW->LoadMapGridData();
         ROWOW->LoadIdentityData();
+        ROWOW->LoadStatusData();
+        ROWOW->LoadBattleData();
     }
 };
 

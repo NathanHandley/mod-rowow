@@ -16,6 +16,7 @@
 
 #include "Chat.h"
 #include "CommandScript.h"
+#include "Creature.h"
 #include "DatabaseEnv.h"
 #include "Item.h"
 #include "Map.h"
@@ -51,30 +52,39 @@ class ROWOW_IdentityPlayerScript : public PlayerScript
 public:
     ROWOW_IdentityPlayerScript() : PlayerScript("ROWOW_IdentityPlayerScript") {}
 
-    void OnPlayerMapChanged(Player* player) override
+    void OnPlayerSendInitialPacketsBeforeAddToMap(Player* player, WorldPacket& /*data*/) override
     {
-        // Arriving in the RO world (by the world travel spell, any other teleport, or logging in there) turns the character into its
-        // identity, and arriving anywhere else turns it back
+        // Arriving on a map (by the world travel spell, any other teleport, or logging in), just after the client was sent the
+        // character's spells and action bars and before it's sent the character itself: arriving in the RO world turns the character
+        // into its identity, and arriving anywhere else turns it back.  The rest follows in OnPlayerMapChanged, once it's in the world
         if (ROWOW->IsEnabled == false || player == nullptr)
             return;
         ROWOWIdentity* identity = ROWOW->GetIdentity(player);
-        if (ROWOW->IsROMap(player->GetMapId()) == true && identity->IsInForm == true)
-        {
-            // From one RO map to another: the client was just sent the character's own spells and action bars again
-            ROWOW->SendROFormClientSpellsAndActions(player, *identity);
-            ROWOW->SendROFormStateToClient(player);
-        }
-        else if (ROWOW->IsROMap(player->GetMapId()) == true)
+        bool isROMap = ROWOW->IsROMap(player->GetMapId());
+        if (isROMap == true && identity->IsInForm == true)
+            ROWOW->SendROFormClientSpellsAndActions(player, *identity); // From one RO map to another: the form's again
+        else if (isROMap == true)
             ROWOW->EnterROForm(player);
         else if (identity->IsInForm == true)
             ROWOW->LeaveROForm(player);
-        else if (identity->WasInFormAtLoad == true)
-        {
-            // Saved in the form but not in the RO world (the server stopped before the character left it): only the look is left over,
-            // since the character row never stops having the character's own values
-            ROWOW->RemoveROFormAuras(player);
-        }
-        identity->WasInFormAtLoad = false;
+    }
+
+    void OnPlayerMapChanged(Player* player) override
+    {
+        if (ROWOW->IsEnabled == false || player == nullptr)
+            return;
+        ROWOW->CompleteROFormChange(player);
+    }
+
+    void OnPlayerUpdate(Player* player, uint32 p_time) override
+    {
+        ROWOW->UpdateNaturalRegen(player, p_time);
+    }
+
+    bool OnPlayerCanRegenerate(Player* player) override
+    {
+        // The form has RO's natural regen instead (UpdateNaturalRegen)
+        return ROWOW->IsInROForm(player) == false;
     }
 
     void OnPlayerLogin(Player* player) override
@@ -128,9 +138,15 @@ public:
         ROWOW->SaveIdentity(player, trans);
     }
 
-    bool OnPlayerCanLoseDurabilityOnDeath(Player* player) override
+    bool OnPlayerCanLoseDurability(Player* player) override
     {
         // The form doesn't wear the character's items
+        return ROWOW->IsInROForm(player) == false;
+    }
+
+    bool OnPlayerCanUpdateSkill(Player* player, uint32 /*skillId*/) override
+    {
+        // The form's fighting and crafting raise none of the character's skills (weapon and defense skills included)
         return ROWOW->IsInROForm(player) == false;
     }
 
@@ -145,7 +161,7 @@ public:
     {
         ROWOWIdentity* identity = player->CustomData.Get<ROWOWIdentity>("ROWOWIdentity");
         if (identity != nullptr && identity->IsInForm == true)
-            value = float(ROWOW->GetIdentityMaxHP(*identity));
+            value = float(identity->Status.MaxHP);
     }
 
     void OnPlayerAfterUpdateMaxPower(Player* player, Powers& power, float& value) override
@@ -153,7 +169,7 @@ public:
         // SP is the form's mana
         ROWOWIdentity* identity = player->CustomData.Get<ROWOWIdentity>("ROWOWIdentity");
         if (identity != nullptr && identity->IsInForm == true && power == POWER_MANA)
-            value = float(ROWOW->GetIdentityMaxSP(*identity));
+            value = float(identity->Status.MaxSP);
     }
 
     bool OnPlayerCanEquipItem(Player* player, uint8 /*slot*/, uint16& /*dest*/, Item* pItem, bool /*swap*/, bool not_loading) override
@@ -252,6 +268,39 @@ public:
     }
 };
 
+// RO experience: an RO monster remembers who hurt it how much, and shares its exp out to them when it dies.  A death in the form costs
+// exp.  These run in the map's thread, which the monster and the players near it share
+class ROWOW_IdentityUnitScript : public UnitScript
+{
+public:
+    ROWOW_IdentityUnitScript() : UnitScript("ROWOW_IdentityUnitScript", true, { UNITHOOK_ON_DAMAGE, UNITHOOK_ON_UNIT_DEATH, UNITHOOK_ON_UNIT_ENTER_EVADE_MODE }) {}
+
+    void OnDamage(Unit* attacker, Unit* victim, uint32& damage) override
+    {
+        if (ROWOW->IsEnabled == false || victim == nullptr || victim->IsCreature() == false)
+            return;
+        ROWOW->MobLogDamage(victim->ToCreature(), attacker, damage);
+    }
+
+    void OnUnitDeath(Unit* unit, Unit* /*killer*/) override
+    {
+        if (ROWOW->IsEnabled == false || unit == nullptr)
+            return;
+        if (unit->IsCreature() == true)
+            ROWOW->MobDeadExp(unit->ToCreature());
+        else if (unit->IsPlayer() == true)
+            ROWOW->PCDeadPenalty(unit->ToPlayer());
+    }
+
+    void OnUnitEnterEvadeMode(Unit* unit, uint8 /*evadeReason*/) override
+    {
+        // Back home at full health, so what it was dealt before no longer counts
+        if (unit != nullptr && unit->IsCreature() == true)
+            if (ROWOWDamageLog* damageLog = unit->CustomData.Get<ROWOWDamageLog>("ROWOWDamageLog"))
+                damageLog->Entries.clear();
+    }
+};
+
 class ROWOW_IdentityAllSpellScript : public AllSpellScript
 {
 public:
@@ -325,12 +374,17 @@ public:
 
         static ChatCommandTable roCommandTable =
         {
-            { "sync",     HandleROSyncCommand,  SEC_PLAYER,     Console::No },
-            { "info",     HandleROInfoCommand,  SEC_GAMEMASTER, Console::No },
-            { "form",     HandleROFormCommand,  SEC_GAMEMASTER, Console::No },
-            { "job",      HandleROJobCommand,   SEC_GAMEMASTER, Console::No },
-            { "level",    HandleROLevelCommand, SEC_GAMEMASTER, Console::No },
-            { "zeny",     HandleROZenyCommand,  SEC_GAMEMASTER, Console::No },
+            { "sync",     HandleROSyncCommand,   SEC_PLAYER,     Console::No },
+            { "statup",   HandleROStatUpCommand, SEC_PLAYER,     Console::No },
+            { "info",     HandleROInfoCommand,   SEC_GAMEMASTER, Console::No },
+            { "form",     HandleROFormCommand,   SEC_GAMEMASTER, Console::No },
+            { "job",      HandleROJobCommand,    SEC_GAMEMASTER, Console::No },
+            { "level",    HandleROLevelCommand,  SEC_GAMEMASTER, Console::No },
+            { "exp",      HandleROExpCommand,    SEC_GAMEMASTER, Console::No },
+            { "stats",    HandleROStatsCommand,  SEC_GAMEMASTER, Console::No },
+            { "zeny",     HandleROZenyCommand,   SEC_GAMEMASTER, Console::No },
+            { "equip",    HandleROEquipCommand,  SEC_GAMEMASTER, Console::No },
+            { "battle",   HandleROBattleCommand, SEC_GAMEMASTER, Console::No },
             { "identity", identityCommandTable },
         };
 
@@ -348,7 +402,29 @@ public:
         if (player == nullptr)
             return false;
         ROWOW->SendROFormStateToClient(player);
+        ROWOW->SendROStatusToClient(player);
         return true;
+    }
+
+    static bool HandleROStatUpCommand(ChatHandler* handler, std::string statName, Optional<uint32> amount)
+    {
+        // The Status window's + buttons: raises a stat of the player's own identity, paying its status points (rAthena's pc_statusup)
+        static char const* const statNames[ROWOW_STAT_COUNT] = { "str", "agi", "vit", "int", "dex", "luk" };
+        Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
+        if (player == nullptr || ROWOW->IsInROForm(player) == false)
+            return false;
+        for (char& curChar : statName)
+            curChar = char(tolower((unsigned char)curChar));
+        for (uint8 statIndex = 0; statIndex < ROWOW_STAT_COUNT; statIndex++)
+        {
+            if (statName != statNames[statIndex])
+                continue;
+            if (ROWOW->PCStatusUp(player, statIndex, int32(std::min<uint32>(amount.value_or(1), ROWOW_STAT_MAX_RAISE))) == false)
+                ROWOW->SendROStatusToClient(player); // Refused: the window shows the values again
+            return true;
+        }
+        handler->SendSysMessage("Raise which stat: str, agi, vit, int, dex or luk?");
+        return false;
     }
 
     static bool HandleROInfoCommand(ChatHandler* handler)
@@ -437,15 +513,185 @@ public:
             handler->SendSysMessage("No identity yet.");
             return false;
         }
-        identity->BaseLevel = std::max<uint32>(1, std::min(baseLevel, job->MaxBaseLevel));
+        // The status points go with the base level (statpoint.yml's totals), and a skill point with each job level, as rAthena's level
+        // commands give and take them
+        uint32 newBaseLevel = std::max<uint32>(1, std::min(baseLevel, job->MaxBaseLevel));
+        auto oldPointsIter = ROWOW->StatusPointsByBaseLevel.find(identity->BaseLevel);
+        auto newPointsIter = ROWOW->StatusPointsByBaseLevel.find(newBaseLevel);
+        int64 statusPointChange = int64(newPointsIter != ROWOW->StatusPointsByBaseLevel.end() ? newPointsIter->second : 0) -
+            int64(oldPointsIter != ROWOW->StatusPointsByBaseLevel.end() ? oldPointsIter->second : 0);
+        identity->StatusPoints = uint32(std::max<int64>(0, int64(identity->StatusPoints) + statusPointChange));
+        identity->BaseLevel = newBaseLevel;
         identity->BaseExp = 0;
         if (jobLevel.has_value() == true)
         {
-            identity->JobLevel = std::max<uint32>(1, std::min(*jobLevel, job->MaxJobLevel));
+            uint32 newJobLevel = std::max<uint32>(1, std::min(*jobLevel, job->MaxJobLevel));
+            identity->SkillPoints = uint32(std::max<int64>(0, int64(identity->SkillPoints) + int64(newJobLevel) - int64(identity->JobLevel)));
+            identity->JobLevel = newJobLevel;
             identity->JobExp = 0;
         }
         ROWOW->RefreshROForm(player);
         handler->PSendSysMessage("{} is now base level {} and job level {}.", player->GetName(), identity->BaseLevel, identity->JobLevel);
+        return true;
+    }
+
+    static bool HandleROExpCommand(ChatHandler* handler, uint32 baseExp, Optional<uint32> jobExp)
+    {
+        // Gives exp as a kill would (pc_gainexp), levelling up as it goes
+        Player* player = handler->getSelectedPlayerOrSelf();
+        if (player == nullptr || ROWOW->IsInROForm(player) == false)
+        {
+            handler->SendSysMessage("Only in the Ragnarok Online world.");
+            return false;
+        }
+        ROWOW->PCGainExp(player, baseExp, jobExp.value_or(0));
+        return true;
+    }
+
+    static bool HandleROStatsCommand(ChatHandler* handler, uint32 str, uint32 agi, uint32 vit, uint32 int_, uint32 dex, uint32 luk)
+    {
+        // Sets the six base stats directly, without paying status points (for comparing with the rAthena oracle's @oraclechar)
+        Player* player = handler->getSelectedPlayerOrSelf();
+        if (player == nullptr || ROWOW->GetIdentity(player)->Exists == false)
+        {
+            handler->SendSysMessage("No identity yet.");
+            return false;
+        }
+        ROWOWIdentity* identity = ROWOW->GetIdentity(player);
+        uint32 const stats[ROWOW_STAT_COUNT] = { str, agi, vit, int_, dex, luk };
+        for (uint8 statIndex = 0; statIndex < ROWOW_STAT_COUNT; statIndex++)
+            identity->Stats[statIndex] = std::max<uint32>(1, std::min<uint32>(stats[statIndex], uint32(ROWOW->PCMaxParameter(*identity))));
+        if (identity->IsInForm == true)
+            ROWOW->RefreshROForm(player);
+        else
+            ROWOW->CalculateIdentityStatus(player, *identity);
+        ROWOWStatus const& status = identity->Status;
+        handler->PSendSysMessage("{}: STR {} AGI {} VIT {} INT {} DEX {} LUK {}, HP {} SP {}, ATK {} + {}, MATK {} ~ {}, DEF {} + {}, MDEF {} + {}, HIT {}, FLEE {} + {}, "
+            "CRIT {}, ASPD {} (amotion {})", player->GetName(), status.Stats[0], status.Stats[1], status.Stats[2], status.Stats[3], status.Stats[4], status.Stats[5],
+            status.MaxHP, status.MaxSP, status.BaseAttack + status.WeaponAttack + status.LeftWeaponAttack, status.WeaponRefineAttack + status.LeftWeaponRefineAttack,
+            status.MagicAttackMin, status.MagicAttackMax, status.Def, status.Def2, status.MDef, status.MDef2 - status.Stats[ROWOW_STAT_VIT] / 2, status.Hit, status.Flee,
+            status.Flee2 / 10, status.Critical / 10, (2000 - status.AttackMotion) / 10, status.AttackMotion);
+        return true;
+    }
+
+    static bool HandleROEquipCommand(ChatHandler* handler, uint32 itemID, Optional<uint32> amount)
+    {
+        // For testing until the RO equipment window (R4): gives an RO item (item_db Id) and wears it in its RO equipment positions, taking
+        // off whatever is worn there.  Ammo comes as a stack (100 unless told)
+        Player* player = handler->getSelectedPlayerOrSelf();
+        if (player == nullptr || ROWOW->GetIdentity(player)->Exists == false)
+        {
+            handler->SendSysMessage("No identity yet.");
+            return false;
+        }
+        auto itemTemplateIDIter = ROWOW->ItemTemplateIDsByItemID.find(itemID);
+        auto itemIter = itemTemplateIDIter != ROWOW->ItemTemplateIDsByItemID.end() ? ROWOW->ItemsByItemTemplateID.find(itemTemplateIDIter->second) : ROWOW->ItemsByItemTemplateID.end();
+        if (itemIter == ROWOW->ItemsByItemTemplateID.end() || itemIter->second.Locations == 0)
+        {
+            handler->PSendSysMessage("There is no converted RO item {} that can be worn.", itemID);
+            return false;
+        }
+        ROWOWItem const& roItem = itemIter->second;
+        uint32 count = amount.value_or(roItem.IsAmmo == true ? 100 : 1);
+        ItemPosCountVec itemDestination;
+        if (count == 0 || player->CanStoreNewItem(NULL_BAG, NULL_SLOT, itemDestination, roItem.ItemTemplateID, count) != EQUIP_ERR_OK)
+        {
+            handler->SendSysMessage("No room in the bags for it.");
+            return false;
+        }
+        Item* item = player->StoreNewItem(itemDestination, roItem.ItemTemplateID, true);
+        if (item == nullptr)
+            return false;
+        player->SendNewItem(item, count, true, false);
+
+        // Both accessory positions take the free one, or the left
+        ROWOWIdentity* identity = ROWOW->GetIdentity(player);
+        uint32 equipPosition = roItem.Locations;
+        if (equipPosition == (ROWOW_EQUIP_POSITION_ACC_L | ROWOW_EQUIP_POSITION_ACC_R))
+            equipPosition = ROWOW->GetIdentityEquippedItem(player, ROWOW_EQUIP_POSITION_ACC_L) == nullptr ? ROWOW_EQUIP_POSITION_ACC_L : ROWOW_EQUIP_POSITION_ACC_R;
+        for (auto itemGUIDIter = identity->ItemGUIDsByEquipPosition.begin(); itemGUIDIter != identity->ItemGUIDsByEquipPosition.end();)
+        {
+            if ((itemGUIDIter->first & equipPosition) != 0)
+                itemGUIDIter = identity->ItemGUIDsByEquipPosition.erase(itemGUIDIter);
+            else
+                ++itemGUIDIter;
+        }
+        identity->ItemGUIDsByEquipPosition[equipPosition] = item->GetGUID().GetCounter();
+        identity->IsEquipmentChanged = true;
+        if (identity->IsInForm == true)
+            ROWOW->RefreshROForm(player);
+        else
+            ROWOW->CalculateIdentityStatus(player, *identity);
+        handler->PSendSysMessage("{} now wears {} x{} (position {:#x}).", player->GetName(), item->GetTemplate()->Name1, count, equipPosition);
+        return true;
+    }
+
+    static bool HandleROBattleCommand(ChatHandler* handler, Optional<uint32> swings)
+    {
+        // Works out RO normal attacks between the player and the selected RO monster, both ways, without dealing them, and prints the
+        // totals the rAthena oracle's @oracledmg prints (for comparing with it)
+        Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
+        Creature* creature = handler->getSelectedCreature();
+        if (player == nullptr || ROWOW->IsInROForm(player) == false || creature == nullptr || ROWOW->GetROStatus(creature) == nullptr)
+        {
+            handler->SendSysMessage("Select an RO monster, in the Ragnarok Online world.");
+            return false;
+        }
+        uint32 swingCount = std::clamp<uint32>(swings.value_or(1000), 1, 1000000);
+        ROWOWStatus const& mobStatus = *ROWOW->GetROStatus(creature);
+        handler->PSendSysMessage("mob {} lv={} str={} agi={} vit={} int={} dex={} luk={} maxhp={} watk={} watk2={} def={} def2={} mdef={} mdef2={} hit={} flee={} flee2={} "
+            "cri={} def_ele={} ele_lv={} race={} size={} class={} amotion={} adelay={} dmotion={}", ROWOW->GetROMobID(creature), mobStatus.Level, mobStatus.Stats[0],
+            mobStatus.Stats[1], mobStatus.Stats[2], mobStatus.Stats[3], mobStatus.Stats[4], mobStatus.Stats[5], mobStatus.MaxHP, mobStatus.WeaponAttack,
+            mobStatus.WeaponRefineAttack, mobStatus.Def, mobStatus.Def2, mobStatus.MDef, mobStatus.MDef2, mobStatus.Hit, mobStatus.Flee, mobStatus.Flee2,
+            mobStatus.Critical, mobStatus.DefElement, mobStatus.ElementLevel, mobStatus.Race, mobStatus.Size, mobStatus.Class, mobStatus.AttackMotion,
+            mobStatus.AttackDelay, mobStatus.DamageMotion);
+        auto runSwings = [handler, swingCount](char const* label, Unit* src, Unit* target)
+        {
+            uint32 landed = 0, flee = 0, lucky = 0, otherMiss = 0, crit = 0, multi = 0;
+            uint64 total = 0, normalTotal = 0, critTotal = 0;
+            int64 normalMin = std::numeric_limits<int64>::max(), normalMax = 0, critMin = std::numeric_limits<int64>::max(), critMax = 0;
+            for (uint32 swing = 0; swing < swingCount; swing++)
+            {
+                ROWOWDamage d = ROWOW->BattleCalcAttack(ROWOW_BF_WEAPON, src, target, 0, 0, 0);
+                int64 damage = d.Damage + d.Damage2;
+                if (d.Type == ROWOW_DMG_CRITICAL)
+                    crit++;
+                if (d.Type == ROWOW_DMG_MULTI_HIT)
+                    multi++;
+                if (damage > 0)
+                {
+                    landed++;
+                    total += uint64(damage);
+                    if (d.Type == ROWOW_DMG_CRITICAL)
+                    {
+                        critTotal += uint64(damage);
+                        critMin = std::min(critMin, damage);
+                        critMax = std::max(critMax, damage);
+                    }
+                    else
+                    {
+                        normalTotal += uint64(damage);
+                        normalMin = std::min(normalMin, damage);
+                        normalMax = std::max(normalMax, damage);
+                    }
+                }
+                else if (d.DmgLv == ROWOW_ATK_FLEE)
+                    flee++;
+                else if (d.DmgLv == ROWOW_ATK_LUCKY)
+                    lucky++;
+                else
+                    otherMiss++;
+            }
+            uint32 normalCount = landed - std::min(landed, crit);
+            handler->PSendSysMessage("{} n={} landed={} flee={} lucky={} othermiss={} crit={} multi={} hit_pct={:.2f} crit_pct={:.2f} lucky_pct={:.2f} avg_landed={:.3f}",
+                label, swingCount, landed, flee, lucky, otherMiss, crit, multi, 100.0 * landed / swingCount, 100.0 * crit / swingCount, 100.0 * lucky / swingCount,
+                landed != 0 ? double(total) / landed : 0.0);
+            handler->PSendSysMessage("{}_normal count={} min={} max={} avg={:.3f} crit_count={} crit_min={} crit_max={} crit_avg={:.3f}", label, normalCount,
+                normalCount != 0 ? normalMin : 0, normalMax, normalCount != 0 ? double(normalTotal) / normalCount : 0.0, crit, crit != 0 ? critMin : 0, critMax,
+                crit != 0 ? double(critTotal) / crit : 0.0);
+        };
+        runSwings("pc2mob", player, creature);
+        runSwings("mob2pc", creature, player);
         return true;
     }
 
@@ -473,6 +719,7 @@ void AddROWOWIdentityScripts()
 {
     new ROWOW_IdentityPlayerScript();
     new ROWOW_IdentityServerScript();
+    new ROWOW_IdentityUnitScript();
     new ROWOW_IdentityAllSpellScript();
     RegisterSpellScript(ROWOW_WorldTravelSpellScript);
     new ROWOW_CommandScript();

@@ -1,0 +1,1077 @@
+//  Author: Nathan Handley (nathanhandley@protonmail.com)
+//  Copyright (c) 2026 Nathan Handley
+//
+//  This program is free software; you can redistribute it and/or modify it
+//  under the terms of the GNU Affero General Public License as published by the
+//  Free Software Foundation; either version 3 of the License, or (at your
+//  option) any later version.
+//
+//  This program is distributed in the hope that it will be useful, but WITHOUT
+//  ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+//  FITNESS FOR A PARTICULAR PURPOSE.See the GNU Affero General Public License for
+//  more details.
+//
+//  You should have received a copy of the GNU General Public License
+//  along with this program.  If not, see <http://www.gnu.org/licenses/>.
+//
+//  Ported from rAthena (https://github.com/rathena/rathena), src/map/status.cpp, pc.cpp and mob.cpp, pre-renewal paths:
+//  Copyright (c) rAthena Dev Teams - Licensed under GNU GPL.  For more information, see LICENCE in rAthena's main folder
+
+#include "Chat.h"
+#include "Creature.h"
+#include "Item.h"
+#include "Log.h"
+#include "ObjectAccessor.h"
+#include "Player.h"
+#include "SpellMgr.h"
+#include "WorldPacket.h"
+#include "WorldSession.h"
+
+#include "ROWOW.h"
+
+using namespace std;
+
+// The RO identity's status, experience and natural regen: rAthena's pre-renewal rules, keeping its function names (in the comments
+// beside each) and structure so the port can be checked against it.  All of it runs in the player's own thread, or the map's for a
+// monster and the players near it
+
+namespace
+{
+    // rAthena's weapon type names (W_* without the prefix), as item_db's SubType and the job database's BaseASPD write them
+    char const* const WeaponTypeNames[ROWOW_WEAPON_TYPE_MAX] =
+    {
+        "Fist", "Dagger", "1hSword", "2hSword", "1hSpear", "2hSpear", "1hAxe", "2hAxe", "Mace", "2hMace", "Staff", "Bow", "Knuckle",
+        "Musical", "Whip", "Book", "Katar", "Revolver", "Rifle", "Gatling", "Shotgun", "Grenade", "Huuma", "2hStaff",
+    };
+
+    // The job database's names for the six stats
+    char const* const StatNames[ROWOW_STAT_COUNT] = { "Str", "Agi", "Vit", "Int", "Dex", "Luk" };
+
+    // item_db's ammo SubType names, by rAthena's e_ammo_type (AMMO_NONE has none)
+    char const* const AmmoTypeNames[] = { "", "Arrow", "Dagger", "Bullet", "Shell", "Grenade", "Shuriken", "Kunai", "Cannonball", "Throwweapon" };
+
+    // item_db's Locations names, and the equipment positions (EQP_*) each is.  The costume and shadow positions are renewal's
+    std::pair<char const*, uint32> const LocationNames[] =
+    {
+        { "Head_Low", ROWOW_EQUIP_POSITION_HEAD_LOW }, { "Right_Hand", ROWOW_EQUIP_POSITION_HAND_R }, { "Garment", ROWOW_EQUIP_POSITION_GARMENT },
+        { "Left_Accessory", ROWOW_EQUIP_POSITION_ACC_L }, { "Armor", ROWOW_EQUIP_POSITION_ARMOR }, { "Left_Hand", ROWOW_EQUIP_POSITION_HAND_L },
+        { "Shoes", ROWOW_EQUIP_POSITION_SHOES }, { "Right_Accessory", ROWOW_EQUIP_POSITION_ACC_R }, { "Head_Top", ROWOW_EQUIP_POSITION_HEAD_TOP },
+        { "Head_Mid", ROWOW_EQUIP_POSITION_HEAD_MID }, { "Ammo", ROWOW_EQUIP_POSITION_AMMO },
+        { "Both_Hand", ROWOW_EQUIP_POSITION_HAND_R | ROWOW_EQUIP_POSITION_HAND_L }, { "Both_Accessory", ROWOW_EQUIP_POSITION_ACC_L | ROWOW_EQUIP_POSITION_ACC_R },
+    };
+
+    // size_fix.yml's names for the sizes
+    char const* const SizeFixNames[ROWOW_SIZE_COUNT] = { "Small", "Medium", "Large" };
+
+    int32 GetWeaponTypeByName(std::string const& name)
+    {
+        for (int32 weaponType = 0; weaponType < ROWOW_WEAPON_TYPE_MAX; weaponType++)
+            if (name == WeaponTypeNames[weaponType])
+                return weaponType;
+        return -1;
+    }
+
+    // The element of an ammo script's plain "bonus bAtkEle,Ele_<element>;" (the ammo's element), or -1.  A script with any condition is
+    // left to the bonus engine (R5)
+    int32 GetAmmoScriptElement(std::string const& script)
+    {
+        if (script.find("if") != std::string::npos)
+            return -1;
+        static std::string const bonusText = "bonus bAtkEle,Ele_";
+        size_t bonusPosition = script.find(bonusText);
+        if (bonusPosition == std::string::npos)
+            return -1;
+        size_t nameStart = bonusPosition + bonusText.size();
+        size_t nameEnd = script.find(';', nameStart);
+        if (nameEnd == std::string::npos)
+            return -1;
+        return ROWOWMod::GetElementByName(script.substr(nameStart, nameEnd - nameStart));
+    }
+
+    // "yes"/"no", hexadecimal or decimal, as rAthena reads its battle config values
+    int32 ParseBattleConfigValue(std::string const& text)
+    {
+        if (text == "yes" || text == "on")
+            return 1;
+        if (text == "no" || text == "off")
+            return 0;
+        return int32(strtol(text.c_str(), nullptr, 0));
+    }
+
+    // PC_STATUS_POINT_COST: what raising a stat from this value by one costs, pre-renewal
+    int32 GetStatusPointCost(int32 low)
+    {
+        return 1 + (low + 9) / 10;
+    }
+
+    // Bows, instruments, whips and guns put DEX where STR goes in the base attack, and are the ranged weapons
+    bool IsRangedWeaponType(uint8 weaponType)
+    {
+        return weaponType == ROWOW_WEAPON_TYPE_BOW || weaponType == ROWOW_WEAPON_TYPE_MUSICAL || weaponType == ROWOW_WEAPON_TYPE_WHIP ||
+            (weaponType >= ROWOW_WEAPON_TYPE_REVOLVER && weaponType <= ROWOW_WEAPON_TYPE_GRENADE);
+    }
+
+    // pc_calcweapontype: the weapon type of the hands together (a dual wield type when both hold a weapon)
+    uint8 GetCombinedWeaponType(uint8 rightWeaponType, uint8 leftWeaponType)
+    {
+        if (leftWeaponType == ROWOW_WEAPON_TYPE_FIST)
+            return rightWeaponType;
+        if (rightWeaponType == ROWOW_WEAPON_TYPE_FIST)
+            return leftWeaponType;
+        uint8 combinedWeaponType = ROWOW_WEAPON_TYPE_FIST;
+        switch (rightWeaponType)
+        {
+            case ROWOW_WEAPON_TYPE_DAGGER:
+                switch (leftWeaponType)
+                {
+                    case ROWOW_WEAPON_TYPE_DAGGER: combinedWeaponType = ROWOW_WEAPON_TYPE_DOUBLE_DD; break;
+                    case ROWOW_WEAPON_TYPE_1HSWORD: combinedWeaponType = ROWOW_WEAPON_TYPE_DOUBLE_DS; break;
+                    case ROWOW_WEAPON_TYPE_1HAXE: combinedWeaponType = ROWOW_WEAPON_TYPE_DOUBLE_DA; break;
+                }
+                break;
+            case ROWOW_WEAPON_TYPE_1HSWORD:
+                switch (leftWeaponType)
+                {
+                    case ROWOW_WEAPON_TYPE_DAGGER: combinedWeaponType = ROWOW_WEAPON_TYPE_DOUBLE_DS; break;
+                    case ROWOW_WEAPON_TYPE_1HSWORD: combinedWeaponType = ROWOW_WEAPON_TYPE_DOUBLE_SS; break;
+                    case ROWOW_WEAPON_TYPE_1HAXE: combinedWeaponType = ROWOW_WEAPON_TYPE_DOUBLE_SA; break;
+                }
+                break;
+            case ROWOW_WEAPON_TYPE_1HAXE:
+                switch (leftWeaponType)
+                {
+                    case ROWOW_WEAPON_TYPE_DAGGER: combinedWeaponType = ROWOW_WEAPON_TYPE_DOUBLE_DA; break;
+                    case ROWOW_WEAPON_TYPE_1HSWORD: combinedWeaponType = ROWOW_WEAPON_TYPE_DOUBLE_SA; break;
+                    case ROWOW_WEAPON_TYPE_1HAXE: combinedWeaponType = ROWOW_WEAPON_TYPE_DOUBLE_AA; break;
+                }
+                break;
+        }
+        return combinedWeaponType != ROWOW_WEAPON_TYPE_FIST ? combinedWeaponType : rightWeaponType;
+    }
+
+    void CastLevelUpEffect(Player* player, uint32 spellID)
+    {
+        // A visual spell, seen by the players nearby as well (missing until the converter has made it)
+        if (sSpellMgr->GetSpellInfo(spellID) != nullptr)
+            player->CastSpell(player, spellID, true);
+    }
+}
+
+void ROWOWMod::LoadStatusData()
+{
+    ItemsByItemTemplateID.clear();
+    BattleConfig = ROWOWBattleConfig();
+    NoPenaltyMapIDs.clear();
+    if (IsEnabled == false)
+        return;
+
+    // The battle config values the rules use
+    if (ROWOWDataTable const* battleConfigTable = GetDataTable(ROWOW_DATA_TABLE_BATTLE_CONFIG))
+    {
+        std::unordered_map<std::string, std::string> valuesByKey;
+        int32 keyColumnIndex = battleConfigTable->GetColumnIndex("Key");
+        int32 valueColumnIndex = battleConfigTable->GetColumnIndex("Value");
+        for (size_t rowIndex = 0; rowIndex < battleConfigTable->Rows.size(); rowIndex++)
+            valuesByKey[battleConfigTable->GetCell(rowIndex, keyColumnIndex)] = battleConfigTable->GetCell(rowIndex, valueColumnIndex);
+        auto readValue = [&valuesByKey](char const* key, int32& valueOut)
+        {
+            auto valueIter = valuesByKey.find(key);
+            if (valueIter != valuesByKey.end() && valueIter->second.empty() == false)
+                valueOut = ParseBattleConfigValue(valueIter->second);
+        };
+        int32 multiLevelUp = BattleConfig.MultiLevelUp == true ? 1 : 0;
+        int32 maxAspd = 190;
+        readValue("base_exp_rate", BattleConfig.BaseExpRate);
+        readValue("job_exp_rate", BattleConfig.JobExpRate);
+        readValue("multi_level_up", multiLevelUp);
+        readValue("multi_level_up_base", BattleConfig.MultiLevelUpBase);
+        readValue("multi_level_up_job", BattleConfig.MultiLevelUpJob);
+        readValue("max_exp_gain_rate", BattleConfig.MaxExpGainRate);
+        readValue("exp_calc_type", BattleConfig.ExpCalcType);
+        readValue("exp_bonus_attacker", BattleConfig.ExpBonusAttacker);
+        readValue("exp_bonus_max_attacker", BattleConfig.ExpBonusMaxAttacker);
+        readValue("death_penalty_type", BattleConfig.DeathPenaltyType);
+        readValue("death_penalty_base", BattleConfig.DeathPenaltyBase);
+        readValue("death_penalty_job", BattleConfig.DeathPenaltyJob);
+        readValue("death_penalty_maxlv", BattleConfig.DeathPenaltyMaxLevel);
+        readValue("hp_rate", BattleConfig.HPRate);
+        readValue("sp_rate", BattleConfig.SPRate);
+        readValue("restart_hp_rate", BattleConfig.RestartHPRate);
+        readValue("restart_sp_rate", BattleConfig.RestartSPRate);
+        readValue("max_hp_lv99", BattleConfig.MaxHPLevel99);
+        readValue("max_hp_lv150", BattleConfig.MaxHPLevel150);
+        readValue("max_hp", BattleConfig.MaxHP);
+        readValue("max_sp", BattleConfig.MaxSP);
+        readValue("max_aspd", maxAspd);
+        readValue("max_parameter", BattleConfig.MaxParameter);
+        readValue("max_trans_parameter", BattleConfig.MaxTransParameter);
+        readValue("max_def", BattleConfig.MaxDef);
+        readValue("over_def_bonus", BattleConfig.OverDefBonus);
+        readValue("weapon_defense_type", BattleConfig.WeaponDefenseType);
+        readValue("magic_defense_type", BattleConfig.MagicDefenseType);
+        readValue("pc_damage_delay_rate", BattleConfig.PCDamageDelayRate);
+        readValue("natural_healhp_interval", BattleConfig.NaturalHealHPInterval);
+        readValue("natural_healsp_interval", BattleConfig.NaturalHealSPInterval);
+        readValue("enable_baseatk", BattleConfig.EnableBaseAtk);
+        readValue("enable_critical", BattleConfig.EnableCritical);
+        readValue("enable_perfect_flee", BattleConfig.EnablePerfectFlee);
+        readValue("mob_critical_rate", BattleConfig.MobCriticalRate);
+        readValue("min_hitrate", BattleConfig.MinHitRate);
+        readValue("max_hitrate", BattleConfig.MaxHitRate);
+        readValue("agi_penalty_type", BattleConfig.AgiPenaltyType);
+        readValue("agi_penalty_target", BattleConfig.AgiPenaltyTarget);
+        readValue("agi_penalty_count", BattleConfig.AgiPenaltyCount);
+        readValue("agi_penalty_num", BattleConfig.AgiPenaltyNum);
+        readValue("vit_penalty_type", BattleConfig.VitPenaltyType);
+        readValue("vit_penalty_target", BattleConfig.VitPenaltyTarget);
+        readValue("vit_penalty_count", BattleConfig.VitPenaltyCount);
+        readValue("vit_penalty_num", BattleConfig.VitPenaltyNum);
+        readValue("attack_attr_none", BattleConfig.AttackAttrNone);
+        readValue("attribute_recover", BattleConfig.AttrRecover);
+        readValue("skill_min_damage", BattleConfig.SkillMinDamage);
+        readValue("arrow_decrement", BattleConfig.ArrowDecrement);
+        readValue("ammo_check_weapon", BattleConfig.AmmoCheckWeapon);
+        readValue("monster_hp_rate", BattleConfig.MonsterHPRate);
+        readValue("mvp_hp_rate", BattleConfig.MvpHPRate);
+        readValue("monster_damage_delay_rate", BattleConfig.MonsterDamageDelayRate);
+        readValue("area_size", BattleConfig.AreaSize);
+        BattleConfig.MultiLevelUp = multiLevelUp != 0;
+        BattleConfig.MaxAspdAmotion = (2000 - maxAspd * 10) * 2; // As battle.cpp converts it after loading
+    }
+    else
+        LOG_ERROR("module.ROWOW", "ROWOWMod::LoadStatusData found no {} table, so the RO rules use rAthena's default battle config", ROWOW_DATA_TABLE_BATTLE_CONFIG);
+
+    // The jobs' stat bonuses by job level and their attack motion with each weapon type.  rAthena lists the bonus each job level adds,
+    // and keeps the totals
+    std::unordered_map<std::string, ROWOWJob*> jobsByName;
+    for (auto& jobByID : JobsByID)
+        jobsByName[GetJobNameKey(jobByID.second.Name)] = &jobByID.second;
+    if (ROWOWDataTable const* jobTable = GetDataTable(ROWOW_DATA_TABLE_JOB))
+    {
+        int32 jobsColumnIndex = jobTable->GetColumnIndex("Jobs");
+        int32 bonusStatsColumnIndex = jobTable->GetColumnIndex("BonusStats");
+        int32 baseASPDColumnIndex = jobTable->GetColumnIndex("BaseASPD");
+        for (size_t rowIndex = 0; rowIndex < jobTable->Rows.size(); rowIndex++)
+        {
+            std::string const& bonusStatsCell = jobTable->GetCell(rowIndex, bonusStatsColumnIndex);
+            std::string const& baseASPDCell = jobTable->GetCell(rowIndex, baseASPDColumnIndex);
+            if (bonusStatsCell.empty() == true && baseASPDCell.empty() == true)
+                continue;
+            for (auto const& jobField : ROWOWDataTable::ParseMap(jobTable->GetCell(rowIndex, jobsColumnIndex)))
+            {
+                auto jobIter = jobsByName.find(GetJobNameKey(jobField.first));
+                if (jobIter == jobsByName.end() || jobField.second != "true")
+                    continue;
+                ROWOWJob& job = *jobIter->second;
+                if (bonusStatsCell.empty() == false)
+                {
+                    job.BonusStatsByJobLevel.assign(job.MaxJobLevel, std::array<int32, ROWOW_STAT_COUNT>{});
+                    for (auto const& bonusEntry : ROWOWDataTable::ParseMapList(bonusStatsCell))
+                    {
+                        uint32 level = 0;
+                        for (auto const& bonusField : bonusEntry)
+                            if (bonusField.first == "Level")
+                                level = uint32(strtoul(bonusField.second.c_str(), nullptr, 10));
+                        if (level == 0 || level > job.MaxJobLevel)
+                            continue;
+                        for (auto const& bonusField : bonusEntry)
+                            for (uint8 statIndex = 0; statIndex < ROWOW_STAT_COUNT; statIndex++)
+                                if (bonusField.first == StatNames[statIndex])
+                                    job.BonusStatsByJobLevel[level - 1][statIndex] += int32(strtol(bonusField.second.c_str(), nullptr, 10));
+                    }
+                    for (size_t levelIndex = 1; levelIndex < job.BonusStatsByJobLevel.size(); levelIndex++)
+                        for (uint8 statIndex = 0; statIndex < ROWOW_STAT_COUNT; statIndex++)
+                            job.BonusStatsByJobLevel[levelIndex][statIndex] += job.BonusStatsByJobLevel[levelIndex - 1][statIndex];
+                }
+                for (auto const& aspdField : ROWOWDataTable::ParseMap(baseASPDCell))
+                {
+                    int32 weaponType = GetWeaponTypeByName(aspdField.first);
+                    if (weaponType >= 0)
+                        job.BaseASPDByWeaponType[weaponType] = int32(strtol(aspdField.second.c_str(), nullptr, 10));
+                }
+            }
+        }
+    }
+    for (auto const& jobByID : JobsByID)
+        if (jobByID.second.BaseHPByLevel.size() < jobByID.second.MaxBaseLevel || jobByID.second.BaseSPByLevel.size() < jobByID.second.MaxBaseLevel)
+            LOG_ERROR("module.ROWOW", "ROWOWMod::LoadStatusData found the RO job {} without base HP or SP for every level", jobByID.second.Name);
+
+    // Each weapon type's damage against each size (size_fix.yml; a size left out is 100%)
+    for (uint8 weaponType = 0; weaponType < ROWOW_WEAPON_TYPE_MAX; weaponType++)
+        for (uint8 size = 0; size < ROWOW_SIZE_COUNT; size++)
+            SizeFixByWeaponType[weaponType][size] = 100;
+    if (ROWOWDataTable const* sizeFixTable = GetDataTable(ROWOW_DATA_TABLE_SIZE_FIX))
+    {
+        int32 weaponColumnIndex = sizeFixTable->GetColumnIndex("Weapon");
+        for (size_t rowIndex = 0; rowIndex < sizeFixTable->Rows.size(); rowIndex++)
+        {
+            int32 weaponType = GetWeaponTypeByName(sizeFixTable->GetCell(rowIndex, weaponColumnIndex));
+            if (weaponType < 0)
+                continue;
+            for (uint8 size = 0; size < ROWOW_SIZE_COUNT; size++)
+                SizeFixByWeaponType[weaponType][size] = int32(sizeFixTable->GetInt(rowIndex, sizeFixTable->GetColumnIndex(SizeFixNames[size]), 100));
+        }
+    }
+
+    // What the status calculation and the normal attack read of the converted RO items
+    if (ROWOWDataTable const* itemTable = GetDataTable(ROWOW_DATA_TABLE_ITEM))
+    {
+        int32 idColumnIndex = itemTable->GetColumnIndex("Id");
+        int32 typeColumnIndex = itemTable->GetColumnIndex("Type");
+        int32 subTypeColumnIndex = itemTable->GetColumnIndex("SubType");
+        int32 attackColumnIndex = itemTable->GetColumnIndex("Attack");
+        int32 defenseColumnIndex = itemTable->GetColumnIndex("Defense");
+        int32 rangeColumnIndex = itemTable->GetColumnIndex("Range");
+        int32 weaponLevelColumnIndex = itemTable->GetColumnIndex("WeaponLevel");
+        int32 locationsColumnIndex = itemTable->GetColumnIndex("Locations");
+        int32 scriptColumnIndex = itemTable->GetColumnIndex("Script");
+        for (size_t rowIndex = 0; rowIndex < itemTable->Rows.size(); rowIndex++)
+        {
+            uint32 itemID = uint32(itemTable->GetInt(rowIndex, idColumnIndex, 0));
+            auto itemTemplateIDIter = ItemTemplateIDsByItemID.find(itemID);
+            if (itemTemplateIDIter == ItemTemplateIDsByItemID.end())
+                continue;
+            ROWOWItem& item = ItemsByItemTemplateID[itemTemplateIDIter->second];
+            item.ItemID = itemID;
+            item.ItemTemplateID = itemTemplateIDIter->second;
+            std::string const& type = itemTable->GetCell(rowIndex, typeColumnIndex);
+            item.IsWeapon = type == "Weapon";
+            item.IsArmor = type == "Armor";
+            item.IsAmmo = type == "Ammo";
+            if (item.IsWeapon == true)
+                item.WeaponType = uint8(std::max(0, GetWeaponTypeByName(itemTable->GetCell(rowIndex, subTypeColumnIndex))));
+            if (item.IsAmmo == true)
+            {
+                std::string const& subType = itemTable->GetCell(rowIndex, subTypeColumnIndex);
+                for (uint8 ammoType = 1; ammoType < std::size(AmmoTypeNames); ammoType++)
+                    if (subType == AmmoTypeNames[ammoType])
+                        item.AmmoType = ammoType;
+                item.AmmoElement = GetAmmoScriptElement(ROWOWDataTable::UnescapeText(itemTable->GetCell(rowIndex, scriptColumnIndex)));
+            }
+            for (auto const& locationField : ROWOWDataTable::ParseMap(itemTable->GetCell(rowIndex, locationsColumnIndex)))
+                for (auto const& locationName : LocationNames)
+                    if (locationField.first == locationName.first && locationField.second == "true")
+                        item.Locations |= locationName.second;
+            item.Attack = int32(itemTable->GetInt(rowIndex, attackColumnIndex, 0));
+            item.Defense = int32(itemTable->GetInt(rowIndex, defenseColumnIndex, 0));
+            item.Range = int32(itemTable->GetInt(rowIndex, rangeColumnIndex, 0));
+            item.WeaponLevel = int32(itemTable->GetInt(rowIndex, weaponLevelColumnIndex, 0));
+        }
+    }
+
+    // The maps with no exp penalty on death (nopenalty), by any of their RO names
+    if (ROWOWDataTable const* mapFlagTable = GetDataTable(ROWOW_DATA_TABLE_MAP_FLAG))
+    {
+        int32 mapColumnIndex = mapFlagTable->GetColumnIndex("Map");
+        int32 flagColumnIndex = mapFlagTable->GetColumnIndex("Flag");
+        int32 valueColumnIndex = mapFlagTable->GetColumnIndex("Value");
+        for (size_t rowIndex = 0; rowIndex < mapFlagTable->Rows.size(); rowIndex++)
+        {
+            std::string const& flag = mapFlagTable->GetCell(rowIndex, flagColumnIndex);
+            if (flag != "nopenalty" && flag != "noexppenalty")
+                continue;
+            uint32 mapID = GetMapIDByMapName(mapFlagTable->GetCell(rowIndex, mapColumnIndex));
+            if (mapID == 0)
+                continue;
+            if (mapFlagTable->GetCell(rowIndex, valueColumnIndex) == "off")
+                NoPenaltyMapIDs.erase(mapID);
+            else
+                NoPenaltyMapIDs.insert(mapID);
+        }
+    }
+
+    LOG_INFO("module.ROWOW", "ROWOWMod::LoadStatusData loaded {} RO items for the status calculation and {} maps without a death penalty", ItemsByItemTemplateID.size(),
+        NoPenaltyMapIDs.size());
+}
+
+ROWOWItem const* ROWOWMod::GetROItem(Item const* item) const
+{
+    if (item == nullptr)
+        return nullptr;
+    auto itemIter = ItemsByItemTemplateID.find(item->GetEntry());
+    if (itemIter == ItemsByItemTemplateID.end())
+        return nullptr;
+    return &itemIter->second;
+}
+
+void ROWOWMod::CalculateIdentityStatus(Player* player, ROWOWIdentity& identity) const
+{
+    // status_calc_pc_sub
+    ROWOWStatus status;
+    status.IsPlayer = true;
+    status.Level = identity.BaseLevel;
+    ROWOWJob const* job = GetJob(identity.JobID);
+
+    // Parse equipment.  An item worn in two positions (a two-handed weapon) counts once, as pc_is_same_equip_index skips it, and the
+    // ammo is read after.  The refine bonus (R4) and the equipment scripts and cards (R5) come with their milestones
+    int32 rightWeaponRange = 0;
+    int32 leftWeaponRange = 0;
+    ROWOWItem const* ammoItem = nullptr;
+    std::unordered_set<ObjectGuid::LowType> countedItemGUIDs;
+    for (auto const& itemGUIDByEquipPosition : identity.ItemGUIDsByEquipPosition)
+    {
+        if (countedItemGUIDs.insert(itemGUIDByEquipPosition.second).second == false)
+            continue;
+        ROWOWItem const* roItem = GetROItem(player->GetItemByGuid(ObjectGuid::Create<HighGuid::Item>(itemGUIDByEquipPosition.second)));
+        if (roItem == nullptr)
+            continue;
+        if (itemGUIDByEquipPosition.first == ROWOW_EQUIP_POSITION_AMMO)
+        {
+            ammoItem = roItem;
+            continue;
+        }
+        status.Def += roItem->Defense;
+        if (roItem->IsWeapon == false)
+            continue;
+        if (itemGUIDByEquipPosition.first == ROWOW_EQUIP_POSITION_HAND_L)
+        {
+            // Left-hand weapon
+            status.LeftWeaponAttack += roItem->Attack;
+            leftWeaponRange += roItem->Range;
+            status.LeftWeaponType = roItem->WeaponType;
+            status.LeftWeaponLevel = roItem->WeaponLevel;
+        }
+        else
+        {
+            status.WeaponAttack += roItem->Attack;
+            rightWeaponRange += roItem->Range;
+            if ((itemGUIDByEquipPosition.first & ROWOW_EQUIP_POSITION_HAND_R) != 0)
+            {
+                status.RightWeaponType = roItem->WeaponType;
+                status.WeaponLevel = roItem->WeaponLevel;
+            }
+        }
+    }
+    status.WeaponType = GetCombinedWeaponType(status.RightWeaponType, status.LeftWeaponType);
+    status.Range = std::max(1, std::max(rightWeaponRange, leftWeaponRange));
+
+    // The ammo: its ATK, and its element, which a bow or gun takes as its own (the bAtkEle bonus with LR_FLAG_ARROW).  A bow or gun's
+    // normal attack shoots it (state.arrow_atk)
+    status.IsArrowAttack = status.WeaponType == ROWOW_WEAPON_TYPE_BOW || (status.WeaponType >= ROWOW_WEAPON_TYPE_REVOLVER && status.WeaponType <= ROWOW_WEAPON_TYPE_GRENADE);
+    if (ammoItem != nullptr)
+    {
+        status.ArrowAttack += ammoItem->Attack;
+        status.AmmoType = ammoItem->AmmoType;
+        if (ammoItem->AmmoElement >= 0)
+        {
+            if (status.IsArrowAttack == true)
+                status.WeaponElement = uint8(ammoItem->AmmoElement);
+            else
+                status.ArrowElement = ammoItem->AmmoElement;
+        }
+    }
+
+    // Damage modifiers from weapon type
+    for (uint8 size = 0; size < ROWOW_SIZE_COUNT; size++)
+    {
+        status.WeaponSizeMods[size] = SizeFixByWeaponType[status.RightWeaponType][size];
+        status.LeftWeaponSizeMods[size] = SizeFixByWeaponType[status.LeftWeaponType][size];
+    }
+
+    // ----- STATS CALCULATION -----
+    // Job bonuses, then the base stats.  (The Super Novice's +10 for never dying waits for a death count, and the passive skills that
+    // add stats come with the skills, R6)
+    if (job != nullptr && identity.JobLevel >= 1 && identity.JobLevel <= job->BonusStatsByJobLevel.size())
+        for (uint8 statIndex = 0; statIndex < ROWOW_STAT_COUNT; statIndex++)
+            status.JobBonusStats[statIndex] = job->BonusStatsByJobLevel[identity.JobLevel - 1][statIndex];
+    for (uint8 statIndex = 0; statIndex < ROWOW_STAT_COUNT; statIndex++)
+        status.Stats[statIndex] = std::clamp<int32>(status.JobBonusStats[statIndex] + int32(identity.Stats[statIndex]), 0, USHRT_MAX);
+
+    // ----- HP MAX CALCULATION -----
+    status.MaxHP = StatusCalcMaxHPPC(identity, status.Stats[ROWOW_STAT_VIT]);
+    if (BattleConfig.HPRate != 100)
+        status.MaxHP = uint32(BattleConfig.HPRate * (status.MaxHP / 100.));
+    if (identity.BaseLevel < 100)
+        status.MaxHP = std::clamp<uint32>(status.MaxHP, 1, uint32(BattleConfig.MaxHPLevel99));
+    else if (identity.BaseLevel < 151)
+        status.MaxHP = std::clamp<uint32>(status.MaxHP, 1, uint32(BattleConfig.MaxHPLevel150));
+    else
+        status.MaxHP = std::clamp<uint32>(status.MaxHP, 1, uint32(BattleConfig.MaxHP));
+
+    // ----- SP MAX CALCULATION -----
+    status.MaxSP = StatusCalcMaxSPPC(identity, status.Stats[ROWOW_STAT_INT]);
+    if (BattleConfig.SPRate != 100)
+        status.MaxSP = uint32(BattleConfig.SPRate * (status.MaxSP / 100.));
+    status.MaxSP = std::clamp<uint32>(status.MaxSP, 1, uint32(BattleConfig.MaxSP));
+
+    // ----- MISC CALCULATION -----
+    StatusCalcMisc(status, identity.BaseLevel);
+
+    // ----- EQUIPMENT-DEF CALCULATION -----
+    if (BattleConfig.WeaponDefenseType == 0 && status.Def > BattleConfig.MaxDef)
+    {
+        status.Def2 += BattleConfig.OverDefBonus * (status.Def - BattleConfig.MaxDef);
+        status.Def = BattleConfig.MaxDef;
+    }
+
+    // ----- EQUIPMENT-MDEF CALCULATION -----
+    if (BattleConfig.MagicDefenseType == 0 && status.MDef > BattleConfig.MaxDef)
+    {
+        status.MDef2 += BattleConfig.OverDefBonus * (status.MDef - BattleConfig.MaxDef);
+        status.MDef = BattleConfig.MaxDef;
+    }
+
+    // ----- ASPD CALCULATION -----
+    // pc_maxaspd / AMOTION_DIVIDER_PC and MIN_ASPD / AMOTION_DIVIDER_PC
+    status.AttackMotion = std::clamp(StatusBaseAmotionPC(identity, status), BattleConfig.MaxAspdAmotion / 2, 8000 / 2);
+    status.AspdRate = 1000;
+    status.AttackDelay = 2 * status.AttackMotion;
+
+    // ----- DMOTION -----
+    status.DamageMotion = std::clamp(800 - status.Stats[ROWOW_STAT_AGI] * 4, 400, 800);
+    if (BattleConfig.PCDamageDelayRate != 100)
+        status.DamageMotion = status.DamageMotion * BattleConfig.PCDamageDelayRate / 100;
+
+    identity.Status = status;
+}
+
+int32 ROWOWMod::StatusBaseAmotionPC(ROWOWIdentity const& identity, ROWOWStatus const& status) const
+{
+    // status_base_amotion_pc
+    ROWOWJob const* job = GetJob(identity.JobID);
+    if (job == nullptr)
+        return 2000; // AMOTION_ZERO_ASPD
+
+    // Base weapon delay
+    int32 amotion = (status.WeaponType < ROWOW_WEAPON_TYPE_MAX)
+        ? job->BaseASPDByWeaponType[status.WeaponType] // Single weapon
+        : (job->BaseASPDByWeaponType[status.RightWeaponType] + job->BaseASPDByWeaponType[status.LeftWeaponType]) * 7 / 10; // Dual-wield
+
+    // Percentual delay reduction from stats
+    amotion -= amotion * (4 * status.Stats[ROWOW_STAT_AGI] + status.Stats[ROWOW_STAT_DEX]) / 1000;
+    return amotion;
+}
+
+int32 ROWOWMod::StatusBaseAtk(ROWOWStatus const& status) const
+{
+    // status_base_atk
+    if ((GetBattleObjectType(status) & BattleConfig.EnableBaseAtk) == 0)
+        return 0;
+    int32 str = status.Stats[ROWOW_STAT_STR];
+    int32 dex = status.Stats[ROWOW_STAT_DEX];
+    if (status.IsPlayer == true && IsRangedWeaponType(status.WeaponType) == true)
+        std::swap(str, dex);
+    int32 dstr = str / 10;
+    str += dstr * dstr;
+    str += dex / 5 + status.Stats[ROWOW_STAT_LUK] / 5;
+    return std::clamp(str, 0, int32(USHRT_MAX));
+}
+
+void ROWOWMod::StatusCalcMisc(ROWOWStatus& status, uint32 level) const
+{
+    // status_calc_misc.  A player's values stack with the earlier bonuses, and a monster's are set (all of them start at 0 here)
+    int32 int_ = status.Stats[ROWOW_STAT_INT];
+    int32 objectType = GetBattleObjectType(status);
+
+    // Matk
+    status.MagicAttackMin = int_ + (int_ / 7) * (int_ / 7); // status_base_matk_min
+    status.MagicAttackMax = int_ + (int_ / 5) * (int_ / 5); // status_base_matk_max
+    // Hit
+    status.Hit = std::clamp<int32>(status.Hit + int32(level) + status.Stats[ROWOW_STAT_DEX], 1, SHRT_MAX);
+    // Flee
+    status.Flee = std::clamp<int32>(status.Flee + int32(level) + status.Stats[ROWOW_STAT_AGI], 1, SHRT_MAX);
+    // Def2
+    status.Def2 = std::clamp<int32>(status.Def2 + status.Stats[ROWOW_STAT_VIT], 0, SHRT_MAX);
+    // Mdef2
+    status.MDef2 = std::clamp<int32>(status.MDef2 + int_ + (status.Stats[ROWOW_STAT_VIT] / 2), 0, SHRT_MAX);
+    // Critical: every 1 LUK is +0.3 critical
+    if ((objectType & BattleConfig.EnableCritical) != 0)
+        status.Critical = std::clamp<int32>(status.Critical + 10 + (status.Stats[ROWOW_STAT_LUK] * 10 / 3), 1, SHRT_MAX);
+    else
+        status.Critical = 0;
+    // Perfect dodge: every 10 LUK is +1
+    if ((objectType & BattleConfig.EnablePerfectFlee) != 0)
+        status.Flee2 = std::clamp<int32>(status.Flee2 + status.Stats[ROWOW_STAT_LUK] + 10, 0, SHRT_MAX);
+    else
+        status.Flee2 = 0;
+
+    status.BaseAttack += StatusBaseAtk(status);
+
+    if (status.Critical != 0 && status.IsPlayer == false)
+    {
+        if (BattleConfig.MobCriticalRate != 100)
+            status.Critical = std::clamp<int32>(status.Critical * BattleConfig.MobCriticalRate / 100, 1, SHRT_MAX);
+        if (status.Critical == 0 && BattleConfig.MobCriticalRate != 0)
+            status.Critical = 10;
+    }
+
+    // Only players regenerate here (BL_REGEN has no monsters)
+    if (status.IsPlayer == true)
+        StatusCalcRegen(status);
+}
+
+uint32 ROWOWMod::StatusCalcMaxHPPC(ROWOWIdentity const& identity, int32 vit) const
+{
+    // status_calc_maxhp_pc.  (VIT and max HP from gear come with the gear bonuses, R5)
+    ROWOWJob const* job = GetJob(identity.JobID);
+    if (job == nullptr || job->BaseHPByLevel.empty() == true)
+        return 1;
+    uint32 level = std::min<uint32>(std::max<uint32>(identity.BaseLevel, 1) - 1, uint32(job->BaseHPByLevel.size()) - 1);
+    double dmax = job->BaseHPByLevel[level];
+    if (vit > 0)
+        dmax *= (1.0 + vit * 0.01);
+    if (job->IsUpper == true)
+        dmax *= 1.25;
+    if (dmax < 1.0)
+        dmax = 1.0;
+    return std::max<uint32>(1, uint32(dmax));
+}
+
+uint32 ROWOWMod::StatusCalcMaxSPPC(ROWOWIdentity const& identity, int32 int_) const
+{
+    // status_calc_maxsp_pc
+    ROWOWJob const* job = GetJob(identity.JobID);
+    if (job == nullptr || job->BaseSPByLevel.empty() == true)
+        return 1;
+    uint32 level = std::min<uint32>(std::max<uint32>(identity.BaseLevel, 1) - 1, uint32(job->BaseSPByLevel.size()) - 1);
+    double dmax = job->BaseSPByLevel[level];
+    if (int_ > 0)
+        dmax *= (1.0 + int_ * 0.01);
+    if (job->IsUpper == true)
+        dmax *= 1.25;
+    if (dmax < 1.0)
+        dmax = 1.0;
+    return std::max<uint32>(1, uint32(dmax));
+}
+
+void ROWOWMod::StatusCalcRegen(ROWOWStatus& status)
+{
+    // status_calc_regen, for a player.  (The regen skills and the recovery rate bonuses come with the skills and gear)
+    int32 value = (status.Stats[ROWOW_STAT_VIT] / 5) + std::max<int32>(1, int32(status.MaxHP / 200));
+    status.RegenHP = std::clamp<int32>(value, 0, SHRT_MAX);
+
+    value = 1 + (status.Stats[ROWOW_STAT_INT] / 6) + int32(status.MaxSP / 100);
+    if (status.Stats[ROWOW_STAT_INT] >= 120)
+        value += ((status.Stats[ROWOW_STAT_INT] - 120) / 2) + 4;
+    status.RegenSP = std::clamp<int32>(value, 0, SHRT_MAX);
+}
+
+int32 ROWOWMod::PCMaxParameter(ROWOWIdentity const& identity) const
+{
+    // pc_maxparameter, for the pre-renewal jobs (no baby or third jobs here)
+    ROWOWJob const* job = GetJob(identity.JobID);
+    return (job != nullptr && job->IsUpper == true) ? BattleConfig.MaxTransParameter : BattleConfig.MaxParameter;
+}
+
+int32 ROWOWMod::PCNeedStatusPoint(ROWOWIdentity const& identity, uint8 statIndex, int32 value) const
+{
+    // pc_need_status_point
+    if (value == 0 || statIndex >= ROWOW_STAT_COUNT)
+        return 0;
+    int32 low = int32(identity.Stats[statIndex]);
+    int32 max = PCMaxParameter(identity);
+    if (low >= max && value > 0)
+        return 0; // Official servers show '0' when max is reached
+    int32 high = low + value;
+    if (value < 0)
+        std::swap(low, high);
+    int32 statusPoints = 0;
+    for (; low < high; low++)
+        statusPoints += GetStatusPointCost(low);
+    return statusPoints;
+}
+
+bool ROWOWMod::PCStatusUp(Player* player, uint8 statIndex, int32 increase)
+{
+    // pc_statusup
+    ROWOWIdentity* identity = GetIdentity(player);
+    if (identity->Exists == false || statIndex >= ROWOW_STAT_COUNT || increase <= 0)
+        return false;
+
+    // Check limits (pc_maxparameterincrease)
+    int32 current = int32(identity->Stats[statIndex]);
+    int32 maxParameter = PCMaxParameter(*identity);
+    int32 finalValue = current;
+    int32 statusPoints = int32(identity->StatusPoints);
+    while (finalValue <= maxParameter && statusPoints >= 0)
+    {
+        statusPoints -= GetStatusPointCost(finalValue);
+        finalValue++;
+    }
+    finalValue--;
+    int32 maxIncrease = finalValue > current ? finalValue - current : 0;
+    increase = std::clamp(increase, 0, maxIncrease);
+    if (increase <= 0 || current + increase > maxParameter)
+        return false;
+
+    // Check status points
+    int32 neededPoints = PCNeedStatusPoint(*identity, statIndex, increase);
+    if (neededPoints < 0 || neededPoints > int32(identity->StatusPoints))
+        return false;
+
+    identity->Stats[statIndex] = uint32(current + increase);
+    identity->StatusPoints -= uint32(neededPoints);
+    RefreshROForm(player);
+    return true;
+}
+
+bool ROWOWMod::PCIsMaxBaseLevel(ROWOWIdentity const& identity) const
+{
+    ROWOWJob const* job = GetJob(identity.JobID);
+    return job == nullptr || identity.BaseLevel >= job->MaxBaseLevel;
+}
+
+bool ROWOWMod::PCIsMaxJobLevel(ROWOWIdentity const& identity) const
+{
+    ROWOWJob const* job = GetJob(identity.JobID);
+    return job == nullptr || identity.JobLevel >= job->MaxJobLevel;
+}
+
+uint64 ROWOWMod::PCNextBaseExp(ROWOWIdentity const& identity) const
+{
+    // pc_nextbaseexp
+    if (identity.BaseLevel == 0)
+        return 0;
+    if (PCIsMaxBaseLevel(identity) == true)
+        return ROWOW_MAX_LEVEL_BASE_EXP;
+    ROWOWJob const* job = GetJob(identity.JobID);
+    if (job == nullptr || identity.BaseLevel > job->BaseExpByLevel.size())
+        return 0;
+    return job->BaseExpByLevel[identity.BaseLevel - 1];
+}
+
+uint64 ROWOWMod::PCNextJobExp(ROWOWIdentity const& identity) const
+{
+    // pc_nextjobexp
+    if (identity.JobLevel == 0)
+        return 0;
+    if (PCIsMaxJobLevel(identity) == true)
+        return ROWOW_MAX_LEVEL_JOB_EXP;
+    ROWOWJob const* job = GetJob(identity.JobID);
+    if (job == nullptr || identity.JobLevel > job->JobExpByLevel.size())
+        return 0;
+    return job->JobExpByLevel[identity.JobLevel - 1];
+}
+
+void ROWOWMod::PCGainExp(Player* player, uint64 baseExp, uint64 jobExp)
+{
+    // pc_gainexp.  (The exp bonuses of gear and statuses, pc_calcexp, come with them)
+    ROWOWIdentity* identity = GetIdentity(player);
+    if (identity->IsInForm == false || player->IsAlive() == false)
+        return;
+
+    bool isMaxBaseLevel = PCIsMaxBaseLevel(*identity);
+    bool isMaxJobLevel = PCIsMaxJobLevel(*identity);
+    uint64 nextBaseExp = PCNextBaseExp(*identity);
+    uint64 nextJobExp = PCNextJobExp(*identity);
+    if (isMaxBaseLevel == true)
+    {
+        if (identity->BaseExp >= ROWOW_MAX_LEVEL_BASE_EXP)
+            baseExp = 0;
+        else if (identity->BaseExp + baseExp >= ROWOW_MAX_LEVEL_BASE_EXP)
+            baseExp = ROWOW_MAX_LEVEL_BASE_EXP - identity->BaseExp;
+    }
+    if (isMaxJobLevel == true)
+    {
+        if (identity->JobExp >= ROWOW_MAX_LEVEL_JOB_EXP)
+            jobExp = 0;
+        else if (identity->JobExp + jobExp >= ROWOW_MAX_LEVEL_JOB_EXP)
+            jobExp = ROWOW_MAX_LEVEL_JOB_EXP - identity->JobExp;
+    }
+    if (BattleConfig.MaxExpGainRate != 0 && (baseExp != 0 || jobExp != 0))
+    {
+        if (nextBaseExp > 0 && float(baseExp) / float(nextBaseExp) > BattleConfig.MaxExpGainRate / 1000.)
+            baseExp = uint64(BattleConfig.MaxExpGainRate / 1000. * nextBaseExp);
+        if (nextJobExp > 0 && float(jobExp) / float(nextJobExp) > BattleConfig.MaxExpGainRate / 1000.)
+            jobExp = uint64(BattleConfig.MaxExpGainRate / 1000. * nextJobExp);
+    }
+
+    // Give EXP for Base Level, then Job Level
+    if (baseExp != 0)
+    {
+        identity->BaseExp = uint32(std::min<uint64>(uint64(identity->BaseExp) + baseExp, std::numeric_limits<uint32>::max()));
+        if (PCCheckBaseLevelUp(player) == false)
+            player->SetUInt32Value(PLAYER_XP, identity->BaseExp);
+    }
+    if (jobExp != 0)
+    {
+        identity->JobExp = uint32(std::min<uint64>(uint64(identity->JobExp) + jobExp, std::numeric_limits<uint32>::max()));
+        PCCheckJobLevelUp(player);
+    }
+    // (No message: rAthena's disp_experience is off, and the Basic Info window shows the bars)
+    if (baseExp != 0 || jobExp != 0)
+        SendROStatusToClient(player);
+}
+
+bool ROWOWMod::PCCheckBaseLevelUp(Player* player)
+{
+    // pc_checkbaselevelup
+    ROWOWIdentity* identity = GetIdentity(player);
+    uint64 next = PCNextBaseExp(*identity);
+    if (next == 0 || identity->BaseExp < next || PCIsMaxBaseLevel(*identity) == true)
+        return false;
+
+    do
+    {
+        identity->BaseExp -= uint32(next);
+        // Kyoki pointed out that the max overcarry exp is the exp needed for the previous level -1. [Skotlex]
+        if ((BattleConfig.MultiLevelUp == false || (BattleConfig.MultiLevelUpBase > 0 && identity->BaseLevel >= uint32(BattleConfig.MultiLevelUpBase))) &&
+            identity->BaseExp > next - 1)
+            identity->BaseExp = uint32(next - 1);
+
+        // pc_gets_status_point: the table's points at the next level less those at this one
+        auto nextPointsIter = StatusPointsByBaseLevel.find(identity->BaseLevel + 1);
+        auto currentPointsIter = StatusPointsByBaseLevel.find(identity->BaseLevel);
+        uint32 nextPoints = nextPointsIter != StatusPointsByBaseLevel.end() ? nextPointsIter->second : 0;
+        uint32 currentPoints = currentPointsIter != StatusPointsByBaseLevel.end() ? currentPointsIter->second : 0;
+        if (nextPoints > currentPoints)
+            identity->StatusPoints += nextPoints - currentPoints;
+        identity->BaseLevel++;
+
+        if (PCIsMaxBaseLevel(*identity) == true)
+        {
+            identity->BaseExp = std::min<uint32>(identity->BaseExp, ROWOW_MAX_LEVEL_BASE_EXP);
+            break;
+        }
+    } while ((next = PCNextBaseExp(*identity)) > 0 && identity->BaseExp >= next);
+
+    // status_calc_pc and status_percent_heal(sd, 100, 100), then the level up effect
+    RefreshROForm(player);
+    if (player->IsAlive() == true)
+    {
+        player->SetHealth(player->GetMaxHealth());
+        player->SetPower(POWER_MANA, player->GetMaxPower(POWER_MANA));
+    }
+    CastLevelUpEffect(player, ROWOW_SPELL_BASE_LEVEL_UP);
+    ChatHandler(player->GetSession()).PSendSysMessage("Base level up! You are now base level {}.", identity->BaseLevel);
+    return true;
+}
+
+bool ROWOWMod::PCCheckJobLevelUp(Player* player)
+{
+    // pc_checkjoblevelup
+    ROWOWIdentity* identity = GetIdentity(player);
+    uint64 next = PCNextJobExp(*identity);
+    if (next == 0 || identity->JobExp < next || PCIsMaxJobLevel(*identity) == true)
+        return false;
+
+    do
+    {
+        identity->JobExp -= uint32(next);
+        // Kyoki pointed out that the max overcarry exp is the exp needed for the previous level -1. [Skotlex]
+        if ((BattleConfig.MultiLevelUp == false || (BattleConfig.MultiLevelUpJob > 0 && identity->JobLevel >= uint32(BattleConfig.MultiLevelUpJob))) &&
+            identity->JobExp > next - 1)
+            identity->JobExp = uint32(next - 1);
+
+        identity->JobLevel++;
+        identity->SkillPoints++;
+
+        if (PCIsMaxJobLevel(*identity) == true)
+        {
+            identity->JobExp = std::min<uint32>(identity->JobExp, ROWOW_MAX_LEVEL_JOB_EXP);
+            break;
+        }
+    } while ((next = PCNextJobExp(*identity)) > 0 && identity->JobExp >= next);
+
+    RefreshROForm(player);
+    CastLevelUpEffect(player, ROWOW_SPELL_JOB_LEVEL_UP);
+    ChatHandler(player->GetSession()).PSendSysMessage("Job level up! You are now job level {}.", identity->JobLevel);
+    return true;
+}
+
+void ROWOWMod::PCDeadPenalty(Player* player)
+{
+    // The exp penalty of pc_dead: a share of the exp to the next level (death_penalty_type 1) or of the exp held (2), in hundredths of a
+    // percent.  Novices (and Novice Highs) never lose exp, nor does anyone on a nopenalty map
+    ROWOWIdentity* identity = GetIdentity(player);
+    if (identity->IsInForm == false || BattleConfig.DeathPenaltyType == 0)
+        return;
+    if (identity->JobID == ROWOW_JOB_NOVICE || identity->JobID == ROWOW_JOB_NOVICE_HIGH)
+        return;
+    if (NoPenaltyMapIDs.find(player->GetMapId()) != NoPenaltyMapIDs.end())
+        return;
+
+    uint64 basePenalty = 0;
+    uint64 jobPenalty = 0;
+    if (((BattleConfig.DeathPenaltyMaxLevel & 1) != 0 || PCIsMaxBaseLevel(*identity) == false) && BattleConfig.DeathPenaltyBase > 0)
+    {
+        switch (BattleConfig.DeathPenaltyType)
+        {
+            case 1: basePenalty = uint64(PCNextBaseExp(*identity) * (BattleConfig.DeathPenaltyBase / 10000.)); break;
+            case 2: basePenalty = uint64(identity->BaseExp * (BattleConfig.DeathPenaltyBase / 10000.)); break;
+        }
+        basePenalty = std::min<uint64>(identity->BaseExp, basePenalty);
+    }
+    if (((BattleConfig.DeathPenaltyMaxLevel & 2) != 0 || PCIsMaxJobLevel(*identity) == false) && BattleConfig.DeathPenaltyJob > 0)
+    {
+        switch (BattleConfig.DeathPenaltyType)
+        {
+            case 1: jobPenalty = uint64(PCNextJobExp(*identity) * (BattleConfig.DeathPenaltyJob / 10000.)); break;
+            case 2: jobPenalty = uint64(identity->JobExp * (BattleConfig.DeathPenaltyJob / 10000.)); break;
+        }
+        jobPenalty = std::min<uint64>(identity->JobExp, jobPenalty);
+    }
+    if (basePenalty == 0 && jobPenalty == 0)
+        return;
+
+    // pc_lostexp
+    identity->BaseExp -= uint32(basePenalty);
+    identity->JobExp -= uint32(jobPenalty);
+    player->SetUInt32Value(PLAYER_XP, identity->BaseExp);
+    ChatHandler(player->GetSession()).PSendSysMessage("You lost {} base experience and {} job experience.", basePenalty, jobPenalty);
+    SendROStatusToClient(player);
+}
+
+void ROWOWMod::MobLogDamage(Creature* creature, Unit* attacker, uint32 damage)
+{
+    // mob_log_damage: players in the form only (their pets are put away there).  The damage counted is what the monster had left to lose
+    if (creature == nullptr || attacker == nullptr || damage == 0 || GetROMobID(creature) == 0)
+        return;
+    Player* player = attacker->ToPlayer();
+    if (player == nullptr || IsInROForm(player) == false)
+        return;
+    damage = std::min<uint32>(damage, creature->GetHealth());
+    if (damage == 0)
+        return;
+
+    ROWOWDamageLog* damageLog = creature->CustomData.GetDefault<ROWOWDamageLog>("ROWOWDamageLog");
+    for (ROWOWDamageLogEntry& entry : damageLog->Entries)
+    {
+        if (entry.PlayerGUID == player->GetGUID())
+        {
+            entry.Damage += damage;
+            return;
+        }
+    }
+    if (damageLog->Entries.size() == ROWOW_DAMAGE_LOG_SIZE)
+        damageLog->Entries.pop_front(); // The oldest goes
+    ROWOWDamageLogEntry entry;
+    entry.PlayerGUID = player->GetGUID();
+    entry.Damage = damage;
+    damageLog->Entries.push_back(entry);
+}
+
+void ROWOWMod::MobDeadExp(Creature* creature)
+{
+    // The exp part of mob_dead: each attacker's share of the damage (exp_calc_type 0, Aegis's) of the monster's base and job exp, more
+    // for each extra attacker (exp_bonus_attacker).  Attackers off the map don't count, and dead ones get nothing.  (Parties share their
+    // members' exp evenly in RO only when set to; Warcraft's groups have no such setting, so each member keeps their own here)
+    ROWOWDamageLog* damageLog = creature->CustomData.Get<ROWOWDamageLog>("ROWOWDamageLog");
+    if (damageLog == nullptr || damageLog->Entries.empty() == true)
+        return;
+    std::deque<ROWOWDamageLogEntry> entries;
+    entries.swap(damageLog->Entries);
+
+    uint32 mobID = GetROMobID(creature);
+    int64 mobRowIndex = GetMobRowIndex(mobID);
+    ROWOWDataTable const* mobTable = GetDataTable(ROWOW_DATA_TABLE_MOB);
+    if (mobRowIndex < 0 || mobTable == nullptr)
+        return;
+    // mob_db's exp, at the configured rates (as rAthena applies them when loading mob_db)
+    uint64 mobBaseExp = uint64(std::max<int64>(0, mobTable->GetInt(size_t(mobRowIndex), mobTable->GetColumnIndex("BaseExp"), 0))) * BattleConfig.BaseExpRate / 100;
+    uint64 mobJobExp = uint64(std::max<int64>(0, mobTable->GetInt(size_t(mobRowIndex), mobTable->GetColumnIndex("JobExp"), 0))) * BattleConfig.JobExpRate / 100;
+    if (mobBaseExp == 0 && mobJobExp == 0)
+        return;
+
+    std::vector<Player*> players(entries.size(), nullptr);
+    int32 count = 0;
+    uint64 totalDamage = 0;
+    for (size_t i = 0; i < entries.size(); i++)
+    {
+        totalDamage += entries[i].Damage;
+        Player* player = ObjectAccessor::GetPlayer(*creature, entries[i].PlayerGUID);
+        if (player == nullptr)
+            continue; // Not on this map
+        count++;
+        if (player->IsAlive() == false || IsInROForm(player) == false)
+            continue;
+        players[i] = player;
+    }
+
+    // Apply first-attacker 200% exp share bonus
+    if (BattleConfig.ExpCalcType == 2 && count > 1)
+    {
+        totalDamage += entries[0].Damage;
+        entries[0].Damage += entries[0].Damage;
+    }
+
+    for (size_t i = 0; i < entries.size(); i++)
+    {
+        if (players[i] == nullptr)
+            continue;
+        double per; // Your share of the mob's exp
+        if (BattleConfig.ExpCalcType == 1 || totalDamage == 0)
+            per = double(entries[i].Damage) / double(creature->GetMaxHealth()); // eAthena's exp formula based on max hp
+        else
+            per = double(entries[i].Damage) / double(totalDamage); // Aegis's exp formula based on total damage
+        if (per > 1)
+            per = 1; // To prevent exploits
+        if (count > 1 && BattleConfig.ExpBonusAttacker != 0)
+        {
+            // Exp bonus per additional attacker
+            if (count > BattleConfig.ExpBonusMaxAttacker)
+                count = BattleConfig.ExpBonusMaxAttacker;
+            per += per * ((count - 1) * BattleConfig.ExpBonusAttacker) / 100.;
+        }
+
+        uint64 baseExp = mobBaseExp != 0 ? uint64(std::clamp(double(mobBaseExp) * per, 1.0, double(std::numeric_limits<uint32>::max()))) : 0;
+        uint64 jobExp = mobJobExp != 0 ? uint64(std::clamp(double(mobJobExp) * per, 1.0, double(std::numeric_limits<uint32>::max()))) : 0;
+        PCGainExp(players[i], baseExp, jobExp);
+    }
+}
+
+void ROWOWMod::UpdateNaturalRegen(Player* player, uint32 diff)
+{
+    // status_natural_heal for a player with no regen skills or statuses yet: HP every natural_healhp_interval and SP every
+    // natural_healsp_interval, twice as often sitting.  Walking stops HP regen (and starts its interval over), not SP
+    ROWOWIdentity* identity = player->CustomData.Get<ROWOWIdentity>("ROWOWIdentity");
+    if (identity == nullptr || identity->IsInForm == false || player->IsAlive() == false)
+        return;
+    int32 multi = player->IsSitState() == true ? 2 : 1;
+
+    if (player->isMoving() == true)
+        identity->RegenHPTimer = 0;
+    else
+    {
+        identity->RegenHPTimer += diff;
+        if (identity->RegenHPTimer >= uint32(BattleConfig.NaturalHealHPInterval / multi))
+        {
+            identity->RegenHPTimer = 0;
+            if (player->GetHealth() < player->GetMaxHealth())
+                player->ModifyHealth(identity->Status.RegenHP);
+        }
+    }
+
+    identity->RegenSPTimer += diff;
+    if (identity->RegenSPTimer >= uint32(BattleConfig.NaturalHealSPInterval / multi))
+    {
+        identity->RegenSPTimer = 0;
+        if (player->GetPower(POWER_MANA) < player->GetMaxPower(POWER_MANA))
+            player->ModifyPower(POWER_MANA, identity->Status.RegenSP);
+    }
+
+    // Kept in step, for the SP a respawn keeps (death empties the power)
+    identity->HP = player->GetHealth();
+    identity->SP = player->GetPower(POWER_MANA);
+}
+
+void ROWOWMod::SendROStatusToClient(Player* player)
+{
+    // "ROWOWSTATUS\t<job>\t<base level>,<base exp>,<next base exp>,<job level>,<job exp>,<next job exp>,<status points>,<skill points>\t
+    // <STR>,..,<LUK>\t<job bonus STR>,..\t<raise cost STR>,..\t<the status window's right side>", the window's values as rAthena's
+    // pre-renewal pc_leftside_* / pc_rightside_* show them
+    ROWOWIdentity* identity = GetIdentity(player);
+    if (identity->IsInForm == false)
+        return;
+    ROWOWJob const* job = GetJob(identity->JobID);
+    ROWOWStatus const& status = identity->Status;
+    std::string stats;
+    std::string jobBonusStats;
+    std::string raiseCosts;
+    for (uint8 statIndex = 0; statIndex < ROWOW_STAT_COUNT; statIndex++)
+    {
+        char const* separator = statIndex == 0 ? "" : ",";
+        stats += fmt::format("{}{}", separator, identity->Stats[statIndex]);
+        jobBonusStats += fmt::format("{}{}", separator, status.JobBonusStats[statIndex]);
+        raiseCosts += fmt::format("{}{}", separator, PCNeedStatusPoint(*identity, statIndex, 1));
+    }
+    std::string addonMessage = fmt::format("ROWOWSTATUS\t{}\t{},{},{},{},{},{},{},{}\t{}\t{}\t{}\t{},{},{},{},{},{},{},{},{},{},{},{},{}",
+        job != nullptr ? job->Name : "?", identity->BaseLevel, identity->BaseExp, PCNextBaseExp(*identity), identity->JobLevel, identity->JobExp, PCNextJobExp(*identity),
+        identity->StatusPoints, identity->SkillPoints, stats, jobBonusStats, raiseCosts,
+        status.BaseAttack + status.WeaponAttack + status.LeftWeaponAttack, status.WeaponRefineAttack + status.LeftWeaponRefineAttack, status.MagicAttackMin,
+        status.MagicAttackMax, status.Def, status.Def2, status.MDef, status.MDef2 - (status.Stats[ROWOW_STAT_VIT] / 2), status.Hit, status.Flee, status.Flee2 / 10,
+        status.Critical / 10, (2000 - status.AttackMotion) / 10);
+    WorldPacket data;
+    ChatHandler::BuildChatPacket(data, CHAT_MSG_SYSTEM, LANG_ADDON, nullptr, nullptr, addonMessage);
+    player->SendDirectMessage(&data);
+}
