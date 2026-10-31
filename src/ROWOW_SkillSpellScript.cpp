@@ -71,6 +71,10 @@ class ROWOW_SkillSpellScript : public SpellScript
             return SPELL_CAST_OK;
         if (caster->GetCurrentSpell(CURRENT_GENERIC_SPELL) == GetSpell())
             return ROWOW->SkillCastEndCheck(caster, target, GetExplTargetDest(), skillID, skillLevel);
+        // A player sitting uses no skills (clif_parse_UseSkillToId and clif_parse_UseSkillToPos: if( pc_issit(sd) ) return;).  The ones an
+        // item or another skill casts aren't the player's request
+        if (caster->IsPlayer() == true && caster->IsSitState() == true && GetSpell()->IsTriggered() == false && GetSpell()->m_CastItem == nullptr)
+            return SPELL_FAILED_NOT_STANDING;
         return ROWOW->UnitSkillUse(caster, target, GetExplTargetDest(), skillID, skillLevel);
     }
 

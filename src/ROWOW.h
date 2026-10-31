@@ -49,6 +49,7 @@ class SpellInfo;
 class Unit;
 class WorldLocation;
 struct CalcDamageInfo;
+struct ItemTemplate;
 struct Position;
 struct ROWOWScript;
 struct ROWOWScriptContext;
@@ -474,6 +475,7 @@ struct ROWOWItem
     bool IsAmmo = false;
     bool IsRenewal = false; // A stat-less post-renewal look
     bool IsDelayConsume = false; // Used up by what its script does, not when used (the Magnifier)
+    bool IsNoUseSitting = false; // Can't be used sitting (item_db's NoUse Sitting)
     bool IsContainer = false; // A box, which needs room in the bags (item_db's Container flag)
     bool IsDeadBranch = false;
     bool IsRefineable = false;
@@ -1328,6 +1330,8 @@ public:
     void RefreshROFormLook(Player* player); // The job's look
     void RemoveROFormAuras(Player* player); // The job's look, its head and headgear
     bool IsSpellKeptInROForm(SpellInfo const* spellInfo) const;
+    bool IsROCompanionPetSpell(SpellInfo const* spellInfo) const; // An RO companion pet's summon, which the form keeps
+    bool IsROCompanionPetCarrier(ItemTemplate const* itemTemplate) const; // An item teaching an RO companion pet, which the form can use
 
     // RO status (ROWOW_Status.cpp): the port of rAthena's pre-renewal status calculation for a player (status.cpp)
     void CalculateIdentityStatus(Player* player, ROWOWIdentity& identity) const; // status_calc_pc_sub

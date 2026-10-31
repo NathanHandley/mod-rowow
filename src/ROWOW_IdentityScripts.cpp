@@ -266,8 +266,8 @@ public:
 
     bool OnPlayerCanCastItemUseSpell(Player* player, Item* item, SpellCastTargets const& /*targets*/, uint8 /*cast_count*/, uint32 /*glyphIndex*/) override
     {
-        // Only RO items work in the form
-        if (item == nullptr || ROWOW->IsInROForm(player) == false || ROWOW->IsROItemTemplate(item->GetEntry()) == true)
+        // Only RO items work in the form, and the carriers of RO companion pets
+        if (item == nullptr || ROWOW->IsInROForm(player) == false || ROWOW->IsROItemTemplate(item->GetEntry()) == true || ROWOW->IsROCompanionPetCarrier(item->GetTemplate()) == true)
             return true;
         SendNotInROFormMessage(player);
         return false;

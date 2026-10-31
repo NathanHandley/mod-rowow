@@ -15,6 +15,7 @@
 //  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #include "Chat.h"
+#include "DBCStores.h"
 #include "DatabaseEnv.h"
 #include "GameTime.h"
 #include "Item.h"
@@ -602,16 +603,42 @@ void ROWOWMod::SaveIdentity(Player* player, CharacterDatabaseTransaction trans)
 
 bool ROWOWMod::IsSpellKeptInROForm(SpellInfo const* spellInfo) const
 {
-    // The fixed RO spells (the world travel spell), auto attack, and languages (so chat still works).  The RO skill spells a character
-    // learned as itself (from before the identity) are the character's, not the form's: the form knows the spells of the skills the
-    // identity learned (IsIdentitySkillSpell)
+    // The fixed RO spells (the world travel spell), auto attack, languages (so chat still works) and the RO companion pets.  The RO skill
+    // spells a character learned as itself (from before the identity) are the character's, not the form's: the form knows the spells of
+    // the skills the identity learned (IsIdentitySkillSpell)
     if (spellInfo == nullptr)
         return false;
     if (spellInfo->Id >= ROWOW_SPELL_ID_RO_START && spellInfo->Id <= ROWOW_SPELL_ID_FIXED_END)
         return true;
     if (spellInfo->Id == ROWOW_SPELL_AUTO_ATTACK)
         return true;
+    if (IsROCompanionPetSpell(spellInfo) == true)
+        return true;
     return spellInfo->HasEffect(SPELL_EFFECT_LANGUAGE);
+}
+
+bool ROWOWMod::IsROCompanionPetSpell(SpellInfo const* spellInfo) const
+{
+    // An RO companion pet's summon (the converter's RoCompanionPetsMap.csv): an RO spell summoning a minipet
+    if (spellInfo == nullptr || spellInfo->Id < ROWOW_SPELL_ID_RO_START || spellInfo->Id > ROWOW_SPELL_ID_RO_END)
+        return false;
+    for (uint8 effectIndex = 0; effectIndex < MAX_SPELL_EFFECTS; effectIndex++)
+    {
+        if (spellInfo->Effects[effectIndex].Effect != SPELL_EFFECT_SUMMON)
+            continue;
+        SummonPropertiesEntry const* properties = sSummonPropertiesStore.LookupEntry(spellInfo->Effects[effectIndex].MiscValueB);
+        if (properties != nullptr && properties->Type == SUMMON_TYPE_MINIPET)
+            return true;
+    }
+    return false;
+}
+
+bool ROWOWMod::IsROCompanionPetCarrier(ItemTemplate const* itemTemplate) const
+{
+    // A carrier casts the learning spell with the spell it teaches as its second (Player::CastItemUseSpell's learning case)
+    if (itemTemplate == nullptr || (itemTemplate->Spells[0].SpellId != 483 && itemTemplate->Spells[0].SpellId != 55884))
+        return false;
+    return IsROCompanionPetSpell(sSpellMgr->GetSpellInfo(itemTemplate->Spells[1].SpellId));
 }
 
 void ROWOWMod::EnterROForm(Player* player)

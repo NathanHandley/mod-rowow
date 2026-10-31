@@ -966,6 +966,17 @@ bool ROWOWMod::PCIsUseItem(Player* player, Item const* item, bool isReporting)
     uint32 now = uint32(GameTime::GetGameTimeMS().count());
     if (int32(identity->CanUseItemTime - now) > 0)
         return false;
+
+    // Items that can't be used sitting (item_usage.sitting: MSI_CANT_USE_WHEN_SITDOWN), and silently the delay consume ones, which are skills
+    // (pc_useitem)
+    if (roItem->IsNoUseSitting == true && player->IsSitState() == true)
+    {
+        if (isReporting == true)
+            SendItemMessage(player, "You cannot use this item while sitting.");
+        return false;
+    }
+    if (roItem->IsDelayConsume == true && player->IsSitState() == true)
+        return false;
     auto delayIter = identity->ItemDelayEndTimes.find(roItem->ItemID);
     if (delayIter != identity->ItemDelayEndTimes.end() && int32(delayIter->second - now) > 0)
     {

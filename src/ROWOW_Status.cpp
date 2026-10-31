@@ -434,6 +434,7 @@ void ROWOWMod::LoadStatusData()
         int32 refineableColumnIndex = itemTable->GetColumnIndex("Refineable");
         int32 flagsColumnIndex = itemTable->GetColumnIndex("Flags");
         int32 delayColumnIndex = itemTable->GetColumnIndex("Delay");
+        int32 noUseColumnIndex = itemTable->GetColumnIndex("NoUse");
         int32 weightColumnIndex = itemTable->GetColumnIndex("Weight");
         int32 tradeColumnIndex = itemTable->GetColumnIndex("Trade");
         int32 buyColumnIndex = itemTable->GetColumnIndex("Buy");
@@ -521,6 +522,9 @@ void ROWOWMod::LoadStatusData()
             for (auto const& delayField : ROWOWDataTable::ParseMap(itemTable->GetCell(rowIndex, delayColumnIndex)))
                 if (delayField.first == "Duration")
                     item.DelayDuration = uint32(std::max(0, atoi(delayField.second.c_str())));
+            for (auto const& noUseField : ROWOWDataTable::ParseMap(itemTable->GetCell(rowIndex, noUseColumnIndex)))
+                if (noUseField.first == "Sitting")
+                    item.IsNoUseSitting = noUseField.second == "true";
             item.Weight = int32(std::max<int64>(0, itemTable->GetInt(rowIndex, weightColumnIndex, 0)));
             item.Buy = int32(std::max<int64>(0, itemTable->GetInt(rowIndex, buyColumnIndex, 0)));
             for (auto const& tradeField : ROWOWDataTable::ParseMap(itemTable->GetCell(rowIndex, tradeColumnIndex)))
