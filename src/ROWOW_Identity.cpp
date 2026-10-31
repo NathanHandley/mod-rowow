@@ -491,14 +491,7 @@ ROWOWIdentity* ROWOWMod::GetIdentity(Player* player)
                 identity->SkillLevelsByID[skillFields[0].Get<uint16>()] = skillFields[1].Get<uint16>();
         } while (skillResult->NextRow());
     }
-    if (QueryResult variableResult = CharacterDatabase.Query("SELECT `name`, `value` FROM `mod_rowow_identity_variable` WHERE `guid` = {}", guid))
-    {
-        do
-        {
-            Field* variableFields = variableResult->Fetch();
-            identity->Variables[variableFields[0].Get<std::string>()] = variableFields[1].Get<int64>();
-        } while (variableResult->NextRow());
-    }
+    LoadIdentityScriptVariables(player, *identity);
     if (QueryResult statusResult = CharacterDatabase.Query("SELECT `type`, `tick`, `val1`, `val2`, `val3`, `val4` FROM `mod_rowow_identity_status` WHERE `guid` = {}", guid))
     {
         // chrif_load_scdata: the statuses kept, started again when the identity is next in the RO world
@@ -574,17 +567,7 @@ void ROWOWMod::SaveIdentity(Player* player, CharacterDatabaseTransaction trans)
             trans->Append("INSERT INTO `mod_rowow_identity_skill` (`guid`, `skill_id`, `level`) VALUES ({}, {}, {})", guid, levelBySkillID.first, levelBySkillID.second);
         identity->AreSkillsChanged = false;
     }
-    if (identity->AreVariablesChanged == true)
-    {
-        trans->Append("DELETE FROM `mod_rowow_identity_variable` WHERE `guid` = {}", guid);
-        for (auto const& valueByName : identity->Variables)
-        {
-            std::string name = valueByName.first;
-            CharacterDatabase.EscapeString(name);
-            trans->Append("INSERT INTO `mod_rowow_identity_variable` (`guid`, `name`, `value`) VALUES ({}, '{}', {})", guid, name, valueByName.second);
-        }
-        identity->AreVariablesChanged = false;
-    }
+    SaveIdentityScriptVariables(player, *identity, trans);
     SaveIdentityStatusChanges(player, *identity, trans);
     SaveIdentityCart(player, *identity, trans);
     SaveIdentityMemo(player, *identity, trans);
@@ -641,8 +624,7 @@ void ROWOWMod::EnterROForm(Player* player)
         identity->IsEquipmentChanged = true;
         identity->SkillLevelsByID.clear();
         identity->AreSkillsChanged = true;
-        identity->Variables.clear();
-        identity->AreVariablesChanged = true;
+        identity->Variables.Clear();
         identity->SavedStatusChanges.clear();
         identity->AreStatusChangesChanged = true;
         identity->CartItems.fill(ROWOWCartItem());

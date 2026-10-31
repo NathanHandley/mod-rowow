@@ -21,6 +21,7 @@ void AddROWOWSkillSpellScripts();
 void AddROWOWIdentityScripts();
 void AddROWOWBattleScripts();
 void AddROWOWItemScripts();
+void AddROWOWNpcScripts();
 
 void Addmod_rowowScripts()
 {
@@ -31,4 +32,5 @@ void Addmod_rowowScripts()
     AddROWOWIdentityScripts();
     AddROWOWBattleScripts();
     AddROWOWItemScripts();
+    AddROWOWNpcScripts();
 }

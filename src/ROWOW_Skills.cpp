@@ -46,6 +46,13 @@ namespace
         return text;
     }
 
+    std::string ToLower(std::string text)
+    {
+        for (char& curChar : text)
+            curChar = char(tolower((unsigned char)curChar));
+        return text;
+    }
+
     // A name as rAthena matches it to its constants: uppercase, without underscores
     std::string GetConstantKey(std::string const& name)
     {
@@ -921,18 +928,14 @@ std::vector<uint16> ROWOWMod::GetSkillTreeJobIDs(uint16 jobID) const
 
 int64 ROWOWMod::GetIdentityVariable(ROWOWIdentity const& identity, std::string const& name) const
 {
-    auto variableIter = identity.Variables.find(name);
-    return variableIter != identity.Variables.end() ? variableIter->second : 0;
+    // The scripts' character variables, which keep their names in lowercase as rAthena's aren't case sensitive
+    return identity.Variables.Get(ToLower(name), 0).GetNumber();
 }
 
 void ROWOWMod::SetIdentityVariable(ROWOWIdentity& identity, std::string const& name, int64 value) const
 {
     // A variable of 0 isn't kept, as rAthena deletes it
-    if (value == 0)
-        identity.Variables.erase(name);
-    else
-        identity.Variables[name] = value;
-    identity.AreVariablesChanged = true;
+    identity.Variables.Set(ToLower(name), 0, ROWOWScriptValue::FromNumber(value));
 }
 
 void ROWOWMod::RefreshIdentitySkills(Player* player, ROWOWIdentity& identity)

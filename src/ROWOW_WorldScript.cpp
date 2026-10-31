@@ -56,6 +56,7 @@ public:
         ROWOW->LoadAbraData();
         ROWOW->LoadSkillUnitData();
         ROWOW->LoadStatusChangeData(); // After the skills, whose durations the statuses take, and the script commands their scripts use
+        ROWOW->LoadNpcScriptData(); // Last: the NPC scripts' commands come after every other script is compiled, and OnInit runs
     }
 };
 

@@ -24,6 +24,7 @@
 #include "SharedDefines.h"
 
 #include "DataMap.h"
+#include "ROWOW_Npc.h"
 #include "ROWOW_Skill.h"
 #include <algorithm>
 #include <array>
@@ -1011,8 +1012,11 @@ struct ROWOWIdentity : public DataMap::Base
     uint16 CloneSkillLevel = 0; // ... and its level (CLONE_SKILL_LV, at most Plagiarism's)
     std::vector<uint32> SkillSpellIDs; // The learned skills' spells, which the character knows while in the form
     std::string SentSkillsMessage; // What the client's RO interface was last told of the skills
-    std::map<std::string, int64> Variables; // Its character variables (rAthena's char_reg_num, mod_rowow_identity_variable), like jobchange_level
-    bool AreVariablesChanged = false;
+    ROWOWScriptVariables Variables; // Its character variables (rAthena's char_reg_num and char_reg_str, mod_rowow_identity_variable), like
+                                    // jobchange_level and the NPC scripts' quest variables; saved when ChangedElements has any
+    ROWOWScriptVariables AccountVariables; // Its account's (#name and ##name, mod_rowow_account_variable), loaded and saved with it
+    ROWOWScriptVariables PlayerVariables; // @name: the NPC scripts' variables until logout
+    std::unique_ptr<ROWOWScriptContext> NpcRun; // The NPC script run talking with it (one at a time), waiting for its answer
     std::array<ROWOWCartItem, ROWOW_MAX_CART> CartItems; // Its cart's items (mod_rowow_identity_cart), by cart slot
     int32 CartNum = 0; // cart_num: the slots in use
     int32 CartWeight = 0; // cart_weight and cart_weight_max, in tenths (item_db's Weight)
@@ -1777,6 +1781,52 @@ public:
     // creature follows the terrain like an RO monster does.  The path stops early at a wall, a cliff, or missing ground, and
     // stops short of the target by stopShortDistance.  Returns false if not even one step could be made
     bool BuildGroundContouredPath(Creature* creature, float targetX, float targetY, float stopShortDistance, Movement::PointsArray& pathNodesOut);
+
+    // RO NPC scripts (ROWOW_NpcScript.cpp, R7): rAthena's NPC script files read at startup into NPCs and functions, the NPC runs (one per
+    // player, waiting for its answers), NPC timers and events, and the variables the scripts keep.  Runs with a player happen in that
+    // player's thread (its session's commands, its map's update); runs with none (OnInit, timers, events) in the world update, which
+    // also applies what scripts changed of other NPCs (shown, hidden) to their creatures
+    void LoadNpcScriptData(); // After every other script command is registered
+    void RegisterNpcScriptCommands(); // ROWOW_ScriptCommands.cpp
+    void UpdateNpcScripts(uint32 diff); // The world update
+    ROWOWNpc const* GetNpc(uint32 npcID) const;
+    ROWOWNpc const* GetNpcByName(std::string const& name, uint32 preferredMapID = 0) const; // By exname, or else by the shown name
+    ROWOWNpc const* GetCreatureNpc(Creature const* creature) const; // The NPC a creature stands for, or null
+    bool StartNpcRun(Player* player, ROWOWNpc const* npc, std::string const& label = std::string()); // Talking to the NPC (its start, or a label)
+    void NpcDialogNext(Player* player); // The answers: Next, a menu choice (1 up, 255 cancels), an input, the Close button
+    void NpcDialogSelect(Player* player, int32 choice);
+    void NpcDialogInput(Player* player, std::string const& value);
+    void NpcDialogClose(Player* player);
+    void EndNpcRun(Player* player); // Drops the player's run (cancel, logout)
+    void SetupNpcRunContext(ROWOWScriptContext& context, Player* player, ROWOWNpc const* npc);
+    void QueueNpcEvent(ROWOWNpc const* npc, std::string const& label); // Runs it with no player at the next world update (donpcevent)
+    bool QueueNpcEvent(std::string const& eventName); // "<NPC>::<label>", false when there's no such NPC or label
+    void RunNpcEvent(ROWOWNpc const* npc, uint32 instructionIndex, Player* player = nullptr); // Now, in the world update (or the player's thread)
+    void SetNpcEnabled(ROWOWNpc const* npc, bool isEnabled); // enablenpc and disablenpc
+    void SetNpcHidden(ROWOWNpc const* npc, bool isHidden); // hideoffnpc and hideonnpc
+    void NpcTimerStart(ROWOWNpc const* npc, bool isFromZero); // initnpctimer (from 0) and startnpctimer
+    void NpcTimerStop(ROWOWNpc const* npc); // stopnpctimer
+    void NpcTimerSet(ROWOWNpc const* npc, int64 tick); // setnpctimer
+    int64 NpcTimerGet(ROWOWNpc const* npc, int32 type); // getnpctimer: 0 the tick, 1 whether it runs, 2 its labels
+    void LoadIdentityScriptVariables(Player* player, ROWOWIdentity& identity); // The character and account variables
+    void SaveIdentityScriptVariables(Player* player, ROWOWIdentity& identity, CharacterDatabaseTransaction trans);
+    std::vector<std::unique_ptr<ROWOWNpc>> NpcsByID; // By ID - 1.  Loaded once at startup, the state under NpcStateMutex
+    std::unordered_map<std::string, ROWOWNpc*> NpcsByUniqueName; // Lowercase exname
+    std::unordered_multimap<std::string, ROWOWNpc*> NpcsByName; // Lowercase shown name
+    std::unordered_map<ObjectGuid::LowType, ROWOWNpc*> NpcsByCreatureSpawnID;
+    std::unordered_map<std::string, int64> BattleFlagsByName; // getbattleflag: the battle config's values by name (lowercase)
+    std::mutex NpcStateMutex; // The NPCs' shown state and timers, and the queues below, which map threads change
+    std::vector<ROWOWNpcEvent> PendingNpcEvents;
+    std::set<uint32> NpcVisibilityChangedIDs; // NPCs whose creatures the next world update shows or hides
+    std::set<uint32> RunningNpcTimerIDs;
+    std::vector<std::unique_ptr<ROWOWScriptContext>> SleepingNpcRuns; // Runs with no player waiting on sleep (world update only)
+    std::vector<ROWOWNpcAnnouncement> PendingNpcAnnouncements; // Under NpcStateMutex
+    std::unordered_map<ObjectGuid, ROWOWScriptMob> ScriptMobsByGUID; // Living script monsters, under NpcStateMutex
+    std::vector<ROWOWScriptMobKill> PendingScriptMobKills; // Under NpcStateMutex
+    Creature* SpawnScriptMob(Map* map, uint32 mobID, int32 x, int32 y, std::string const& event); // monster: on the map's thread (or with maps idle)
+    void OnScriptMobDeath(Creature* creature, Unit* killer); // The event its death runs, with the killer attached
+    ROWOWChatScriptDialog ChatScriptDialog; // Where player runs' dialogs go until the RO NPC window (R7.3)
+    uint32 GlobalVariableSaveTimer = 0;
 
 private:
     // The rest of the status change port (ROWOW_StatusChange.cpp)

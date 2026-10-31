@@ -550,6 +550,18 @@ public:
             { "reset", HandleROIdentityResetCommand, SEC_GAMEMASTER, Console::No },
         };
 
+        static ChatCommandTable npcCommandTable =
+        {
+            { "talk",   HandleRONpcTalkCommand,   SEC_GAMEMASTER, Console::No },
+            { "next",   HandleRONpcNextCommand,   SEC_PLAYER,     Console::No },
+            { "select", HandleRONpcSelectCommand, SEC_PLAYER,     Console::No },
+            { "input",  HandleRONpcInputCommand,  SEC_PLAYER,     Console::No },
+            { "close",  HandleRONpcCloseCommand,  SEC_PLAYER,     Console::No },
+            { "cancel", HandleRONpcCancelCommand, SEC_PLAYER,     Console::No },
+            { "event",  HandleRONpcEventCommand,  SEC_GAMEMASTER, Console::No },
+            { "var",    HandleRONpcVarCommand,    SEC_GAMEMASTER, Console::No },
+        };
+
         static ChatCommandTable roCommandTable =
         {
             { "sync",     HandleROSyncCommand,   SEC_PLAYER,     Console::No },
@@ -605,6 +617,7 @@ public:
             { "scrate",   HandleROStatusChangeRateCommand, SEC_GAMEMASTER, Console::No },
             { "striprate", HandleROStripRateCommand, SEC_GAMEMASTER, Console::No },
             { "identity", identityCommandTable },
+            { "npc",      npcCommandTable },
         };
 
         static ChatCommandTable commandTable =
@@ -752,6 +765,117 @@ public:
         ROWOW->PCSetFalcon(player, flag.value_or(1) != 0);
         handler->PSendSysMessage("{} {}.", player->GetName(), ROWOW->PCIsFalcon(player) == true ? "has a falcon" :
             (flag.value_or(1) != 0 ? "can't take a falcon (no Falconry Mastery)" : "has no falcon"));
+        return true;
+    }
+
+    // The NPC scripts (R7) until the RO NPC window: talk starts an NPC's script for the player (by name, or the selected NPC creature),
+    // and its dialog comes to the chat; next, select, input and close answer it, as the window's buttons will
+    static bool HandleRONpcTalkCommand(ChatHandler* handler, Optional<std::string> label, Tail npcName)
+    {
+        Player* player = GetFormPlayer(handler);
+        if (player == nullptr)
+            return false;
+        // .ro npc talk <name> runs the NPC's start; .ro npc talk @<label> <name> one of its labels
+        std::string name = std::string(npcName);
+        std::string startLabel;
+        if (label.has_value() == true && label->empty() == false && (*label)[0] == '@')
+            startLabel = label->substr(1);
+        else if (label.has_value() == true)
+            name = name.empty() == true ? *label : *label + " " + name;
+        ROWOWNpc const* npc = name.empty() == true ? ROWOW->GetCreatureNpc(handler->getSelectedCreature()) : ROWOW->GetNpcByName(name, player->GetMapId());
+        if (npc == nullptr || npc->Script == nullptr)
+        {
+            handler->SendSysMessage("No such script NPC (give its name, or select its creature).");
+            return false;
+        }
+        handler->PSendSysMessage("Talking to {} ({}:{}).", npc->FullName, npc->SourceFile, npc->SourceLine);
+        if (ROWOW->StartNpcRun(player, npc, startLabel) == false)
+            handler->SendSysMessage("That NPC can't be talked to now (disabled, or no such label).");
+        return true;
+    }
+
+    static bool HandleRONpcNextCommand(ChatHandler* handler)
+    {
+        Player* player = GetFormPlayer(handler);
+        if (player == nullptr)
+            return false;
+        ROWOW->NpcDialogNext(player);
+        return true;
+    }
+
+    static bool HandleRONpcSelectCommand(ChatHandler* handler, int32 choice)
+    {
+        Player* player = GetFormPlayer(handler);
+        if (player == nullptr)
+            return false;
+        ROWOW->NpcDialogSelect(player, choice);
+        return true;
+    }
+
+    static bool HandleRONpcInputCommand(ChatHandler* handler, Tail value)
+    {
+        Player* player = GetFormPlayer(handler);
+        if (player == nullptr)
+            return false;
+        ROWOW->NpcDialogInput(player, std::string(value));
+        return true;
+    }
+
+    static bool HandleRONpcCloseCommand(ChatHandler* handler)
+    {
+        Player* player = GetFormPlayer(handler);
+        if (player == nullptr)
+            return false;
+        ROWOW->NpcDialogClose(player);
+        return true;
+    }
+
+    static bool HandleRONpcCancelCommand(ChatHandler* handler)
+    {
+        Player* player = GetFormPlayer(handler);
+        if (player == nullptr)
+            return false;
+        ROWOW->EndNpcRun(player);
+        return true;
+    }
+
+    static bool HandleRONpcEventCommand(ChatHandler* handler, std::string eventName)
+    {
+        // donpcevent "<NPC>::<label>", run at the next world update with no player
+        if (ROWOW->QueueNpcEvent(eventName) == false)
+        {
+            handler->SendSysMessage("No such NPC event.");
+            return false;
+        }
+        handler->PSendSysMessage("Queued {}.", eventName);
+        return true;
+    }
+
+    static bool HandleRONpcVarCommand(ChatHandler* handler, std::string name, Optional<std::string> value)
+    {
+        // A script variable of the selected player (or yourself) in any scope (name, @name, #name, $name...), shown or set
+        Player* player = handler->getSelectedPlayerOrSelf();
+        if (player == nullptr)
+            return false;
+        ROWOWScriptContext context;
+        ROWOW->SetupNpcRunContext(context, player, nullptr);
+        context.Frames.emplace_back();
+        std::string variableName = name;
+        uint32 index = 0;
+        size_t bracketPosition = name.find('[');
+        if (bracketPosition != std::string::npos)
+        {
+            variableName = name.substr(0, bracketPosition);
+            index = uint32(strtoul(name.c_str() + bracketPosition + 1, nullptr, 10));
+        }
+        if (variableName.empty() == false && variableName[0] == '.')
+        {
+            handler->SendSysMessage("NPC variables (.name) need their NPC; use a script.");
+            return false;
+        }
+        if (value.has_value() == true)
+            ROWOWSCRIPT->SetVariable(context, variableName, index, ROWOWScriptValue::FromText(*value));
+        handler->PSendSysMessage("{}[{}] = {}", variableName, index, ROWOWSCRIPT->GetVariable(context, variableName, index).GetText());
         return true;
     }
 
