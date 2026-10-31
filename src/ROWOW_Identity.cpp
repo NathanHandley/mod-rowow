@@ -914,13 +914,18 @@ void ROWOWMod::RefreshROForm(Player* player)
 
 void ROWOWMod::RefreshROFormLook(Player* player)
 {
-    // The job's look, in the character's gender
+    // The job's look, in the character's gender: riding its Peco, the job's mounted body (R9.5; the converter's job key with "_riding")
     ROWOWIdentity* identity = GetIdentity(player);
     ROWOWJob const* job = GetJob(identity->JobID);
     uint32 wantedIllusionSpellID = 0;
     if (job != nullptr)
     {
-        auto illusionSpellIDIter = IllusionSpellIDsByJobKey.find(GetIllusionJobKey(job->IllusionJobKey, player->getGender() == GENDER_MALE));
+        bool isMale = player->getGender() == GENDER_MALE;
+        auto illusionSpellIDIter = IllusionSpellIDsByJobKey.end();
+        if (PCIsRiding(player) == true)
+            illusionSpellIDIter = IllusionSpellIDsByJobKey.find(GetIllusionJobKey(job->IllusionJobKey + "_riding", isMale));
+        if (illusionSpellIDIter == IllusionSpellIDsByJobKey.end())
+            illusionSpellIDIter = IllusionSpellIDsByJobKey.find(GetIllusionJobKey(job->IllusionJobKey, isMale));
         if (illusionSpellIDIter != IllusionSpellIDsByJobKey.end())
             wantedIllusionSpellID = illusionSpellIDIter->second;
     }
@@ -945,6 +950,7 @@ void ROWOWMod::RemoveROFormAuras(Player* player)
         player->RemoveAurasDueToSpell(spellID);
     RefreshIllusionHead(player, nullptr);
     RefreshIllusionHeadgear(player, nullptr);
+    RefreshIllusionOptionLooks(player, nullptr);
 }
 
 void ROWOWMod::LeaveROForm(Player* player)

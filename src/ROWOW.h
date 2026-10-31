@@ -1207,6 +1207,10 @@ public:
     std::unordered_set<uint32> HeadgearSpellIDs;
     std::unordered_map<uint32, uint32> HeadSpellIDsByKey; // See GetHeadKey
     std::unordered_set<uint32> HeadSpellIDs;
+    std::unordered_map<uint32, uint32> OptionLookSpellIDsByKey; // See GetOptionLookKey
+    std::unordered_set<uint32> OptionLookSpellIDs;
+    std::unordered_map<uint32, uint32> OptionIconSpellIDsByOption; // The marker aura of an option RO shows an icon for (ROWOW_OPTION_RIDING, _FALCON)
+    std::unordered_map<std::string, uint32> ScriptLookSpellIDsByKey; // See GetScriptLookKey
     std::unordered_map<uint32, ROWOWMapGrid> MapGridsByMapID;
     std::unordered_map<std::string, ROWOWDataTable> DataTablesByName; // The rAthena data, by table name (ROWOW_DATA_TABLE_*)
     std::unordered_map<uint32, uint32> MobIDsByCreatureEntry; // The RO monster (mob_db Id) behind each RO creature template
@@ -1281,6 +1285,19 @@ public:
     void RefreshIllusionHead(Player* player, ROWOWIllusion const* illusion);
     bool SetIdentityHair(Player* player, uint32 style, uint32 color); // False if there's no head for it
     void SendHairToClient(Player* player);
+
+    // R9.5: the identity's options on its RO illusion.  Riding a Peco shows the job's mounted body (the illusion of its job key with
+    // "_riding"), and the cart (in its look) and the falcon are hidden auras attaching their models, with RO's riding and falcon icons as
+    // marker auras.  Kept by RefreshIllusionDisplay, like the head
+    static uint32 GetOptionLookKey(uint8 kind, uint32 look) { return (uint32(kind) << 16) | look; }
+    static uint32 GetCartLook(int32 cartType, uint32 baseLevel);
+    void RefreshIllusionOptionLooks(Player* player, ROWOWIllusion const* illusion);
+
+    // R9.5: the NPC scripts' looks (emotion, specialeffect, soundeffect): hidden spells the unit casts on itself, whose visual plays RO's
+    // emotion over its head, RO's effect or RO's sound (mod_rowow_script_look).  False when the converter made none for it
+    static std::string GetScriptLookKey(uint8 kind, std::string const& name) { return fmt::format("{}:{}", kind, name); }
+    bool PlayScriptLook(Unit* unit, uint8 kind, std::string const& name);
+    bool ClifEmotion(Unit* unit, int32 type); // clif_emotion
 
     // A table of rAthena data (ROWOW_DATA_TABLE_*), or null when the converter hasn't written it
     ROWOWDataTable const* GetDataTable(std::string const& tableName) const;
@@ -1780,6 +1797,8 @@ public:
     void UpdateSkillSit(Player* sd); // skill_sit as the player sits down or stands up, from its update
     bool MobCanTarget(Creature const* md, Unit const* target) const; // mob_ai_sub_hard's target checks the WoW AI doesn't make (Gangster's Paradise)
     void ClifGraffiti(Map* map, ROWOWSkillUnitGroup& group); // clif_graffiti: Graffiti's message to the players it comes into view of
+    void ClifGraffitiClear(ROWOWSkillUnitGroup& group); // The Graffiti gone: its message off the ground of the players that see it
+    void ClifGospelInfo(Unit* bl, int32 type); // clif_gospel_info (ZC_SKILLMSG): Battle Chant's message to a player it blesses
 
     // The expanded jobs' supporting systems (ROWOW_SkillSupport.cpp): a Taekwon's running (unit_run), its mission and rests, the Star
     // Gladiator's places and hatreds (character variables, the place confirmed through the RO_Identity addon's ROWOWFEEL menu), the Soul

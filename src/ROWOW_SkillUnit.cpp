@@ -1030,6 +1030,8 @@ void ROWOWMod::SkillDelUnitGroup(Map* map, std::shared_ptr<ROWOWSkillUnitGroup> 
         return;
     Unit* src = GetSkillUnitGroupSource(map, group->SrcGUID);
     ROWOWSkill const* skill = GetSkill(group->SkillID);
+    if (group->UnitID == ROWOW_UNT_GRAFFITI)
+        ClifGraffitiClear(*group);
     if (src != nullptr)
     {
         if (skill != nullptr && (skill->UnitFlags[ROWOW_UF_DANCE] == true || skill->UnitFlags[ROWOW_UF_SONG] == true || skill->UnitFlags[ROWOW_UF_ENSEMBLE] == true))
@@ -1707,7 +1709,7 @@ int32 ROWOWMod::SkillUnitOnPlaceTimer(Map* map, ROWOWSkillUnitGroup& group, int3
         case ROWOW_UNT_GOSPEL:
         {
             // Battle Chant: half the time and more (50% + 5% a level) each interval, a random blessing on a party member standing in it (not
-            // the caster), or a random curse on an enemy.  (The client's Gospel messages, clif_gospel_info, aren't shown)
+            // the caster), with its message (clif_gospel_info), or a random curse on an enemy
             if (int32(urand(0, 99)) >= 50 + group.SkillLevel * 5 || ss == bl)
                 break;
             if (BattleCheckTarget(ss, bl, ROWOW_BCT_PARTY) > 0)
@@ -1721,18 +1723,23 @@ int32 ROWOWMod::SkillUnitOnPlaceTimer(Map* map, ROWOWSkillUnitGroup& group, int3
                         break;
                     case 1: // End all negative status
                         StatusChangeClearBuffs(bl, ROWOW_SCCB_DEBUFFS | ROWOW_SCCB_REFRESH);
+                        ClifGospelInfo(bl, 0x15);
                         break;
                     case 2: // Immunity to all status
                         SCStart(ss, bl, ROWOW_SC_SCRESIST, 100, 100, time);
+                        ClifGospelInfo(bl, 0x16);
                         break;
                     case 3: // MaxHP +100%
                         SCStart(ss, bl, ROWOW_SC_INCMHPRATE, 100, 100, time);
+                        ClifGospelInfo(bl, 0x17);
                         break;
                     case 4: // MaxSP +100%
                         SCStart(ss, bl, ROWOW_SC_INCMSPRATE, 100, 100, time);
+                        ClifGospelInfo(bl, 0x18);
                         break;
                     case 5: // All stats +20
                         SCStart(ss, bl, ROWOW_SC_INCALLSTATUS, 100, 20, time);
+                        ClifGospelInfo(bl, 0x19);
                         break;
                     case 6: // Level 10 Blessing
                         SCStart(ss, bl, ROWOW_SC_BLESSING, 100, 10, SkillGetTime(ROWOW_SKILL_AL_BLESSING, 10));
@@ -1742,19 +1749,24 @@ int32 ROWOWMod::SkillUnitOnPlaceTimer(Map* map, ROWOWSkillUnitGroup& group, int3
                         break;
                     case 8: // Enchant weapon with Holy element
                         SCStart(ss, bl, ROWOW_SC_ASPERSIO, 100, 1, time);
+                        ClifGospelInfo(bl, 0x1c);
                         break;
                     case 9: // Enchant armor with Holy element
                         SCStart(ss, bl, ROWOW_SC_BENEDICTIO, 100, 1, time);
+                        ClifGospelInfo(bl, 0x1d);
                         break;
                     case 10: // DEF +25%
                         SCStart(ss, bl, ROWOW_SC_INCDEFRATE, 100, 25, 10000); // 10 seconds
+                        ClifGospelInfo(bl, 0x1e);
                         break;
                     case 11: // ATK +100%
                         SCStart(ss, bl, ROWOW_SC_INCATKRATE, 100, 100, time);
+                        ClifGospelInfo(bl, 0x1f);
                         break;
                     case 12: // HIT/Flee +50
                         SCStart(ss, bl, ROWOW_SC_INCHIT, 100, 50, time);
                         SCStart(ss, bl, ROWOW_SC_INCFLEE, 100, 50, time);
+                        ClifGospelInfo(bl, 0x20);
                         break;
                 }
             }

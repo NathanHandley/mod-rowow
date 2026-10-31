@@ -375,8 +375,8 @@ bool ROWOWMod::PCIsRiding(Unit const* unit) const
 void ROWOWMod::PCSetRiding(Player* player, bool isRiding)
 {
     // pc_setriding: mounts a Peco (only with Riding learned) or dismounts it, and pc_setoption's status calculation follows (the speed, the
-    // ASPD and Cavalier Mastery, the spear against medium monsters).  The look stays the job's own: the mounted job sprites (Peco Knight,
-    // Peco Crusader...) aren't converted
+    // ASPD and Cavalier Mastery, the spear against medium monsters).  The look follows (pc_setoption's clif_changelook): the job's mounted
+    // body (Peco Knight, Peco Crusader...) and the riding icon (R9.5)
     ROWOWIdentity* identity = GetIdentity(player);
     uint32 option = identity->Option;
     if (isRiding == true)
@@ -393,6 +393,8 @@ void ROWOWMod::PCSetRiding(Player* player, bool isRiding)
     calcFlag.set(ROWOW_SCB_BASE);
     calcFlag.set(ROWOW_SCB_SPEED);
     StatusCalcBL(player, calcFlag);
+    if (identity->IsInForm == true && player->IsInWorld() == true)
+        RefreshROFormLook(player);
 }
 
 Player* ROWOWMod::GetDevotionSource(Unit const* bl, bool isRangeChecked) const
@@ -1233,9 +1235,9 @@ bool ROWOWMod::PCIsFalcon(Unit const* unit) const
 void ROWOWMod::PCSetFalcon(Player* player, bool isFalcon)
 {
     // pc_setfalcon: takes a falcon (only with Falconry Mastery learned) or lets it go.  It's an option kept with the identity, as the Peco is;
-    // the falcon changes no status (pc_setoption's only part for it is the EFST_FALCON icon, which RO's client shows; here a message).  It's
-    // seen flying as Blitz Beat's and Falcon Assault's projectile, the converter's FALCON effect (the 매 sprite); the falcon perched on the
-    // Hunter is the presentation step's (R9.5)
+    // the falcon changes no status (pc_setoption's only part for it is the EFST_FALCON icon).  It's seen flying as Blitz Beat's and Falcon
+    // Assault's projectile, the converter's FALCON effect (the 매 sprite), and on the Hunter's shoulder with its icon (R9.5,
+    // RefreshIllusionOptionLooks)
     ROWOWIdentity* identity = GetIdentity(player);
     uint32 option = identity->Option;
     if (isFalcon == true)
@@ -1709,26 +1711,85 @@ bool ROWOWMod::MobCanTarget(Creature const* md, Unit const* target) const
     return true;
 }
 
+namespace
+{
+    void SendGraffitiMessage(Player* player, std::string const& addonMessage)
+    {
+        WorldPacket data;
+        ChatHandler::BuildChatPacket(data, CHAT_MSG_SYSTEM, LANG_ADDON, nullptr, nullptr, addonMessage);
+        player->SendDirectMessage(&data);
+    }
+}
+
 void ROWOWMod::ClifGraffiti(Map* map, ROWOWSkillUnitGroup& group)
 {
-    // clif_graffiti: RO writes the message on the ground, which the WoW client can't, so each player gets it as a message once the Graffiti
-    // comes into its view (area_size cells around it), and again when it comes back into view
+    // clif_graffiti: RO writes the message on the ground, which the RO_Identity addon does (R9.5): a player gets it once the Graffiti comes
+    // into its view (area_size cells around it), as "ROWOWGRAF\tA\t<group>\t<x>\t<y>\t<z>\t<ms left>\t<message>", and "ROWOWGRAF\tD\t<group>"
+    // when it goes out of view (or the Graffiti goes, ClifGraffitiClear)
     if (group.Units.empty() == true || group.Units[0].IsAlive == false)
         return;
     ROWOWSkillUnit const& unit = group.Units[0];
+    float x = 0;
+    float y = 0;
+    if (GetCellWorldPosition(map->GetId(), unit.X, unit.Y, x, y) == false)
+        return;
+    uint64 tick = GetTick();
+    uint64 endTick = group.Tick + uint64(std::max<int64>(0, group.Limit));
+    std::string addMessage = fmt::format("ROWOWGRAF\tA\t{}\t{:.2f}\t{:.2f}\t{:.2f}\t{}\t{}", group.GroupID, x, y, unit.Z, endTick > tick ? endTick - tick : 0,
+        group.ValStr);
     std::vector<ObjectGuid> viewerGUIDs;
     MapForEachInCellArea(map, PHASEMASK_NORMAL, unit.X - BattleConfig.AreaSize, unit.Y - BattleConfig.AreaSize, unit.X + BattleConfig.AreaSize,
-        unit.Y + BattleConfig.AreaSize, [&group, &viewerGUIDs](Unit* bl)
+        unit.Y + BattleConfig.AreaSize, [&group, &viewerGUIDs, &addMessage](Unit* bl)
     {
         Player* sd = bl->ToPlayer();
         if (sd == nullptr)
             return 0;
         viewerGUIDs.push_back(sd->GetGUID());
         if (std::find(group.ViewerGUIDs.begin(), group.ViewerGUIDs.end(), sd->GetGUID()) == group.ViewerGUIDs.end())
-            ChatHandler(sd->GetSession()).PSendSysMessage("Graffiti: {}", group.ValStr);
+            SendGraffitiMessage(sd, addMessage);
         return 0;
     });
+    // (A viewer gone to another map only gets a packet, which any thread may send)
+    std::string clearMessage = fmt::format("ROWOWGRAF\tD\t{}", group.GroupID);
+    for (ObjectGuid const& viewerGUID : group.ViewerGUIDs)
+        if (std::find(viewerGUIDs.begin(), viewerGUIDs.end(), viewerGUID) == viewerGUIDs.end())
+            if (Player* viewer = ObjectAccessor::FindPlayer(viewerGUID))
+                SendGraffitiMessage(viewer, clearMessage);
     group.ViewerGUIDs = viewerGUIDs;
+}
+
+void ROWOWMod::ClifGraffitiClear(ROWOWSkillUnitGroup& group)
+{
+    // The Graffiti's message off the ground of everyone who saw it (only a packet each, which any thread may send)
+    std::string clearMessage = fmt::format("ROWOWGRAF\tD\t{}", group.GroupID);
+    for (ObjectGuid const& viewerGUID : group.ViewerGUIDs)
+        if (Player* viewer = ObjectAccessor::FindPlayer(viewerGUID))
+            SendGraffitiMessage(viewer, clearMessage);
+    group.ViewerGUIDs.clear();
+}
+
+void ROWOWMod::ClifGospelInfo(Unit* bl, int32 type)
+{
+    // clif_gospel_info: ZC_SKILLMSG, which the client shows as its message string 868 + type (msgstringtable.txt, the iRO client's English)
+    Player* sd = bl != nullptr ? bl->ToPlayer() : nullptr;
+    if (sd == nullptr)
+        return;
+    char const* message = nullptr;
+    switch (type)
+    {
+        case 0x15: message = "All abnormal status effects have been removed."; break;
+        case 0x16: message = "You will be immune to abnormal status effects for the next minute."; break;
+        case 0x17: message = "Your Max HP will stay increased for the next minute."; break;
+        case 0x18: message = "Your Max SP will stay increased for the next minute."; break;
+        case 0x19: message = "All of your Stats will stay increased for the next minute."; break;
+        case 0x1c: message = "Your weapon will remain blessed with Holy power for the next minute."; break;
+        case 0x1d: message = "Your armor will remain blessed with Holy power for the next minute."; break;
+        case 0x1e: message = "Your Defense will stay increased for the next 10 seconds."; break;
+        case 0x1f: message = "Your Attack strength will be increased for the next minute."; break;
+        case 0x20: message = "Your Accuracy and Flee Rate will be increased for the next minute."; break;
+        default: return;
+    }
+    ChatHandler(sd->GetSession()).SendSysMessage(message);
 }
 
 int32 ROWOWMod::MapCountOnCell(Unit* origin, int32 x, int32 y) const

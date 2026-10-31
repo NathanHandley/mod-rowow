@@ -731,6 +731,16 @@ enum ROWOWStatusFlag : uint8
 #define ROWOW_OPTION_RUWACH                         0x00002000
 #define ROWOW_OPTION_CHASEWALK                      0x00004000
 
+// The option looks the converter attaches to RO illusions (mod_rowow_option_look Kind)
+#define ROWOW_OPTION_LOOK_CART                      1
+#define ROWOW_OPTION_LOOK_FALCON                    2
+#define ROWOW_OPTION_LOOK_DEVOTION_LINK             3   // The beam from a Crusader to each player it devotes (the aura's caster is the Crusader)
+
+// The looks the NPC scripts show (mod_rowow_script_look Kind)
+#define ROWOW_SCRIPT_LOOK_EMOTION                   1
+#define ROWOW_SCRIPT_LOOK_EFFECT                    2
+#define ROWOW_SCRIPT_LOOK_SOUND                     3
+
 // e_status_change_start_flags
 #define ROWOW_SCSTART_NONE                          0x00
 #define ROWOW_SCSTART_NOAVOID                       0x01    // Cannot be avoided (it has to start)

@@ -448,9 +448,15 @@ void ROWOWMod::LoadItemScriptData()
     });
     for (char const* effectCommandName : { "specialeffect", "specialeffect2" })
     {
-        ROWOWSCRIPT->RegisterCommand(effectCommandName, [](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const&)
+        ROWOWSCRIPT->RegisterCommand(effectCommandName, [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
         {
-            // The effect is only a look, which comes with the effect table (R6)
+            // The effect is only a look: on the item's user, when the converter made it (the NPC scripts' effects, R9.5)
+            if (context.AttachedPlayer != nullptr && arguments.empty() == false)
+            {
+                std::string effectName = arguments[0].IsString == true ? arguments[0].Text : ROWOWSCRIPT->GetSymbolName(arguments[0].GetNumber());
+                if (effectName.size() > 3 && effectName.compare(0, 3, "EF_") == 0)
+                    PlayScriptLook(context.AttachedPlayer, ROWOW_SCRIPT_LOOK_EFFECT, effectName.substr(3));
+            }
             return ROWOWScriptValue::FromNumber(0);
         });
     }

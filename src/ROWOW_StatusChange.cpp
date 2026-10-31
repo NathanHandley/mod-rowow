@@ -282,13 +282,23 @@ void ROWOWMod::LoadStatusChangeData()
 
     // The marker aura of each status the client shows, from the converter
     uint32 spellCount = 0;
+    OptionIconSpellIDsByOption.clear();
     if (QueryResult result = WorldDatabase.Query("SELECT `Status`, `SpellID` FROM `mod_rowow_status_spell`"))
     {
         do
         {
             Field* fields = result->Fetch();
-            auto scdbIter = StatusChangeDBsByType.find(GetStatusTypeByName(fields[0].Get<std::string>()));
+            std::string statusName = fields[0].Get<std::string>();
             uint32 spellID = fields[1].Get<uint32>();
+
+            // The icons of the options RO shows one for (R9.5), which RefreshIllusionOptionLooks keeps
+            if (statusName == "Option_Riding" || statusName == "Option_Falcon")
+            {
+                if (sSpellMgr->GetSpellInfo(spellID) != nullptr)
+                    OptionIconSpellIDsByOption[statusName == "Option_Riding" ? ROWOW_OPTION_RIDING : ROWOW_OPTION_FALCON] = spellID;
+                continue;
+            }
+            auto scdbIter = StatusChangeDBsByType.find(GetStatusTypeByName(statusName));
             if (scdbIter == StatusChangeDBsByType.end() || sSpellMgr->GetSpellInfo(spellID) == nullptr)
                 continue;
             scdbIter->second.SpellID = spellID;

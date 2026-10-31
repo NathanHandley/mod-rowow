@@ -47,6 +47,8 @@ void ROWOWMod::LoadIllusionData()
     ItemVisualsByItemID.clear();
     HeadSpellIDsByKey.clear();
     HeadSpellIDs.clear();
+    OptionLookSpellIDsByKey.clear();
+    OptionLookSpellIDs.clear();
     if (IsEnabled == false)
         return;
 
@@ -138,8 +140,35 @@ void ROWOWMod::LoadIllusionData()
             } while (result->NextRow());
         }
     }
-    LOG_INFO("module.ROWOW", "ROWOWMod::LoadIllusionData loaded {} RO illusions, {} item visuals, {} headgear auras and {} head auras", IllusionsBySpellID.size(),
-        ItemVisualsByItemID.size(), HeadgearSpellIDs.size(), HeadSpellIDs.size());
+    ScriptLookSpellIDsByKey.clear();
+    QueryResult scriptLookTableResult = WorldDatabase.Query("SELECT 1 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'mod_rowow_script_look'");
+    if (scriptLookTableResult)
+    {
+        if (QueryResult result = WorldDatabase.Query("SELECT `Kind`, `Name`, `SpellID` FROM `mod_rowow_script_look`"))
+        {
+            do
+            {
+                Field* fields = result->Fetch();
+                ScriptLookSpellIDsByKey[GetScriptLookKey(fields[0].Get<uint8>(), fields[1].Get<std::string>())] = fields[2].Get<uint32>();
+            } while (result->NextRow());
+        }
+    }
+    QueryResult optionLookTableResult = WorldDatabase.Query("SELECT 1 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'mod_rowow_option_look'");
+    if (optionLookTableResult)
+    {
+        if (QueryResult result = WorldDatabase.Query("SELECT `Kind`, `Look`, `SpellID` FROM `mod_rowow_option_look`"))
+        {
+            do
+            {
+                Field* fields = result->Fetch();
+                uint32 spellID = fields[2].Get<uint32>();
+                OptionLookSpellIDsByKey[GetOptionLookKey(fields[0].Get<uint8>(), fields[1].Get<uint32>())] = spellID;
+                OptionLookSpellIDs.insert(spellID);
+            } while (result->NextRow());
+        }
+    }
+    LOG_INFO("module.ROWOW", "ROWOWMod::LoadIllusionData loaded {} RO illusions, {} item visuals, {} headgear auras, {} head auras, {} option look auras and {} script looks",
+        IllusionsBySpellID.size(), ItemVisualsByItemID.size(), HeadgearSpellIDs.size(), HeadSpellIDs.size(), OptionLookSpellIDs.size(), ScriptLookSpellIDsByKey.size());
 }
 
 ROWOWIllusion const* ROWOWMod::GetActiveIllusion(Player* player) const
@@ -240,6 +269,7 @@ void ROWOWMod::RefreshIllusionDisplay(Player* player)
     ROWOWIllusion const* illusion = GetActiveIllusion(player);
     RefreshIllusionHead(player, illusion);
     RefreshIllusionHeadgear(player, illusion);
+    RefreshIllusionOptionLooks(player, illusion);
     if (illusion == nullptr)
         return;
 
@@ -361,6 +391,131 @@ void ROWOWMod::RefreshIllusionHead(Player* player, ROWOWIllusion const* illusion
         player->RemoveAurasDueToSpell(spellID);
     if (wantedSpellID != 0 && player->HasAura(wantedSpellID) == false)
         player->AddAura(wantedSpellID, player);
+}
+
+uint32 ROWOWMod::GetCartLook(int32 cartType, uint32 baseLevel)
+{
+    // The cart RO draws: pre-renewal's carts change with the base level (1-40, 41-65, 66-80, 81-90, 91 and up), and every cart rAthena's
+    // scripts hand out (setcart, the Kafras' rental) is type 1, so a type 1 cart shows the look of the owner's level.  Any other type (a
+    // GM's .ro setcart, a script's setcart <type>) shows that look
+    if (cartType != 1)
+        return uint32(std::clamp<int32>(cartType, 1, ROWOW_MAX_CARTS));
+    if (baseLevel <= 40)
+        return 1;
+    if (baseLevel <= 65)
+        return 2;
+    if (baseLevel <= 80)
+        return 3;
+    if (baseLevel <= 90)
+        return 4;
+    return 5;
+}
+
+void ROWOWMod::RefreshIllusionOptionLooks(Player* player, ROWOWIllusion const* illusion)
+{
+    if (OptionLookSpellIDs.empty() == true && OptionIconSpellIDsByOption.empty() == true)
+        return;
+
+    // The looks wanted: in the RO form's illusion, the cart in its look (SC_PUSH_CART's val1) and the falcon; with the riding and falcon
+    // icons (pc_setoption's clif_status_load of EFST_RIDING and EFST_FALCON); and while devoted, the link from the Crusader (clif_devotion),
+    // an aura the Crusader casts, so its beam goes from it
+    uint32 wantedSpellIDs[4] = { 0, 0, 0, 0 };
+    uint32 linkSpellID = 0;
+    Player* linkSource = nullptr;
+    if (illusion != nullptr && IsInROForm(player) == true)
+    {
+        if (GetSCE(player, ROWOW_SC_DEVOTION) != nullptr)
+        {
+            auto spellIter = OptionLookSpellIDsByKey.find(GetOptionLookKey(ROWOW_OPTION_LOOK_DEVOTION_LINK, 1));
+            linkSource = GetDevotionSource(player, false);
+            if (spellIter != OptionLookSpellIDsByKey.end() && linkSource != nullptr && linkSource != player)
+                linkSpellID = spellIter->second;
+        }
+        ROWOWIdentity const* identity = GetIdentity(player);
+        ROWOWStatusChangeEntry const* cartSCE = GetSCE(player, ROWOW_SC_PUSH_CART);
+        if (cartSCE != nullptr)
+        {
+            auto spellIter = OptionLookSpellIDsByKey.find(GetOptionLookKey(ROWOW_OPTION_LOOK_CART, GetCartLook(cartSCE->Val1, identity->BaseLevel)));
+            if (spellIter != OptionLookSpellIDsByKey.end())
+                wantedSpellIDs[0] = spellIter->second;
+        }
+        if (PCIsFalcon(player) == true)
+        {
+            auto spellIter = OptionLookSpellIDsByKey.find(GetOptionLookKey(ROWOW_OPTION_LOOK_FALCON, 1));
+            if (spellIter != OptionLookSpellIDsByKey.end())
+                wantedSpellIDs[1] = spellIter->second;
+            auto iconIter = OptionIconSpellIDsByOption.find(ROWOW_OPTION_FALCON);
+            if (iconIter != OptionIconSpellIDsByOption.end())
+                wantedSpellIDs[2] = iconIter->second;
+        }
+        if (PCIsRiding(player) == true)
+        {
+            auto iconIter = OptionIconSpellIDsByOption.find(ROWOW_OPTION_RIDING);
+            if (iconIter != OptionIconSpellIDsByOption.end())
+                wantedSpellIDs[3] = iconIter->second;
+        }
+    }
+
+    // Take off the ones not wanted (the looks are dummy auras; the icons are the status markers' aura type, looked up by spell) and put on
+    // the wanted ones
+    std::vector<uint32> spellIDsToRemove;
+    bool hasLink = false;
+    for (AuraEffect const* auraEffect : player->GetAuraEffectsByType(SPELL_AURA_DUMMY))
+    {
+        uint32 spellID = auraEffect->GetId();
+        if (OptionLookSpellIDs.find(spellID) == OptionLookSpellIDs.end())
+            continue;
+        if (spellID == linkSpellID && linkSource != nullptr && auraEffect->GetCasterGUID() == linkSource->GetGUID())
+            hasLink = true;
+        else if (std::find(std::begin(wantedSpellIDs), std::end(wantedSpellIDs), spellID) == std::end(wantedSpellIDs))
+            spellIDsToRemove.push_back(spellID);
+    }
+    for (auto const& iconSpellIDByOption : OptionIconSpellIDsByOption)
+        if (std::find(std::begin(wantedSpellIDs), std::end(wantedSpellIDs), iconSpellIDByOption.second) == std::end(wantedSpellIDs) && player->HasAura(iconSpellIDByOption.second) == true)
+            spellIDsToRemove.push_back(iconSpellIDByOption.second);
+    for (uint32 spellID : spellIDsToRemove)
+        player->RemoveAurasDueToSpell(spellID);
+    if (linkSpellID != 0 && hasLink == false)
+        linkSource->AddAura(linkSpellID, player); // Both on the player's map (GetDevotionSource), in its thread
+    for (uint8 i = 0; i < 4; ++i)
+    {
+        if (wantedSpellIDs[i] == 0 || player->HasAura(wantedSpellIDs[i]) == true)
+            continue;
+        if (i < 2)
+        {
+            player->AddAura(wantedSpellIDs[i], player);
+            continue;
+        }
+
+        // An icon lasts as long as the option, and isn't shown dead (as the statuses' ShowStatusChangeIcon)
+        if (player->IsAlive() == false)
+            continue;
+        if (Aura* aura = player->AddAura(wantedSpellIDs[i], player))
+        {
+            aura->SetMaxDuration(-1);
+            aura->SetDuration(-1);
+        }
+    }
+}
+
+bool ROWOWMod::PlayScriptLook(Unit* unit, uint8 kind, std::string const& name)
+{
+    // The unit casts the look's hidden spell on itself, so every client in sight plays it on the unit
+    if (unit == nullptr || unit->IsInWorld() == false)
+        return false;
+    auto spellIter = ScriptLookSpellIDsByKey.find(GetScriptLookKey(kind, name));
+    if (spellIter == ScriptLookSpellIDsByKey.end())
+        return false;
+    unit->CastSpell(unit, spellIter->second, true);
+    return true;
+}
+
+bool ROWOWMod::ClifEmotion(Unit* unit, int32 type)
+{
+    // clif_emotion: the emotion (ET_*, the client's emotion sprite action) over the unit
+    if (type < 0)
+        return false;
+    return PlayScriptLook(unit, ROWOW_SCRIPT_LOOK_EMOTION, std::to_string(type));
 }
 
 bool ROWOWMod::SetIdentityHair(Player* player, uint32 style, uint32 color)

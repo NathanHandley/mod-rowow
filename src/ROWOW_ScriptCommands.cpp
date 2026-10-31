@@ -2123,14 +2123,99 @@ void ROWOWMod::RegisterNpcScriptCommands()
         return ROWOWScriptValue::FromNumber(0);
     });
 
-    // Looks and sounds the client can't show yet: they do nothing, so the dialogs go on past them
-    for (char const* lookCommandName : { "emotion", "viewpoint", "soundeffect", "soundeffectall", "misceffect" })
+    // Looks and sounds (R9.5): emotions over a unit, RO's effects and sounds, each the converter's hidden spell the unit casts on itself
+    // (PlayScriptLook).  The unit is found on the run's map: the attached player's (the run is in its map's thread), else, with no player,
+    // the NPC's (the run is in the world update).  A look the converter didn't make (an effect RoEffects.csv hasn't got) shows nothing
+    auto getRunMap = [](ROWOWScriptContext& context, uint32 mapID) -> Map*
+    {
+        if (context.AttachedPlayer != nullptr)
+            return context.AttachedPlayer->IsInWorld() == true && context.AttachedPlayer->GetMapId() == mapID ? context.AttachedPlayer->GetMap() : nullptr;
+        return mapID != 0 ? sMapMgr->FindBaseNonInstanceMap(mapID) : nullptr;
+    };
+    auto getNpcUnit = [getRunMap](ROWOWScriptContext& context, ROWOWNpc const* npc) -> Unit*
+    {
+        // The NPC's creature (rAthena's npc_data), on the run's map
+        if (npc == nullptr)
+            return nullptr;
+        Map* map = getRunMap(context, npc->MapID);
+        if (map == nullptr)
+            return nullptr;
+        for (ObjectGuid::LowType spawnID : npc->CreatureSpawnIDs)
+        {
+            auto creatureRange = map->GetCreatureBySpawnIdStore().equal_range(spawnID);
+            if (creatureRange.first != creatureRange.second && creatureRange.first->second->IsInWorld() == true)
+                return creatureRange.first->second;
+        }
+        return nullptr;
+    };
+    auto getEffectName = [engine](ROWOWScriptValue const& argument) -> std::string
+    {
+        // EF_<name> is a symbol (the engine has no numbers for them): the look goes by the name less EF_
+        std::string symbolName = argument.IsString == true ? argument.Text : engine->GetSymbolName(argument.GetNumber());
+        if (symbolName.size() > 3 && (symbolName.compare(0, 3, "EF_") == 0 || symbolName.compare(0, 3, "ef_") == 0))
+            symbolName = symbolName.substr(3);
+        std::transform(symbolName.begin(), symbolName.end(), symbolName.begin(), [](unsigned char c) { return char(std::toupper(c)); });
+        return symbolName;
+    };
+    engine->RegisterCommand("emotion", [this, getNpcUnit](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // emotion <emotion>{,<game ID>}: over the NPC, or the unit of the game ID: the attached player (playerattached(), getcharid(3)) or
+        // another NPC (getnpcid)
+        int32 type = int32(GetArgument(arguments, 0, -1));
+        Unit* unit = nullptr;
+        if (arguments.size() > 1)
+        {
+            int64 gameID = arguments[1].GetNumber();
+            if (context.AttachedPlayer != nullptr && gameID == int64(context.AttachedPlayer->GetSession()->GetAccountId()))
+                unit = context.AttachedPlayer;
+            else
+                unit = getNpcUnit(context, GetNpc(uint32(std::max<int64>(0, gameID))));
+        }
+        else
+            unit = getNpcUnit(context, context.Npc);
+        ClifEmotion(unit, type);
+        return ROWOWScriptValue::FromNumber(0);
+    });
+    engine->RegisterCommand("specialeffect", [this, getNpcUnit, getEffectName, getNpc](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // specialeffect <effect>{,<send target>{,"<NPC>"}}: on the NPC (or the one named).  Every send target shows it to the area, as the
+        // client's spell does (SELF's view only by the attached player isn't kept).  An item's script (no NPC) shows it on its user, as
+        // ROWOW_Items.cpp's registration (which this one replaces, both being the one engine's) did
+        if (arguments.empty() == true)
+            return ROWOWScriptValue::FromNumber(0);
+        Unit* unit = context.Npc == nullptr && arguments.size() <= 2 ? static_cast<Unit*>(context.AttachedPlayer) : getNpcUnit(context, getNpc(context, arguments, 2));
+        PlayScriptLook(unit, ROWOW_SCRIPT_LOOK_EFFECT, getEffectName(arguments[0]));
+        return ROWOWScriptValue::FromNumber(0);
+    });
+    engine->RegisterCommand("specialeffect2", [this, getEffectName](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // specialeffect2 <effect>{,<send target>{,"<player>"}}: on the attached player
+        if (arguments.empty() == false && context.AttachedPlayer != nullptr)
+            PlayScriptLook(context.AttachedPlayer, ROWOW_SCRIPT_LOOK_EFFECT, getEffectName(arguments[0]));
+        return ROWOWScriptValue::FromNumber(0);
+    });
+    engine->RegisterCommand("soundeffect", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // soundeffect "<file>",<type>: the sound at the attached player (heard around it too: the client plays the spell's sound)
+        if (context.AttachedPlayer != nullptr)
+            PlayScriptLook(context.AttachedPlayer, ROWOW_SCRIPT_LOOK_SOUND, ToLower(GetTextArgument(arguments, 0)));
+        return ROWOWScriptValue::FromNumber(0);
+    });
+    engine->RegisterCommand("soundeffectall", [this, getNpcUnit](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // soundeffectall "<file>",<type>{,"<map>"{,<x0>,<y0>,<x1>,<y1>}}: around the attached player, else the NPC (a whole map or an area of
+        // it is heard around the player or NPC only)
+        Unit* unit = context.AttachedPlayer != nullptr ? static_cast<Unit*>(context.AttachedPlayer) : getNpcUnit(context, context.Npc);
+        PlayScriptLook(unit, ROWOW_SCRIPT_LOOK_SOUND, ToLower(GetTextArgument(arguments, 0)));
+        return ROWOWScriptValue::FromNumber(0);
+    });
+
+    // Looks the client can't show yet: they do nothing, so the dialogs go on past them
+    for (char const* lookCommandName : { "viewpoint", "misceffect" })
     {
         engine->RegisterCommand(lookCommandName, [](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const&) { return ROWOWScriptValue::FromNumber(0); });
         engine->SetStub(lookCommandName);
     }
-    engine->SetStub("specialeffect");
-    engine->SetStub("specialeffect2");
 }
 
 Creature* ROWOWMod::SpawnScriptMob(Map* map, uint32 mobID, int32 x, int32 y, std::string const& name, std::string const& event)
