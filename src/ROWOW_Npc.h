@@ -146,6 +146,49 @@ struct ROWOWNpcMapWarp
     int32 DestY2 = -1;
 };
 
+// MAX_CHAT_USERS: the most a waiting room holds
+#define ROWOW_MAX_WAITING_ROOM_USERS 20
+
+// A player in a waiting room (chat_data's usersd), and the cell it joined on (walking off it leaves the room)
+struct ROWOWWaitingRoomUser
+{
+    ObjectGuid PlayerGUID;
+    uint32 AccountID = 0; // Its block id in rAthena (the account), what $@warpwaitingpc holds
+    std::string Name;
+    uint32 MapID = 0;
+    int32 X = 0;
+    int32 Y = 0;
+};
+
+// An NPC's waiting room (rAthena's chat_data owned by an NPC, chat.cpp): players join it, and its event runs once enough have (the job
+// tests' queues).  Under ROWOWMod's NpcStateMutex
+struct ROWOWWaitingRoom
+{
+    uint32 NpcID = 0;
+    std::string Title;
+    int32 Limit = 0; // The NPC counts as one, so Limit - 1 players fit
+    int32 Trigger = 0; // The users that set off the event, with 0x80 while the event is disabled
+    std::string Event; // "<NPC>::<label>"
+    int64 Zeny = 0; // The fee warpwaitingpc takes, and the zeny needed to join
+    int32 MinLevel = 1;
+    int32 MaxLevel = 0;
+    std::vector<ROWOWWaitingRoomUser> Users; // In the order they joined
+    bool HasPosition = false; // Where its bubble stands: its NPC's cell's floor (found once, on that map's thread)
+    float PositionX = 0.0f;
+    float PositionY = 0.0f;
+    float PositionZ = 0.0f;
+};
+
+// A warpwaitingpc warp for the world update (one run in a map's thread)
+struct ROWOWWaitingRoomWarp
+{
+    ObjectGuid PlayerGUID;
+    int64 Zeny = 0;
+    std::string MapName;
+    int32 X = 0;
+    int32 Y = 0;
+};
+
 // The NPC dialog going to the chat, for GM testing (.ro npc talk -chat): .ro npc next / select / input / close answer it
 class ROWOWChatScriptDialog : public ROWOWScriptDialog
 {

@@ -1087,6 +1087,8 @@ struct ROWOWIdentity : public DataMap::Base
     std::vector<uint32> AreaNpcIDs; // areanpc: the NPCs whose OnTouch (or click) it set off and whose area it's still on
     std::vector<uint32> OnTouchNpcIDs; // npc_ontouch_: the NPCs whose OnTouch_ it set off and whose area it's still on
     uint32 NpcRangeCheckTimer = 0;
+    uint32 WaitingRoomCheckTimer = 0;
+    std::string SentWaitingRoomMessage; // What its client was last told of the waiting rooms in sight (cleared to send them again)
     int64 KillerRID = 0; // killerrid, killedrid and killedgid: who last killed it, and what it last killed (the die and kill events read them)
     int64 KilledRID = 0;
     int64 KilledGID = 0;
@@ -1457,6 +1459,9 @@ public:
     bool PCSkillUp(Player* player, uint16 skillID); // pc_skillup
     void PCSkill(Player* player, uint16 skillID, uint16 level); // pc_skill (ADDSKILL_PERMANENT): a quest NPC or a GM sets a skill's level
     void PCJobChange(Player* player, uint16 jobID); // pc_jobchange
+    int64 PCJobIDToMapID(int32 jobID) const; // pc_jobid2mapid: the job's class (MAPID, EAJ_), -1 for none
+    int32 PCMapIDToJobID(uint64 mapID, bool isMale) const; // pc_mapid2jobid: -1 for none
+    int32 PCResetSkill(Player* player); // pc_resetskill (flag 1): the skill points it gave back
     std::vector<uint16> GetSkillTreeJobIDs(uint16 jobID) const; // The jobs whose skills the skill window shows, Novice first
     int64 GetIdentityVariable(ROWOWIdentity const& identity, std::string const& name) const;
     void SetIdentityVariable(ROWOWIdentity& identity, std::string const& name, int64 value) const;
@@ -1881,6 +1886,7 @@ public:
     bool IsItemUseBlockedByNpc(Player* player); // Its run turned items off (disable_items), so it can't use, put on or take off items
     void QueueNpcEvent(ROWOWNpc const* npc, std::string const& label); // Runs it with no player at the next world update (donpcevent)
     bool QueueNpcEvent(std::string const& eventName); // "<NPC>::<label>", false when there's no such NPC or label
+    bool DoNpcEvent(std::string const& eventName); // donpcevent: now in the world update, else queued (QueueNpcEvent)
     void RunNpcEvent(ROWOWNpc const* npc, uint32 instructionIndex, Player* player = nullptr); // Now, in the world update (or the player's thread)
     void RunPlayerNpcEvent(Player* player, ROWOWNpc const* npc, uint32 instructionIndex, bool isTouch = false); // npc_event_sub: now, or after its run
     void RunPlayerEvent(Player* player, uint8 eventType); // npc_script_event: an ROWOW_NPC_EVENT_* label of every NPC that has it, for the player
@@ -1944,6 +1950,24 @@ public:
     void StorageClose(Player* player); // Leaving the map: the storage ends (storage_storageclose, storage_guild_storageclose)
     void OpenPendingGuildStorages(); // The world update, with the maps idle: the guild bank windows asked for
     std::set<ObjectGuid> PendingGuildStorageOpens; // Under NpcStateMutex
+    // Waiting rooms (ROWOW_WaitingRoom.cpp, R8.3): rAthena's chat.cpp for the rooms NPCs own, the job tests' queues.  The rooms are under
+    // NpcStateMutex; a player's join and leave run in its thread, the rooms' events in the world update
+    void RegisterWaitingRoomCommands(); // From RegisterNpcScriptCommands
+    void ChatCreateNpcChat(ROWOWNpc const* npc, std::string const& title, int32 limit, int32 trigger, std::string const& event, int64 zeny, int32 minLevel,
+        int32 maxLevel); // chat_createnpcchat
+    void ChatDeleteNpcChat(ROWOWNpc const* npc); // chat_deletenpcchat
+    int32 ChatJoinChat(Player* player, uint32 npcID); // chat_joinchat: rAthena's e_refuse_enter_room (3 ENTERROOM_SUCCESS), saying why not
+    int32 ChatJoinChatSub(Player* player, uint32 npcID);
+    bool ChatLeaveChat(Player* player, bool isKicked); // chat_leavechat: false when it was in none
+    void ChatTriggerEvent(ROWOWNpc const* npc); // chat_triggerevent
+    void ChatSetEventEnabled(ROWOWNpc const* npc, bool isEnabled); // chat_enableevent and chat_disableevent
+    void ChatNpcKickAll(ROWOWNpc const* npc); // chat_npckickall
+    void WarpWaitingPlayer(ObjectGuid const& playerGUID, int64 zeny, std::string const& mapName, int32 x, int32 y); // warpwaitingpc's, maps idle
+    void WarpPendingWaitingPlayers(); // The world update: warpwaitingpc's warps from map threads
+    void UpdatePlayerWaitingRooms(Player* player, uint32 diff); // Its update: the rooms in sight to its client, and walking out of its room
+    std::map<uint32, ROWOWWaitingRoom> WaitingRoomsByNpcID; // Under NpcStateMutex
+    std::vector<ROWOWWaitingRoomWarp> PendingWaitingRoomWarps; // Under NpcStateMutex
+    static thread_local bool IsInNpcWorldUpdate; // The world update's NPC part is running on this thread (the maps are idle)
 
     ROWOWChatScriptDialog ChatScriptDialog; // For GM testing (.ro npc talk -chat)
     ROWOWWindowScriptDialog WindowScriptDialog; // The RO NPC window: every player run's dialog

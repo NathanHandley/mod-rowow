@@ -24,6 +24,7 @@
 #include "WorldSession.h"
 
 #include "ROWOW.h"
+#include "ROWOW_JobMapIDs.h"
 
 using namespace std;
 
@@ -896,6 +897,66 @@ void ROWOWMod::PCJobChange(Player* player, uint16 jobID)
         PCSetFalcon(player, false);
     if (PCIsCartOn(player) == true && PCCheckSkill(*identity, ROWOW_SKILL_MC_PUSHCART) == 0)
         PCSetCart(player, 0);
+}
+
+int64 ROWOWMod::PCJobIDToMapID(int32 jobID) const
+{
+    // pc_jobid2mapid: -1 for a job with no class
+    for (ROWOWJobMapID const& jobMapID : ROWOWJobMapIDs)
+        if (jobMapID.JobID == jobID)
+            return int64(jobMapID.MapID);
+    return -1;
+}
+
+int32 ROWOWMod::PCMapIDToJobID(uint64 mapID, bool isMale) const
+{
+    // pc_mapid2jobid: -1 for a class with no job
+    for (ROWOWMapIDJob const& mapIDJob : ROWOWMapIDJobs)
+        if (mapIDJob.MapID == mapID)
+            return isMale == true ? mapIDJob.MaleJobID : mapIDJob.FemaleJobID;
+    return -1;
+}
+
+int32 ROWOWMod::PCResetSkill(Player* player)
+{
+    // pc_resetskill with flag 1 (a reset, not a count): the Peco and falcon go with Riding and Falconry Mastery, then every skill learned with
+    // points is forgotten and its points come back.  Kept: wedding and spirit skills, Basic Skill past Novice, granted skills, and quest skills
+    // (quest_skill_learn and quest_skill_reset are off); Play Dead past Novice is forgotten without points
+    ROWOWIdentity* identity = GetIdentity(player);
+    if (identity->Exists == false)
+        return 0;
+    if (PCIsRiding(player) == true && PCCheckSkill(*identity, ROWOW_SKILL_KN_RIDING) != 0)
+        PCSetRiding(player, false);
+    if (PCIsFalcon(player) == true && PCCheckSkill(*identity, ROWOW_SKILL_HT_FALCON) != 0)
+        PCSetFalcon(player, false);
+    if (PCIsCartOn(player) == true && PCCheckSkill(*identity, ROWOW_SKILL_MC_PUSHCART) != 0)
+        PCSetCart(player, 0);
+    bool isNovice = (PCJobIDToMapID(GetNonBabyJobID(identity->JobID)) & ROWOW_MAPID_SECONDMASK) == 0; // MAPID_NOVICE, normal or High
+    int32 skillPoint = 0;
+    for (auto levelIter = identity->SkillLevelsByID.begin(); levelIter != identity->SkillLevelsByID.end();)
+    {
+        uint16 skillID = levelIter->first;
+        ROWOWSkill const* skill = GetSkill(skillID);
+        if (skill == nullptr || skill->IsWedding == true || skill->IsSpirit == true || skill->IsQuest == true ||
+            (skillID == ROWOW_SKILL_NV_BASIC && isNovice == false))
+        {
+            ++levelIter;
+            continue;
+        }
+        if (skillID == ROWOW_SKILL_NV_TRICKDEAD && isNovice == false)
+        {
+            levelIter = identity->SkillLevelsByID.erase(levelIter);
+            continue;
+        }
+        skillPoint += levelIter->second;
+        levelIter = identity->SkillLevelsByID.erase(levelIter);
+    }
+    if (skillPoint == 0)
+        return 0;
+    identity->SkillPoints += skillPoint;
+    identity->AreSkillsChanged = true;
+    RefreshROForm(player);
+    return skillPoint;
 }
 
 std::vector<uint16> ROWOWMod::GetSkillTreeJobIDs(uint16 jobID) const

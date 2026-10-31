@@ -104,6 +104,9 @@ namespace
     // MAX_EVENTQUEUE: the events a player's queue holds while its run goes on
     constexpr size_t MAX_QUEUED_NPC_EVENTS = 2;
 
+    // How deep donpcevent runs events inside the run that asked (deeper ones wait for the next world update)
+    constexpr uint32 MAX_NESTED_NPC_EVENTS = 8;
+
     // How often a player's dialog checks it's still in the NPC's range
     constexpr uint32 NPC_RANGE_CHECK_INTERVAL_IN_MS = 500;
 
@@ -861,7 +864,11 @@ void ROWOWMod::UpdatePlayerNpcScripts(Player* player, uint32 diff)
 
 void ROWOWMod::CheckNpcTouchAreas(Player* player)
 {
-    // unit_walktoxy_timer's npc_touchnext_areanpc and npc_touch_area_allnpc, when the player is on another cell (its map's thread)
+    // unit_walktoxy_timer's npc_touchnext_areanpc and npc_touch_area_allnpc, when the player is on another cell (its map's thread).  Not
+    // during a teleport: the cell it lands on is checked once it's there (clif_parse_LoadEndAck), else an arrival's cell was taken as
+    // checked while the teleport was still pending and its areas never went off
+    if (player->IsBeingTeleported() == true)
+        return;
     ROWOWIdentity* identity = GetIdentity(player);
     uint32 mapID = player->GetMapId();
     int32 x = 0, y = 0;
@@ -930,7 +937,7 @@ void ROWOWMod::CheckNpcTouchAreas(Player* player)
         return npc == nullptr || npc->IsInArea(mapID, x, y) == false;
     }), identity->AreaNpcIDs.end());
     auto npcIDsIter = TouchNpcIDsByMapID.find(mapID);
-    if (npcIDsIter == TouchNpcIDsByMapID.end() || IsInROForm(player) == false || player->IsBeingTeleported() == true)
+    if (npcIDsIter == TouchNpcIDsByMapID.end() || IsInROForm(player) == false)
         return;
     for (uint32 npcID : npcIDsIter->second)
     {
@@ -1025,6 +1032,40 @@ void ROWOWMod::QueueNpcEvent(ROWOWNpc const* npc, std::string const& label)
     PendingNpcEvents.push_back(npcEvent);
 }
 
+bool ROWOWMod::DoNpcEvent(std::string const& eventName)
+{
+    // donpcevent (npc_event_do): rAthena runs the event at once, inside the run that asked, and the scripts count on that order (the
+    // Wizard test's door stage disables the room before it, whose killmonsterall must go before the door's own monsters spawn).  In the
+    // world update (the maps idle) it runs now too, nested at most a few deep; from a map's thread it can't (the event may touch other
+    // maps), so it waits for the next world update, in order with the others
+    static thread_local uint32 nestedEventDepth = 0;
+    if (IsInNpcWorldUpdate == false || nestedEventDepth >= MAX_NESTED_NPC_EVENTS)
+        return QueueNpcEvent(eventName);
+    size_t separatorPosition = eventName.find("::");
+    if (separatorPosition == std::string::npos)
+        return false;
+    std::string npcName = eventName.substr(0, separatorPosition);
+    std::string label = eventName.substr(separatorPosition + 2);
+    std::vector<std::pair<ROWOWNpc const*, uint32>> events;
+    if (npcName.empty() == true)
+    {
+        for (std::unique_ptr<ROWOWNpc> const& npc : NpcsByID)
+            if (npc->Script != nullptr && npc->Script->GetLabel(label) >= 0)
+                events.emplace_back(npc.get(), uint32(npc->Script->GetLabel(label)));
+    }
+    else
+    {
+        auto npcIter = NpcsByUniqueName.find(ToLower(npcName));
+        if (npcIter != NpcsByUniqueName.end() && npcIter->second->Script != nullptr && npcIter->second->Script->GetLabel(label) >= 0)
+            events.emplace_back(npcIter->second, uint32(npcIter->second->Script->GetLabel(label)));
+    }
+    nestedEventDepth++;
+    for (auto const& npcEvent : events)
+        RunNpcEvent(npcEvent.first, npcEvent.second);
+    nestedEventDepth--;
+    return events.empty() == false;
+}
+
 bool ROWOWMod::QueueNpcEvent(std::string const& eventName)
 {
     // "<NPC>::<label>"; "::<label>" alone is that label of every NPC that has it (npc_event_doall)
@@ -1055,21 +1096,13 @@ bool ROWOWMod::QueueNpcEvent(std::string const& eventName)
 
 void ROWOWMod::SetNpcEnabled(ROWOWNpc const* npc, bool isEnabled)
 {
-    // npc_enable: the NPC's creatures show or go at the next world update (they can be on another map's thread)
+    // npc_enable: the NPC's creatures show or go at the next world update (they can be on another map's thread).  Its timer goes on: the job
+    // tests disable their stage's NPC from its own OnTimer label, and its later labels (the warp out, the room reopening) must still run
     if (npc == nullptr)
         return;
     std::lock_guard<std::mutex> lock(NpcStateMutex);
-    ROWOWNpc* changedNpc = NpcsByID[npc->ID - 1].get();
-    changedNpc->IsEnabled = isEnabled;
+    NpcsByID[npc->ID - 1]->IsEnabled = isEnabled;
     NpcVisibilityChangedIDs.insert(npc->ID);
-
-    // A disabled NPC's timer stops (npc_enable)
-    if (isEnabled == false && changedNpc->Timer.IsRunning == true)
-    {
-        changedNpc->Timer.StoppedTick = int64(GameTime::GetGameTimeMS().count() - changedNpc->Timer.StartTime);
-        changedNpc->Timer.IsRunning = false;
-        RunningNpcTimerIDs.erase(npc->ID);
-    }
 }
 
 void ROWOWMod::SetNpcHidden(ROWOWNpc const* npc, bool isHidden)
@@ -1143,11 +1176,19 @@ int64 ROWOWMod::NpcTimerGet(ROWOWNpc const* npc, int32 type)
     }
 }
 
+thread_local bool ROWOWMod::IsInNpcWorldUpdate = false;
+
 void ROWOWMod::UpdateNpcScripts(uint32 diff)
 {
-    // The world update, between the map updates: queued events, timers, sleeping runs, the NPC creatures' shown state, and the globals
+    // The world update, between the map updates: queued events, timers, sleeping runs, the NPC creatures' shown state, and the globals.
+    // Runs here know the maps are idle (IsInNpcWorldUpdate: warpwaitingpc warps at once)
     if (IsEnabled == false || NpcsByID.empty() == true)
         return;
+    struct WorldUpdateFlag
+    {
+        WorldUpdateFlag() { IsInNpcWorldUpdate = true; }
+        ~WorldUpdateFlag() { IsInNpcWorldUpdate = false; }
+    } worldUpdateFlag;
     uint64 now = GameTime::GetGameTimeMS().count();
 
     std::vector<ROWOWNpcEvent> dueEvents;
@@ -1337,20 +1378,38 @@ void ROWOWMod::UpdateNpcScripts(uint32 diff)
             SleepingNpcRuns.erase(SleepingNpcRuns.begin() + runIndex);
     }
 
-    // The creatures of NPCs scripts showed or hid (the maps aren't updating now)
+    // The creatures of NPCs scripts showed or hid (the maps aren't updating now).  An NPC enabled or shown with an OnTouch area touches the
+    // players already standing on it (npc_enable's npc_enable_sub): the Knight's patience test, the Dancer's steps
     for (uint32 npcID : visibilityChangedIDs)
     {
         ROWOWNpc const* npc = GetNpc(npcID);
-        if (npc == nullptr || npc->MapID == 0 || npc->CreatureSpawnIDs.empty() == true)
+        if (npc == nullptr || npc->MapID == 0)
             continue;
         Map* map = sMapMgr->FindBaseNonInstanceMap(npc->MapID);
         if (map == nullptr)
             continue;
         bool isVisible = false;
+        bool isEnabled = false;
         {
             std::lock_guard<std::mutex> lock(NpcStateMutex);
             isVisible = npc->IsEnabled == true && npc->IsHidden == false;
+            isEnabled = npc->IsEnabled;
         }
+        if (isEnabled == true && npc->TriggerSpanX >= 0 && npc->TriggerSpanY >= 0 && npc->Script != nullptr)
+        {
+            std::vector<Player*> touchingPlayers;
+            map->DoForAllPlayers([this, npc, &touchingPlayers](Player* player)
+            {
+                int32 x = 0, y = 0;
+                GetUnitCell(player, x, y);
+                if (IsInROForm(player) == true && player->IsBeingTeleported() == false && npc->IsInArea(player->GetMapId(), x, y) == true)
+                    touchingPlayers.push_back(player);
+            });
+            for (Player* player : touchingPlayers)
+                TouchNpcArea(player, npc);
+        }
+        if (npc->CreatureSpawnIDs.empty() == true)
+            continue;
         for (ObjectGuid::LowType spawnID : npc->CreatureSpawnIDs)
         {
             auto creatureRange = map->GetCreatureBySpawnIdStore().equal_range(spawnID);
@@ -1469,6 +1528,7 @@ public:
         if (ROWOW->IsEnabled == false || ROWOW->IsInROForm(player) == false || player->IsInWorld() == false)
             return;
         ROWOW->UpdatePlayerNpcScripts(player, p_time);
+        ROWOW->UpdatePlayerWaitingRooms(player, p_time);
     }
 
     void OnPlayerLogin(Player* player) override

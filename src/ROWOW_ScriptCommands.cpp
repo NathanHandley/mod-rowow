@@ -32,7 +32,11 @@
 #include "TemporarySummon.h"
 #include "Timer.h"
 
+#include "WorldSession.h"
+#include "WorldSessionMgr.h"
+
 #include "ROWOW.h"
+#include "ROWOW_JobMapIDs.h"
 
 #include <ctime>
 #include <mutex>
@@ -681,9 +685,24 @@ void ROWOWMod::RegisterNpcScriptCommands()
     });
     engine->RegisterCommand("jobchange", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
     {
-        // jobchange <job>{,<upper>}: pc_jobchange (the job number already says normal, upper or Baby)
-        if (Player* player = GetAttachedPlayer(context, "jobchange"))
-            PCJobChange(player, uint16(GetArgument(arguments, 0, ROWOW_JOB_NOVICE)));
+        // jobchange <job>{,<upper>{,<char id>}}: pc_jobchange.  The job's class, made transcendent (upper 1) or Baby (2) when asked (-1, the
+        // default, takes the job as it is), and the job of that class for the player's sex (a Dancer change makes a male a Bard)
+        Player* player = GetAttachedPlayer(context, "jobchange");
+        int64 jobID = GetArgument(arguments, 0, ROWOW_JOB_NOVICE);
+        if (player == nullptr || GetJob(uint16(jobID)) == nullptr)
+            return ROWOWScriptValue::FromNumber(0);
+        int64 jobClass = PCJobIDToMapID(int32(jobID));
+        if (jobClass == -1)
+            return ROWOWScriptValue::FromNumber(0);
+        switch (GetArgument(arguments, 1, -1))
+        {
+            case 1: jobClass |= ROWOW_JOBL_UPPER; break;
+            case 2: jobClass |= ROWOW_JOBL_BABY; break;
+            default: break;
+        }
+        int32 newJobID = PCMapIDToJobID(uint64(jobClass), player->getGender() == GENDER_MALE);
+        if (newJobID >= 0)
+            PCJobChange(player, uint16(newJobID));
         return ROWOWScriptValue::FromNumber(0);
     });
     for (char const* saveCommandName : { "savepoint", "save" })
@@ -824,7 +843,7 @@ void ROWOWMod::RegisterNpcScriptCommands()
     engine->RegisterCommand("donpcevent", [this](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const& arguments)
     {
         // donpcevent "<NPC>::<label>": run with no player at the next world update; 1 when there's such an event
-        return ROWOWScriptValue::FromNumber(QueueNpcEvent(GetTextArgument(arguments, 0)) == true ? 1 : 0);
+        return ROWOWScriptValue::FromNumber(DoNpcEvent(GetTextArgument(arguments, 0)) == true ? 1 : 0);
     });
     auto startNpcTimer = [this, getNpc](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments, bool isFromZero)
     {
@@ -953,6 +972,30 @@ void ROWOWMod::RegisterNpcScriptCommands()
     });
     auto queueKill = [this](uint32 mapID, std::string const& event, bool isAll)
     {
+        // At once in the world update (the maps idle), as rAthena's: a script that kills a stage's monsters and spawns the next stage's
+        // right after must not lose the new ones.  From a map's thread the kill waits for the world update (the monsters can be on another map)
+        if (IsInNpcWorldUpdate == true)
+        {
+            std::vector<ObjectGuid> killedGUIDs;
+            {
+                std::lock_guard<std::mutex> lock(NpcStateMutex);
+                for (auto scriptMobIter = ScriptMobsByGUID.begin(); scriptMobIter != ScriptMobsByGUID.end();)
+                {
+                    if (scriptMobIter->second.MapID == mapID && (isAll == true || scriptMobIter->second.Event == event))
+                    {
+                        killedGUIDs.push_back(scriptMobIter->first);
+                        scriptMobIter = ScriptMobsByGUID.erase(scriptMobIter);
+                    }
+                    else
+                        ++scriptMobIter;
+                }
+            }
+            Map* map = sMapMgr->FindBaseNonInstanceMap(mapID);
+            for (ObjectGuid const& killedGUID : killedGUIDs)
+                if (Creature* creature = map != nullptr ? map->GetCreature(killedGUID) : nullptr)
+                    creature->DespawnOrUnsummon();
+            return;
+        }
         ROWOWScriptMobKill kill;
         kill.MapID = mapID;
         kill.Event = event;
@@ -1748,12 +1791,7 @@ void ROWOWMod::RegisterNpcScriptCommands()
         StubCommand{ "setmapflag", MapCellReason }, StubCommand{ "removemapflag", MapCellReason }, StubCommand{ "setcell", MapCellReason },
         StubCommand{ "setwall", MapCellReason }, StubCommand{ "delwall", MapCellReason }, StubCommand{ "setnpcdisplay", "NPC looks can't change yet (R9)" },
         StubCommand{ "movenpc", "NPCs can't move yet" }, StubCommand{ "refineui", "the refine window is a renewal feature (feature.refineui is off)" },
-        StubCommand{ "waitingroom", "waiting rooms belong to the job tests (R8.3) and hold nobody yet" },
-        StubCommand{ "delwaitingroom", "waiting rooms belong to the job tests (R8.3)" },
-        StubCommand{ "enablewaitingroomevent", "waiting rooms belong to the job tests (R8.3)" },
-        StubCommand{ "disablewaitingroomevent", "waiting rooms belong to the job tests (R8.3)" },
-        StubCommand{ "warpwaitingpc", "waiting rooms belong to the job tests (R8.3): nobody to warp" },
-        StubCommand{ "kickwaitingroomall", "waiting rooms belong to the job tests (R8.3)" },
+        StubCommand{ "waitingroom2bg", BattlegroundReason },
         StubCommand{ "makeitem", "items on the floor come with the ground drops (R10.4)" } })
     {
         std::string name = stubCommand.Name;
@@ -1790,10 +1828,232 @@ void ROWOWMod::RegisterNpcScriptCommands()
         engine->SetStub(instanceNameCommandName);
     }
 
-    // Waiting rooms (chat rooms on NPCs, above) belong to the job tests that use them (R8.3): until then they hold nobody, so their events
-    // never go
-    engine->RegisterCommand("getwaitingroomstate", [](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const&) { return ROWOWScriptValue::FromNumber(-1); });
-    engine->SetStub("getwaitingroomstate");
+    // Waiting rooms (the job tests' queues, ROWOW_WaitingRoom.cpp)
+    RegisterWaitingRoomCommands();
+
+    // Jobs (R8.3): a job's class (rAthena's MAPID, the EAJ_ and EAJL_ constants) for eaclass and roclass
+    for (auto const& jobClassConstant : ROWOWJobClassConstants)
+        engine->RegisterConstant(jobClassConstant.first, int64(jobClassConstant.second));
+    engine->RegisterCommand("eaclass", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // eaclass({<job>{,<char id>}}): pc_jobid2mapid of the job, or of the attached player's (-1 with none)
+        int64 jobID = 0;
+        if (arguments.empty() == false)
+            jobID = arguments[0].GetNumber();
+        else if (context.AttachedPlayer != nullptr && context.Identity != nullptr)
+            jobID = context.Identity->JobID;
+        else
+            return ROWOWScriptValue::FromNumber(-1);
+        return ROWOWScriptValue::FromNumber(PCJobIDToMapID(int32(jobID)));
+    });
+    engine->RegisterCommand("roclass", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // roclass(<class>{,<sex>}): pc_mapid2jobid, for the attached player's sex (SEX_MALE 1) or male with none
+        bool isMale = true;
+        if (arguments.size() > 1)
+            isMale = arguments[1].GetNumber() == 1;
+        else if (context.AttachedPlayer != nullptr)
+            isMale = context.AttachedPlayer->getGender() == GENDER_MALE;
+        return ROWOWScriptValue::FromNumber(PCMapIDToJobID(uint64(GetArgument(arguments, 0, 0)), isMale));
+    });
+    engine->RegisterCommand("resetskill", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const&)
+    {
+        // resetskill{ <char id>}: pc_resetskill with flag 1, every skill point back
+        if (Player* player = GetAttachedPlayer(context, "resetskill"))
+            PCResetSkill(player);
+        return ROWOWScriptValue::FromNumber(0);
+    });
+    auto getOption = [this](Player* player) -> int64
+    {
+        // sc.option: the statuses' options (hiding, cloaking...) and the identity's own (a Peco, a falcon).  The cart isn't an option
+        // (NEW_CARTS: the client the constants are for has SC_PUSH_CART)
+        ROWOWStatusChange const* sc = GetStatusChange(static_cast<Unit const*>(player));
+        return int64((sc != nullptr ? sc->Option : 0) | GetIdentity(player)->Option);
+    };
+    engine->RegisterCommand("checkoption", [getOption](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // checkoption(<option>{,<char id>})
+        Player* player = GetAttachedPlayer(context, "checkoption");
+        if (player == nullptr)
+            return ROWOWScriptValue::FromNumber(0);
+        return ROWOWScriptValue::FromNumber((getOption(player) & GetArgument(arguments, 0, 0)) != 0 ? 1 : 0);
+    });
+    engine->RegisterCommand("setoption", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // setoption <option>{,<flag>{,<char id>}}: 1 adds, 0 takes away; no option and no flag takes away the falcon and the Peco.  Only
+        // those two are kept by the identity (pc_setoption's riding and falcon); a status's option comes and goes with its status
+        Player* player = GetAttachedPlayer(context, "setoption");
+        if (player == nullptr)
+            return ROWOWScriptValue::FromNumber(0);
+        int64 option = GetArgument(arguments, 0, 0);
+        bool isAdded = GetArgument(arguments, 1, 1) != 0;
+        if (arguments.size() < 2 && option == 0)
+        {
+            isAdded = false;
+            option = ROWOW_OPTION_FALCON | ROWOW_OPTION_RIDING;
+        }
+        if ((option & ROWOW_OPTION_RIDING) != 0)
+            PCSetRiding(player, isAdded);
+        if ((option & ROWOW_OPTION_FALCON) != 0)
+            PCSetFalcon(player, isAdded);
+        if ((option & ~int64(ROWOW_OPTION_RIDING | ROWOW_OPTION_FALCON)) != 0)
+            LogStubCommandOnce("setoption", "only the Peco and the falcon options can be set");
+        return ROWOWScriptValue::FromNumber(0);
+    });
+    engine->RegisterCommand("getinventorylist", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const&)
+    {
+        // getinventorylist{ <char id>}: the RO items in the bags, in bag order, as @inventorylist_* (id, idx, amount, equip, refine, identify,
+        // attribute, card1-4, expire, bound, tradable) and @inventorylist_count.  idx is the item's place in that order
+        Player* player = GetAttachedPlayer(context, "getinventorylist");
+        if (player == nullptr)
+            return ROWOWScriptValue::FromNumber(0);
+        ROWOWIdentity* identity = context.Identity;
+        uint32 count = 0;
+        auto setListValue = [&context, &count](std::string const& name, int64 value)
+        {
+            ROWOWSCRIPT->SetVariable(context, "@inventorylist_" + name, count, ROWOWScriptValue::FromNumber(value));
+        };
+        for (uint8 bag = 0; bag <= 4; bag++)
+        {
+            for (uint32 slot = 1; slot <= MAX_BAG_SIZE; slot++)
+            {
+                Item* item = GetItemByClientPosition(player, bag, slot);
+                ROWOWItem const* roItem = GetROItem(item);
+                if (roItem == nullptr)
+                    continue;
+                int64 equip = 0;
+                for (auto const& itemGUIDByPosition : identity->ItemGUIDsByEquipPosition)
+                    if (itemGUIDByPosition.second == item->GetGUID().GetCounter())
+                        equip |= int64(itemGUIDByPosition.first);
+                setListValue("id", roItem->ItemID);
+                setListValue("idx", count);
+                setListValue("amount", item->GetCount());
+                setListValue("equip", equip);
+                setListValue("refine", GetItemRefine(item));
+                setListValue("identify", IsItemIdentified(item) == true ? 1 : 0);
+                setListValue("attribute", IsItemBroken(item) == true ? 1 : 0);
+                for (uint8 cardSlot = 0; cardSlot < 4; cardSlot++)
+                    setListValue(fmt::format("card{}", cardSlot + 1), GetItemCard(item, cardSlot));
+                setListValue("expire", 0);
+                setListValue("bound", 0);
+                setListValue("tradable", 1);
+                count++;
+            }
+        }
+        ROWOWSCRIPT->SetVariable(context, "@inventorylist_count", 0, ROWOWScriptValue::FromNumber(count));
+        return ROWOWScriptValue::FromNumber(0);
+    });
+
+    // The attached player (st->rid): a run can take another player (attachrid, by its account id, rAthena's block id) or let go of it.
+    // Another player is only safe to touch where its thread isn't running: from the world update (maps idle), or on the run's own map
+    engine->RegisterCommand("attachrid", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // attachrid(<account id>{,<force>}): 1 when attached.  Without force a player in a dialog isn't taken
+        WorldSession* session = sWorldSessionMgr->FindSession(uint32(GetArgument(arguments, 0, 0)));
+        Player* player = session != nullptr ? session->GetPlayer() : nullptr;
+        if (player == nullptr || player->IsInWorld() == false || IsInROForm(player) == false)
+            return ROWOWScriptValue::FromNumber(0);
+        bool isForced = GetArgument(arguments, 1, 1) != 0;
+        if (isForced == false && GetIdentity(player)->NpcRun != nullptr)
+            return ROWOWScriptValue::FromNumber(0);
+        Map* runMap = context.AttachedPlayer != nullptr ? context.AttachedPlayer->GetMap() : nullptr;
+        if (IsInNpcWorldUpdate == false && (runMap == nullptr || runMap != player->GetMap()))
+        {
+            LogStubCommandOnce("attachrid", "a player on another map can only be attached from the world update");
+            return ROWOWScriptValue::FromNumber(0);
+        }
+        SetupNpcRunContext(context, player, context.Npc);
+        if (context.Dialog == nullptr)
+            context.Dialog = &WindowScriptDialog;
+        return ROWOWScriptValue::FromNumber(1);
+    });
+    engine->RegisterCommand("detachrid", [](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const&)
+    {
+        // detachrid: the run goes on with no player
+        context.AttachedPlayer = nullptr;
+        context.Identity = nullptr;
+        context.CharacterVariables = nullptr;
+        context.PlayerVariables = nullptr;
+        context.AccountVariables = nullptr;
+        return ROWOWScriptValue::FromNumber(0);
+    });
+    engine->RegisterCommand("getattachedrid", [](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const&)
+    {
+        return ROWOWScriptValue::FromNumber(context.AttachedPlayer != nullptr ? int64(context.AttachedPlayer->GetSession()->GetAccountId()) : 0);
+    });
+    engine->RegisterCommand("isloggedin", [](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // isloggedin(<account id>{,<char id>})
+        WorldSession* session = sWorldSessionMgr->FindSession(uint32(GetArgument(arguments, 0, 0)));
+        Player* player = session != nullptr ? session->GetPlayer() : nullptr;
+        if (player != nullptr && arguments.size() > 1 && int64(player->GetGUID().GetCounter()) != arguments[1].GetNumber())
+            player = nullptr;
+        return ROWOWScriptValue::FromNumber(player != nullptr ? 1 : 0);
+    });
+    engine->RegisterCommand("rid2name", [](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // rid2name(<id>): a player's name by its account id ("(null)" for none; monsters and NPCs have no such ids here)
+        WorldSession* session = sWorldSessionMgr->FindSession(uint32(GetArgument(arguments, 0, 0)));
+        Player* player = session != nullptr ? session->GetPlayer() : nullptr;
+        return ROWOWScriptValue::FromText(player != nullptr ? player->GetName() : std::string("(null)"));
+    });
+
+    // The players in a box of a map: only the run's own map can be touched from a map's thread, any loaded map from the world update
+    auto forEachPlayerInArea = [this](ROWOWScriptContext& context, std::string const& mapName, int32 x0, int32 y0, int32 x1, int32 y1,
+        std::function<void(Player*)> const& action)
+    {
+        uint32 mapID = GetMapIDByMapName(mapName);
+        Map* map = nullptr;
+        if (IsInNpcWorldUpdate == true)
+            map = sMapMgr->FindBaseNonInstanceMap(mapID);
+        else if (context.AttachedPlayer != nullptr && context.AttachedPlayer->GetMapId() == mapID)
+            map = context.AttachedPlayer->GetMap();
+        if (map == nullptr)
+            return;
+        std::vector<Player*> players;
+        map->DoForAllPlayers([this, x0, y0, x1, y1, &players](Player* player)
+        {
+            int32 x = 0, y = 0;
+            GetUnitCell(player, x, y);
+            if (IsInROForm(player) == true && x >= std::min(x0, x1) && x <= std::max(x0, x1) && y >= std::min(y0, y1) && y <= std::max(y0, y1))
+                players.push_back(player);
+        });
+        for (Player* player : players)
+            action(player);
+    };
+    engine->RegisterCommand("areapercentheal", [this, forEachPlayerInArea](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // areapercentheal "<map>",<x1>,<y1>,<x2>,<y2>,<hp %>,<sp %>
+        int32 hp = int32(GetArgument(arguments, 5, 0));
+        int32 sp = int32(GetArgument(arguments, 6, 0));
+        forEachPlayerInArea(context, GetTextArgument(arguments, 0), int32(GetArgument(arguments, 1, 0)), int32(GetArgument(arguments, 2, 0)),
+            int32(GetArgument(arguments, 3, 0)), int32(GetArgument(arguments, 4, 0)), [this, hp, sp](Player* player) { PCPercentHeal(player, hp, sp); });
+        return ROWOWScriptValue::FromNumber(0);
+    });
+    engine->RegisterCommand("areaannounce", [forEachPlayerInArea](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // areaannounce "<map>",<x1>,<y1>,<x2>,<y2>,"<text>",<flag>{,...}: the color and font aren't kept
+        std::string text = GetTextArgument(arguments, 5);
+        forEachPlayerInArea(context, GetTextArgument(arguments, 0), int32(GetArgument(arguments, 1, 0)), int32(GetArgument(arguments, 2, 0)),
+            int32(GetArgument(arguments, 3, 0)), int32(GetArgument(arguments, 4, 0)), [&text](Player* player) { ChatHandler(player->GetSession()).SendSysMessage(text); });
+        return ROWOWScriptValue::FromNumber(0);
+    });
+    engine->RegisterCommand("pushpc", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // pushpc <direction>,<cells>: unit_blown of the attached player that many cells in the direction (backwards for negative cells)
+        Player* player = context.AttachedPlayer;
+        int32 dir = int32(GetArgument(arguments, 0, 0)) % 8;
+        int32 cells = int32(GetArgument(arguments, 1, 0));
+        if (player == nullptr || cells == 0)
+            return ROWOWScriptValue::FromNumber(0);
+        if (cells < 0)
+        {
+            dir = (dir + 4) % 8;
+            cells = -cells;
+        }
+        SkillBlown(player, player, cells, int8((dir + 4) % 8), 0); // skill_blown pushes away from the direction it's given
+        return ROWOWScriptValue::FromNumber(0);
+    });
 
     // Looks and sounds the client can't show yet: they do nothing, so the dialogs go on past them
     for (char const* lookCommandName : { "emotion", "viewpoint", "soundeffect", "soundeffectall", "misceffect" })

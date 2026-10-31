@@ -569,6 +569,8 @@ public:
             { "cancel", HandleRONpcCancelCommand, SEC_PLAYER,     Console::No },
             { "event",  HandleRONpcEventCommand,  SEC_GAMEMASTER, Console::No },
             { "var",    HandleRONpcVarCommand,    SEC_GAMEMASTER, Console::No },
+            { "state",  HandleRONpcStateCommand,  SEC_GAMEMASTER, Console::No },
+            { "killmob", HandleRONpcKillMobCommand, SEC_GAMEMASTER, Console::No },
         };
 
         static ChatCommandTable questCommandTable =
@@ -579,6 +581,12 @@ public:
             { "complete", HandleROQuestCompleteCommand, SEC_GAMEMASTER, Console::No },
             { "erase",    HandleROQuestEraseCommand,    SEC_GAMEMASTER, Console::No },
             { "check",    HandleROQuestCheckCommand,    SEC_GAMEMASTER, Console::No },
+        };
+
+        static ChatCommandTable roomCommandTable =
+        {
+            { "join",  HandleRORoomJoinCommand,  SEC_PLAYER, Console::No },
+            { "leave", HandleRORoomLeaveCommand, SEC_PLAYER, Console::No },
         };
 
         static ChatCommandTable roCommandTable =
@@ -640,6 +648,7 @@ public:
             { "identity", identityCommandTable },
             { "npc",      npcCommandTable },
             { "quest",    questCommandTable },
+            { "room",     roomCommandTable },
         };
 
         static ChatCommandTable commandTable =
@@ -664,7 +673,28 @@ public:
             ROWOW->SendSkillsToClient(player, *ROWOW->GetIdentity(player), true);
             ROWOW->SendSpiritBallsToClient(player);
             ROWOW->SendQuestsToClient(player);
+            ROWOW->GetIdentity(player)->SentWaitingRoomMessage.clear();
         }
+        return true;
+    }
+
+    // Waiting rooms (R8.3): the RO_Identity addon's bubble joins a room (chat_joinchat, clif_parse_ChatRoomJoin) and its window's Leave button
+    // leaves it (chat_leavechat, clif_parse_ChatLeave)
+    static bool HandleRORoomJoinCommand(ChatHandler* handler, uint32 npcID)
+    {
+        Player* player = GetFormPlayer(handler);
+        if (player == nullptr)
+            return false;
+        ROWOW->ChatJoinChat(player, npcID);
+        return true;
+    }
+
+    static bool HandleRORoomLeaveCommand(ChatHandler* handler)
+    {
+        Player* player = GetFormPlayer(handler);
+        if (player == nullptr)
+            return false;
+        ROWOW->ChatLeaveChat(player, false);
         return true;
     }
 
@@ -929,8 +959,9 @@ public:
         return true;
     }
 
-    static bool HandleRONpcEventCommand(ChatHandler* handler, std::string eventName)
+    static bool HandleRONpcEventCommand(ChatHandler* handler, Tail eventNameText)
     {
+        std::string eventName(eventNameText); // NPC names can have spaces
         // donpcevent "<NPC>::<label>", run at the next world update with no player
         if (ROWOW->QueueNpcEvent(eventName) == false)
         {
@@ -938,6 +969,75 @@ public:
             return false;
         }
         handler->PSendSysMessage("Queued {}.", eventName);
+        return true;
+    }
+
+    static bool HandleRONpcKillMobCommand(ChatHandler* handler, Tail eventText)
+    {
+        // Kills the nearest script monster on your map whose death event has the text (Manager#hnt::OnMyMobDead, OnMyMobDead2...), you
+        // the killer, as a hit would: for testing the job tests' waves, whose decoys look like their targets (a monster's script name
+        // isn't shown)
+        Player* player = GetFormPlayer(handler);
+        if (player == nullptr)
+            return false;
+        std::string text(eventText);
+        if (text == "list")
+        {
+            // The living script monsters on your map, by event
+            std::map<std::string, uint32> countsByEvent;
+            std::lock_guard<std::mutex> lock(ROWOW->NpcStateMutex);
+            for (auto const& scriptMobByGUID : ROWOW->ScriptMobsByGUID)
+                if (scriptMobByGUID.second.MapID == player->GetMapId())
+                    countsByEvent[scriptMobByGUID.second.Event]++;
+            for (auto const& countByEvent : countsByEvent)
+                handler->PSendSysMessage("{}: {}", countByEvent.first, countByEvent.second);
+            return true;
+        }
+        Creature* nearest = nullptr;
+        std::vector<ObjectGuid> mobGUIDs;
+        {
+            std::lock_guard<std::mutex> lock(ROWOW->NpcStateMutex);
+            for (auto const& scriptMobByGUID : ROWOW->ScriptMobsByGUID)
+                if (scriptMobByGUID.second.MapID == player->GetMapId() && (text.empty() == true || scriptMobByGUID.second.Event == text))
+                    mobGUIDs.push_back(scriptMobByGUID.first);
+        }
+        for (ObjectGuid const& mobGUID : mobGUIDs)
+        {
+            Creature* creature = player->GetMap()->GetCreature(mobGUID);
+            if (creature != nullptr && creature->IsAlive() == true && (nearest == nullptr || player->GetDistance(creature) < player->GetDistance(nearest)))
+                nearest = creature;
+        }
+        if (nearest == nullptr)
+        {
+            handler->SendSysMessage("No such script monster alive on this map.");
+            return true;
+        }
+        handler->PSendSysMessage("Killed {} ({} yards away).", nearest->GetName(), uint32(player->GetDistance(nearest)));
+        Unit::Kill(player, nearest);
+        return true;
+    }
+
+    static bool HandleRONpcStateCommand(ChatHandler* handler, Tail name)
+    {
+        // An NPC's place, OnTouch area, shown state, timer and the player holding its OnTouch_, by exname (or shown name)
+        ROWOWNpc const* npc = ROWOW->GetNpcByName(std::string(name));
+        if (npc == nullptr)
+        {
+            handler->SendSysMessage("No such NPC.");
+            return false;
+        }
+        std::lock_guard<std::mutex> lock(ROWOW->NpcStateMutex);
+        handler->PSendSysMessage("{} (id {}): {} {},{} span {},{}; enabled {}, hidden {}, timer {} at {}, touching {}, waiting room {}", npc->FullName, npc->ID,
+            npc->MapName, npc->X, npc->Y, npc->TriggerSpanX, npc->TriggerSpanY, npc->IsEnabled, npc->IsHidden, npc->Timer.IsRunning, npc->Timer.StoppedTick,
+            npc->TouchingPlayerGUID.ToString(), ROWOW->WaitingRoomsByNpcID.count(npc->ID) != 0 ? int64(ROWOW->WaitingRoomsByNpcID[npc->ID].Users.size()) : -1);
+        // ... and your own side of the NPC events: the cell last checked for areas, the areas held, your run and queue
+        if (Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr)
+        {
+            ROWOWIdentity* identity = ROWOW->GetIdentity(player);
+            handler->PSendSysMessage("You: teleporting {}, areas checked at {},{}, holding OnTouch_ {}, area {}, in a run {} (waits {}), {} queued", player->IsBeingTeleported(),
+                identity->NpcTouchX, identity->NpcTouchY, identity->OnTouchNpcIDs.size(), identity->AreaNpcIDs.size(), identity->NpcRun != nullptr,
+                identity->NpcRun != nullptr ? int32(identity->NpcRun->Wait) : -1, identity->QueuedNpcEvents.size());
+        }
         return true;
     }
 
@@ -962,6 +1062,15 @@ public:
         {
             handler->SendSysMessage("NPC variables (.name) need their NPC; use a script.");
             return false;
+        }
+        // A parameter (SkillPoint, Zeny, StatusPoint...) is read and set as the scripts do
+        ROWOWScriptCommand const* parameter = ROWOWSCRIPT->GetCommand(ROWOWSCRIPT->GetCommandIndex(variableName));
+        if (parameter != nullptr && parameter->IsParameter == true)
+        {
+            if (value.has_value() == true && parameter->Setter != nullptr)
+                parameter->Setter(context, ROWOWScriptValue::FromNumber(strtoll(value->c_str(), nullptr, 10)));
+            handler->PSendSysMessage("{} = {}", variableName, parameter->Function(context, {}).GetText());
+            return true;
         }
         if (value.has_value() == true)
             ROWOWSCRIPT->SetVariable(context, variableName, index, ROWOWScriptValue::FromText(*value));
