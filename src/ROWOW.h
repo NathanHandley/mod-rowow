@@ -533,11 +533,18 @@ struct ROWOWItemCombo
 
 // The refine bonuses (refine.yml) of armor (type 0) and each weapon level (1-4): the bonus and the random overrefine bonus, in hundredths
 #define ROWOW_REFINE_TYPE_COUNT                     5
+#define ROWOW_REFINE_COST_NORMAL                    0       // e_refine_cost_type: REFINE_COST_NORMAL, REFINE_COST_OVER10, REFINE_COST_ENRICHED
+#define ROWOW_REFINE_COST_ENRICHED                  2
+#define ROWOW_REFINE_COST_COUNT                     3
 struct ROWOWRefineBonus
 {
     int32 Bonus = 0;
     int32 RandomBonus = 0;
     int32 Chance = 0; // The normal refine's chance to reach this level, in 10000 (REFINE_COST_NORMAL's)
+    bool HasCost[ROWOW_REFINE_COST_COUNT] = { }; // The refiners' costs by REFINE_COST_* (s_refine_cost): whether there's one, its chance in 10000,
+    int32 CostChances[ROWOW_REFINE_COST_COUNT] = { }; // its zeny and its material (item_db Id)
+    int32 CostPrices[ROWOW_REFINE_COST_COUNT] = { };
+    uint32 CostMaterialIDs[ROWOW_REFINE_COST_COUNT] = { };
 };
 
 // A recipe of produce_db (s_skill_produce_db): what it makes, its item level (1-3 weapon levels, 11-20 cooking, 21 smelting, 22 brewing, 23
@@ -964,6 +971,50 @@ struct ROWOWMemoPoint
     int32 CellY = 0;
 };
 
+// The quest log (ROWOW_Quest.cpp, R8): rAthena's quest_db (the converter's mod_rowow_db_quest, from RoQuests.csv) and a character's quests
+#define ROWOW_MAX_QUEST_OBJECTIVES                  3       // MAX_QUEST_OBJECTIVES
+
+enum ROWOWQuestState : uint8
+{
+    ROWOW_QUEST_STATE_INACTIVE = 0, // Q_INACTIVE: the player turned it off in the quest window
+    ROWOW_QUEST_STATE_ACTIVE = 1,   // Q_ACTIVE
+    ROWOW_QUEST_STATE_COMPLETE = 2, // Q_COMPLETE: kept (checkquest still finds it), but no longer in the window
+};
+
+enum ROWOWQuestCheckType : uint8
+{
+    ROWOW_QUEST_CHECK_HAVEQUEST = 0, // HAVEQUEST: the quest's state
+    ROWOW_QUEST_CHECK_PLAYTIME = 1,  // PLAYTIME: 2 when its time is up, 1 when complete, else 0
+    ROWOW_QUEST_CHECK_HUNTING = 2,   // HUNTING: 2 when its hunting is done, 1 when its time is up, else 0
+};
+
+// A hunting target of a quest (s_quest_objective): kills of the monster to make
+struct ROWOWQuestObjective
+{
+    uint32 MobID = 0;
+    int32 Count = 0;
+};
+
+// A quest of quest_db (s_quest_db)
+struct ROWOWQuestData
+{
+    uint32 ID = 0;
+    std::string Title;
+    int64 Time = 0; // Seconds it lasts (TimeLimit "+1d2h"), or the time of day it ends at with IsTimeAt; 0 for no limit
+    bool IsTimeAt = false;
+    int32 TimeWeek = -1; // The day of the week a time of day is on, -1 for any
+    std::vector<ROWOWQuestObjective> Objectives;
+};
+
+// A quest in a character's quest log (rAthena's struct quest, mod_rowow_identity_quest)
+struct ROWOWQuestEntry
+{
+    uint32 QuestID = 0;
+    uint32 Time = 0; // When it runs out (Unix time), 0 for no limit
+    uint8 State = ROWOW_QUEST_STATE_ACTIVE;
+    int32 Counts[ROWOW_MAX_QUEST_OBJECTIVES] = { 0, 0, 0 }; // The kills made of each objective
+};
+
 // An item a new RO identity starts with (rAthena's start_items_pre)
 struct ROWOWStartItem
 {
@@ -1024,6 +1075,11 @@ struct ROWOWIdentity : public DataMap::Base
     std::vector<uint32> AreaNpcIDs; // areanpc: the NPCs whose OnTouch (or click) it set off and whose area it's still on
     std::vector<uint32> OnTouchNpcIDs; // npc_ontouch_: the NPCs whose OnTouch_ it set off and whose area it's still on
     uint32 NpcRangeCheckTimer = 0;
+    int64 KillerRID = 0; // killerrid, killedrid and killedgid: who last killed it, and what it last killed (the die and kill events read them)
+    int64 KilledRID = 0;
+    int64 KilledGID = 0;
+    std::vector<ROWOWQuestEntry> Quests; // quest_log: the quest log, the active and inactive quests first, then the completed ones
+    bool AreQuestsChanged = false;
     std::array<ROWOWCartItem, ROWOW_MAX_CART> CartItems; // Its cart's items (mod_rowow_identity_cart), by cart slot
     int32 CartNum = 0; // cart_num: the slots in use
     int32 CartWeight = 0; // cart_weight and cart_weight_max, in tenths (item_db's Weight)
@@ -1075,6 +1131,7 @@ struct ROWOWIdentity : public DataMap::Base
     bool IsFormArrivalPending = false;
     bool IsFormDeparturePending = false;
     bool IsNewIdentityPending = false; // The first entry, whose start items are given once in the world
+    bool IsArrivalFloorCheckPending = false; // Arrived on an RO map: the next update checks it isn't left in the air (CheckArrivalFloor)
 
     // While in the form: the character's own values, put back on leaving and saved in place of the form's
     bool IsInForm = false;
@@ -1089,6 +1146,7 @@ struct ROWOWIdentity : public DataMap::Base
     std::vector<uint32> SuspendedPassiveSpellIDs; // The passive auras of those, taken off for the form and cast again on leaving it
 };
 
+#define ROWOW_ARRIVAL_FLOOR_TOLERANCE               3.0f    // Yards above the floor an arrival may be before it's put down on it
 #define ROWOW_MOVE_MAX_PATH_NODES                   256     // Longest contoured path (in steps) built for one move
 #define ROWOW_MOVE_LINE_OF_SIGHT_HEIGHT             1.0f    // Height above the ground that each step checks for a wall at
 
@@ -1225,6 +1283,7 @@ public:
 
     // The middle of an RO cell of an RO map, on the ground.  False when the map has no cell grid or no ground there
     bool GetCellPosition(uint32 mapID, int32 cellX, int32 cellY, ROWOWPosition& positionOut) const;
+    void CheckArrivalFloor(Player* player); // After an arrival on an RO map: down on the floor if it's in the air above it
 
     // The player's identity, loaded on first use (a row of defaults until the identity exists)
     ROWOWIdentity* GetIdentity(Player* player);
@@ -1807,6 +1866,7 @@ public:
     void NpcDialogClose(Player* player);
     void EndNpcRun(Player* player); // Drops the player's run (cancel, logout)
     void SetupNpcRunContext(ROWOWScriptContext& context, Player* player, ROWOWNpc const* npc);
+    bool IsItemUseBlockedByNpc(Player* player); // Its run turned items off (disable_items), so it can't use, put on or take off items
     void QueueNpcEvent(ROWOWNpc const* npc, std::string const& label); // Runs it with no player at the next world update (donpcevent)
     bool QueueNpcEvent(std::string const& eventName); // "<NPC>::<label>", false when there's no such NPC or label
     void RunNpcEvent(ROWOWNpc const* npc, uint32 instructionIndex, Player* player = nullptr); // Now, in the world update (or the player's thread)
@@ -1843,10 +1903,29 @@ public:
     Creature* SpawnScriptMob(Map* map, uint32 mobID, int32 x, int32 y, std::string const& event); // monster: on the map's thread (or with maps idle)
     bool OnScriptMobDeath(Creature* creature, Unit* killer); // The event its death runs, with the killer attached (false: it had none)
     std::vector<ROWOWPendingScriptMob> PendingScriptMobs; // Under NpcStateMutex: monsters for maps not loaded yet
+    std::vector<ROWOWNpcMapWarp> PendingNpcMapWarps; // Under NpcStateMutex: mapwarp and areawarp, for the world update
+    std::unordered_map<uint32, uint32> MapUserCounts; // Under NpcStateMutex: the players on each RO map as of the last world update (getmapusers)
+    void WarpPlayerToCell(Player* player, std::string const& mapName, int32 x, int32 y); // The warp command's destination: a cell, SavePoint or Random
     std::unordered_map<uint32, std::vector<uint32>> TouchNpcIDsByMapID; // The NPCs with an OnTouch area, by WoW map (startup data)
     std::vector<ROWOWNpcEvent> PlayerEventLabels[ROWOW_NPC_EVENT_COUNT]; // script_event: each player event's labels (startup data)
     std::unordered_map<std::string, std::vector<ROWOWNpcEvent>> ClockEventsByLabel; // OnClock/OnHour/OnMinute/On<day>/OnDay labels, lowercase
     int64 LastClockMinute = 0; // The minute (since the epoch) npc_event_do_clock last ran for
+    // The quest log (ROWOW_Quest.cpp, R8): rAthena's quest.cpp.  quest_db is startup data; a character's quest log is its identity's, only
+    // touched in its own thread (its runs, its session's commands, kills on its map)
+    void LoadQuestData();
+    ROWOWQuestData const* QuestSearch(uint32 questID) const; // quest_search
+    int32 QuestAdd(Player* sd, uint32 questID); // quest_add: 0, or -1 when it can't
+    int32 QuestChange(Player* sd, uint32 qid1, uint32 qid2); // quest_change
+    int32 QuestDelete(Player* sd, uint32 questID); // quest_delete
+    int32 QuestUpdateStatus(Player* sd, uint32 questID, uint8 status); // quest_update_status
+    int32 QuestCheck(ROWOWIdentity const& identity, uint32 questID, uint8 type) const; // quest_check: -1 when it doesn't have it
+    void QuestUpdateObjective(Player* sd, Creature* md); // quest_update_objective: a kill counted for its hunting quests
+    void QuestKillUpdate(Creature* md, Player* sd); // mob_dead's part: the killer's (or each party member's in range) hunting
+    void SendQuestsToClient(Player* player); // The quest window's list (ROWOWQUEST)
+    void LoadIdentityQuests(Player* player, ROWOWIdentity& identity);
+    void SaveIdentityQuests(Player* player, ROWOWIdentity& identity, CharacterDatabaseTransaction trans);
+    std::unordered_map<uint32, ROWOWQuestData> QuestsByID;
+
     ROWOWChatScriptDialog ChatScriptDialog; // For GM testing (.ro npc talk -chat)
     ROWOWWindowScriptDialog WindowScriptDialog; // The RO NPC window: every player run's dialog
     uint32 GlobalVariableSaveTimer = 0;

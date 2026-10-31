@@ -77,6 +77,8 @@ public:
         if (ROWOW->IsEnabled == false || player == nullptr)
             return;
         ROWOW->CompleteROFormChange(player);
+        if (ROWOW->IsInROForm(player) == true)
+            ROWOW->GetIdentity(player)->IsArrivalFloorCheckPending = true;
     }
 
     void OnPlayerBeforeSendChatMessage(Player* player, uint32& /*type*/, uint32& /*lang*/, std::string& msg) override
@@ -93,6 +95,7 @@ public:
         ROWOW->UpdateStatusChanges(player);
         if (ROWOW->IsEnabled == false || ROWOW->IsInROForm(player) == false)
             return;
+        ROWOW->CheckArrivalFloor(player);
         ROWOW->UpdateSkillUnitMove(player);
         ROWOW->UpdateSkillCastMove(player);
         ROWOW->UpdateInvincibleTimer(player);
@@ -195,6 +198,12 @@ public:
     bool OnPlayerCanLoseDurability(Player* player) override
     {
         // The form doesn't wear the character's items
+        return ROWOW->IsInROForm(player) == false;
+    }
+
+    bool OnPlayerCanTakeFallDamage(Player* player) override
+    {
+        // RO has no falling: the form lands unhurt (an arrival on an indoor map drops it from the converted map's box onto the floor)
         return ROWOW->IsInROForm(player) == false;
     }
 
@@ -562,6 +571,16 @@ public:
             { "var",    HandleRONpcVarCommand,    SEC_GAMEMASTER, Console::No },
         };
 
+        static ChatCommandTable questCommandTable =
+        {
+            { "list",     HandleROQuestListCommand,     SEC_PLAYER,     Console::No },
+            { "active",   HandleROQuestActiveCommand,   SEC_PLAYER,     Console::No },
+            { "set",      HandleROQuestSetCommand,      SEC_GAMEMASTER, Console::No },
+            { "complete", HandleROQuestCompleteCommand, SEC_GAMEMASTER, Console::No },
+            { "erase",    HandleROQuestEraseCommand,    SEC_GAMEMASTER, Console::No },
+            { "check",    HandleROQuestCheckCommand,    SEC_GAMEMASTER, Console::No },
+        };
+
         static ChatCommandTable roCommandTable =
         {
             { "sync",     HandleROSyncCommand,   SEC_PLAYER,     Console::No },
@@ -600,6 +619,7 @@ public:
             { "producerate", HandleROProduceRateCommand, SEC_GAMEMASTER, Console::No },
             { "units",    HandleROUnitsCommand,  SEC_GAMEMASTER, Console::No },
             { "info",     HandleROInfoCommand,   SEC_GAMEMASTER, Console::No },
+            { "go",       HandleROGoCommand,     SEC_GAMEMASTER, Console::No },
             { "form",     HandleROFormCommand,   SEC_GAMEMASTER, Console::No },
             { "job",      HandleROJobCommand,    SEC_GAMEMASTER, Console::No },
             { "level",    HandleROLevelCommand,  SEC_GAMEMASTER, Console::No },
@@ -618,6 +638,7 @@ public:
             { "striprate", HandleROStripRateCommand, SEC_GAMEMASTER, Console::No },
             { "identity", identityCommandTable },
             { "npc",      npcCommandTable },
+            { "quest",    questCommandTable },
         };
 
         static ChatCommandTable commandTable =
@@ -641,7 +662,67 @@ public:
             ROWOW->SendItemCardsToClient(player, *ROWOW->GetIdentity(player), true);
             ROWOW->SendSkillsToClient(player, *ROWOW->GetIdentity(player), true);
             ROWOW->SendSpiritBallsToClient(player);
+            ROWOW->SendQuestsToClient(player);
         }
+        return true;
+    }
+
+    // The quest log (R8): list and active are the RO quest window's (its list, and a quest switched on or off); set, complete, erase and
+    // check are setquest, completequest, erasequest and checkquest for testing, on the selected player (or yourself)
+    static bool HandleROQuestListCommand(ChatHandler* handler)
+    {
+        Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
+        if (player == nullptr || ROWOW->IsInROForm(player) == false)
+            return false;
+        ROWOW->SendQuestsToClient(player);
+        return true;
+    }
+
+    static bool HandleROQuestActiveCommand(ChatHandler* handler, uint32 questID, uint32 isActive)
+    {
+        // clif_parse_questStateAck: an active quest made inactive or back
+        Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
+        if (player == nullptr || ROWOW->IsInROForm(player) == false)
+            return false;
+        ROWOW->QuestUpdateStatus(player, questID, isActive != 0 ? ROWOW_QUEST_STATE_ACTIVE : ROWOW_QUEST_STATE_INACTIVE);
+        return true;
+    }
+
+    static bool HandleROQuestSetCommand(ChatHandler* handler, uint32 questID)
+    {
+        Player* player = handler->getSelectedPlayerOrSelf();
+        if (player == nullptr || ROWOW->IsInROForm(player) == false)
+            return false;
+        handler->PSendSysMessage("setquest {}: {}", questID, ROWOW->QuestAdd(player, questID) == 0 ? "given" : "refused (unknown, or already in the log)");
+        return true;
+    }
+
+    static bool HandleROQuestCompleteCommand(ChatHandler* handler, uint32 questID)
+    {
+        Player* player = handler->getSelectedPlayerOrSelf();
+        if (player == nullptr || ROWOW->IsInROForm(player) == false)
+            return false;
+        handler->PSendSysMessage("completequest {}: {}", questID, ROWOW->QuestUpdateStatus(player, questID, ROWOW_QUEST_STATE_COMPLETE) == 0 ? "complete" : "not active");
+        return true;
+    }
+
+    static bool HandleROQuestEraseCommand(ChatHandler* handler, uint32 questID)
+    {
+        Player* player = handler->getSelectedPlayerOrSelf();
+        if (player == nullptr || ROWOW->IsInROForm(player) == false)
+            return false;
+        handler->PSendSysMessage("erasequest {}: {}", questID, ROWOW->QuestDelete(player, questID) == 0 ? "erased" : "not in the log");
+        return true;
+    }
+
+    static bool HandleROQuestCheckCommand(ChatHandler* handler, uint32 questID)
+    {
+        Player* player = handler->getSelectedPlayerOrSelf();
+        if (player == nullptr || ROWOW->IsInROForm(player) == false)
+            return false;
+        ROWOWIdentity const& identity = *ROWOW->GetIdentity(player);
+        handler->PSendSysMessage("checkquest {}: HAVEQUEST {}, PLAYTIME {}, HUNTING {}", questID, ROWOW->QuestCheck(identity, questID, ROWOW_QUEST_CHECK_HAVEQUEST),
+            ROWOW->QuestCheck(identity, questID, ROWOW_QUEST_CHECK_PLAYTIME), ROWOW->QuestCheck(identity, questID, ROWOW_QUEST_CHECK_HUNTING));
         return true;
     }
 
@@ -1234,6 +1315,11 @@ public:
             handler->SendSysMessage("Appraise it before wearing it.");
             return true;
         }
+        if (ROWOW->IsItemUseBlockedByNpc(player) == true)
+        {
+            handler->SendSysMessage("You can't put this item on.");
+            return true;
+        }
         ROWOW->PCEquipItem(player, item, int32(equipPosition.value_or(uint32(ROWOW->PCEquipPoint(player, *ROWOW->GetIdentity(player), *roItem)))));
         return true;
     }
@@ -1244,6 +1330,11 @@ public:
         Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
         if (player == nullptr || ROWOW->IsInROForm(player) == false)
             return false;
+        if (ROWOW->IsItemUseBlockedByNpc(player) == true)
+        {
+            handler->SendSysMessage("You can't take this item off.");
+            return true;
+        }
         ROWOW->PCUnequipItem(player, equipPosition, 1);
         return true;
     }
@@ -1318,6 +1409,26 @@ public:
             player->GetName(), job != nullptr ? job->Name : "?", identity->JobID, identity->BaseLevel, identity->BaseExp, identity->JobLevel, identity->JobExp,
             identity->StatusPoints, identity->SkillPoints, identity->Stats[0], identity->Stats[1], identity->Stats[2], identity->Stats[3], identity->Stats[4],
             identity->Stats[5], identity->IsInForm == true ? player->GetMoney() : identity->Zeny, identity->IsInForm == true ? "in the form" : "not in the form");
+        int32 x = 0, y = 0;
+        ROWOW->GetUnitCell(player, x, y);
+        auto mapNameIter = ROWOW->MapNamesByMapID.find(player->GetMapId());
+        handler->PSendSysMessage("RO map {} cell {},{}", mapNameIter != ROWOW->MapNamesByMapID.end() ? mapNameIter->second : std::string("-"), x, y);
+        return true;
+    }
+
+    static bool HandleROGoCommand(ChatHandler* handler, std::string mapName, int32 x, int32 y)
+    {
+        // For testing: the warp command's teleport (an RO map name, rAthena's aliases too, and an RO cell), on the selected player (or yourself)
+        Player* player = handler->getSelectedPlayerOrSelf();
+        if (player == nullptr || ROWOW->GetMapIDByMapName(mapName) == 0)
+        {
+            handler->PSendSysMessage("No converted RO map '{}'.", mapName);
+            return false;
+        }
+        ROWOWPosition destination;
+        if (ROWOW->GetCellPosition(ROWOW->GetMapIDByMapName(mapName), x, y, destination) == true)
+            handler->PSendSysMessage("To {} cell {},{} (height {:.1f}).", mapName, x, y, destination.Z);
+        ROWOW->WarpPlayerToCell(player, mapName, x, y);
         return true;
     }
 
@@ -1354,6 +1465,7 @@ public:
         trans->Append("DELETE FROM `mod_rowow_identity_status` WHERE `guid` = {}", guid);
         trans->Append("DELETE FROM `mod_rowow_identity_cart` WHERE `guid` = {}", guid);
         trans->Append("DELETE FROM `mod_rowow_identity_memo` WHERE `guid` = {}", guid);
+        trans->Append("DELETE FROM `mod_rowow_identity_quest` WHERE `guid` = {}", guid);
         CharacterDatabase.DirectCommitTransaction(trans); // Before the new identity's save, which is queued
         player->CustomData.Erase("ROWOWIdentity");
         if (wasInForm == true)

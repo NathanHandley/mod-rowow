@@ -207,6 +207,8 @@ struct ROWOWScriptContext
     int64 NpcAmount = 0; // npc_amount: the number input
     std::string NpcString; // npc_str: the string input
     std::vector<std::string> MenuOptions; // The options last shown, for the transport and the GM test commands
+    bool IsItemUseDisabled = false; // npc_item_flag 0 (disable_items): the player can't use or put on items while the run lasts (pre-re's
+                                    // item_enabled_npc lets it by default)
 
     bool IsWaiting() const { return Wait != ROWOW_SCRIPT_WAIT_NONE; }
     ROWOWScript const* GetScript() const { return Frames.empty() == true ? nullptr : Frames.back().Script; }

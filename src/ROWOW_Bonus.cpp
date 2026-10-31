@@ -271,6 +271,28 @@ void ROWOWMod::LoadBonusData()
                 for (auto const& field : chance)
                     if (isNormal == true && field.first == "Rate")
                         RefineBonuses[refineType][refine].Chance = int32(strtol(field.second.c_str(), nullptr, 10));
+
+                // The refiners' cost of the type (the refiner NPCs' getequiprefinecost and getequippercentrefinery, R8)
+                int32 costType = -1;
+                for (auto const& field : chance)
+                    if (field.first == "Type")
+                        costType = field.second == "Normal" ? ROWOW_REFINE_COST_NORMAL : (field.second == "Over10" ? 1 : (field.second == "Enriched" ? ROWOW_REFINE_COST_ENRICHED : -1));
+                if (costType < 0)
+                    continue;
+                ROWOWRefineBonus& refineBonus = RefineBonuses[refineType][refine];
+                refineBonus.HasCost[costType] = true;
+                for (auto const& field : chance)
+                {
+                    if (field.first == "Rate")
+                        refineBonus.CostChances[costType] = int32(strtol(field.second.c_str(), nullptr, 10));
+                    else if (field.first == "Price")
+                        refineBonus.CostPrices[costType] = int32(strtol(field.second.c_str(), nullptr, 10));
+                    else if (field.first == "Material")
+                    {
+                        auto materialIDIter = ItemIDsByAegisName.find(ToLower(field.second));
+                        refineBonus.CostMaterialIDs[costType] = materialIDIter != ItemIDsByAegisName.end() ? materialIDIter->second : 0;
+                    }
+                }
             }
         }
     }
@@ -455,6 +477,111 @@ void ROWOWMod::LoadBonusData()
     {
         Item* item = getEquipIndexItem(context, arguments);
         return ROWOWScriptValue::FromNumber(item != nullptr ? int64(GetItemRefine(item)) : 0);
+    });
+    // The refiners' commands (R8): what's worn in an equip index, its refine chance and cost (refine.yml, through RefineDatabase::findLevelInfo:
+    // the costs of reaching the next level), and the refine's success or failure
+    auto getRefineLevelInfo = [this](Item const* item) -> ROWOWRefineBonus const*
+    {
+        ROWOWItem const* roItem = GetROItem(item);
+        if (roItem == nullptr || roItem->IsRefineable == false || (roItem->IsWeapon == false && roItem->IsArmor == false))
+            return nullptr;
+        uint32 refine = GetItemRefine(item);
+        int32 refineType = roItem->IsWeapon == true ? roItem->WeaponLevel : 0;
+        if (refine >= ROWOW_MAX_REFINE || refineType < 0 || refineType >= ROWOW_REFINE_TYPE_COUNT)
+            return nullptr;
+        return &RefineBonuses[refineType][refine + 1];
+    };
+    ROWOWSCRIPT->RegisterCommand("getequipisequiped", [getEquipIndexItem](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        return ROWOWScriptValue::FromNumber(getEquipIndexItem(context, arguments) != nullptr ? 1 : 0);
+    });
+    ROWOWSCRIPT->RegisterCommand("getequipname", [getEquipIndexItem](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // The item's name (ename), "" for nothing worn
+        Item* item = getEquipIndexItem(context, arguments);
+        return ROWOWScriptValue::FromText(item != nullptr ? item->GetTemplate()->Name1 : std::string());
+    });
+    ROWOWSCRIPT->RegisterCommand("getequipisenableref", [this, getEquipIndexItem](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        ROWOWItem const* roItem = GetROItem(getEquipIndexItem(context, arguments));
+        return ROWOWScriptValue::FromNumber(roItem != nullptr && roItem->IsRefineable == true ? 1 : 0);
+    });
+    ROWOWSCRIPT->RegisterCommand("getequipweaponlv", [this, getEquipIndexItem](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // getequipweaponlv(<equip index>): a weapon's level, 0 for none (the worn item's own, EQI_COMPOUND_ON, without one)
+        Item const* item = arguments.empty() == true ? context.EquipItem : getEquipIndexItem(context, arguments);
+        ROWOWItem const* roItem = GetROItem(item);
+        return ROWOWScriptValue::FromNumber(roItem != nullptr && roItem->IsWeapon == true ? roItem->WeaponLevel : 0);
+    });
+    ROWOWSCRIPT->RegisterCommand("getequiparmorlv", [this, getEquipIndexItem](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // Armor's level: pre-renewal item_db has none, so every armor is level 1 (item_db's default)
+        Item const* item = arguments.empty() == true ? context.EquipItem : getEquipIndexItem(context, arguments);
+        ROWOWItem const* roItem = GetROItem(item);
+        return ROWOWScriptValue::FromNumber(roItem != nullptr && roItem->IsArmor == true ? 1 : 0);
+    });
+    ROWOWSCRIPT->RegisterCommand("getequipcardid", [getEquipIndexItem](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // getequipcardid(<equip index>,<slot>): the card (item_db Id) in a slot, 0 for none
+        Item* item = getEquipIndexItem(context, arguments);
+        int64 slot = arguments.size() > 1 ? arguments[1].GetNumber() : -1;
+        return ROWOWScriptValue::FromNumber(item != nullptr && slot >= 0 && slot < ROWOW_MAX_SLOTS ? int64(GetItemCard(item, uint8(slot))) : 0);
+    });
+    ROWOWSCRIPT->RegisterCommand("getequippercentrefinery", [getEquipIndexItem, getRefineLevelInfo](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // getequippercentrefinery(<equip index>{,<enriched>}): the chance in percent to refine it once more, 0 when it can't be
+        ROWOWRefineBonus const* info = getRefineLevelInfo(getEquipIndexItem(context, arguments));
+        int32 costType = arguments.size() > 1 && arguments[1].GetNumber() != 0 ? ROWOW_REFINE_COST_ENRICHED : ROWOW_REFINE_COST_NORMAL;
+        return ROWOWScriptValue::FromNumber(info != nullptr && info->HasCost[costType] == true ? info->CostChances[costType] / 100 : 0);
+    });
+    ROWOWSCRIPT->RegisterCommand("getequiprefinecost", [getEquipIndexItem, getRefineLevelInfo](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // getequiprefinecost(<equip index>,<REFINE_COST_*>,<REFINE_MATERIAL_ID or REFINE_ZENY_COST>): -1 when it can't be refined so
+        int64 costType = arguments.size() > 1 ? arguments[1].GetNumber() : -1;
+        if (costType < 0 || costType >= ROWOW_REFINE_COST_COUNT)
+            return ROWOWScriptValue::FromNumber(-1);
+        ROWOWRefineBonus const* info = getRefineLevelInfo(getEquipIndexItem(context, arguments));
+        if (info == nullptr || info->HasCost[costType] == false)
+            return ROWOWScriptValue::FromNumber(-1);
+        switch (arguments.size() > 2 ? arguments[2].GetNumber() : -1)
+        {
+            case 0: return ROWOWScriptValue::FromNumber(int64(info->CostMaterialIDs[costType])); // REFINE_MATERIAL_ID
+            case 1: return ROWOWScriptValue::FromNumber(info->CostPrices[costType]); // REFINE_ZENY_COST
+            default: return ROWOWScriptValue::FromNumber(-1);
+        }
+    });
+    ROWOWSCRIPT->RegisterCommand("successrefitem", [this, getEquipIndexItem](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // successrefitem <equip index>{,<count>}: refined count levels more (capped at MAX_REFINE), worn again with the new bonuses
+        Item* item = getEquipIndexItem(context, arguments);
+        if (item == nullptr)
+            return ROWOWScriptValue::FromNumber(-1);
+        uint32 refine = GetItemRefine(item);
+        if (refine >= ROWOW_MAX_REFINE)
+            return ROWOWScriptValue::FromNumber(ROWOW_MAX_REFINE);
+        refine = uint32(std::clamp<int64>(int64(refine) + (arguments.size() > 1 ? arguments[1].GetNumber() : 1), 0, ROWOW_MAX_REFINE));
+        SetItemState(context.AttachedPlayer, item, refine, IsItemBroken(item), IsItemIdentified(item));
+        RefreshROForm(context.AttachedPlayer);
+        SendItemCardsToClient(context.AttachedPlayer, *context.Identity, true);
+        ChatHandler(context.AttachedPlayer->GetSession()).SendSysMessage(fmt::format("Upgrade success!! ({} is now +{})", item->GetTemplate()->Name1, refine)); // clif_refine success
+        return ROWOWScriptValue::FromNumber(int64(refine));
+    });
+    ROWOWSCRIPT->RegisterCommand("failedrefitem", [this, getEquipIndexItem](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // failedrefitem <equip index>: the refine failed, and the item is gone (pc_unequipitem, pc_delitem)
+        Item* item = getEquipIndexItem(context, arguments);
+        if (item == nullptr)
+        {
+            LOG_ERROR("module.ROWOW", "failedrefitem: no item equipped at pos {} (character {})", arguments.empty() == true ? -1 : arguments[0].GetNumber(),
+                context.AttachedPlayer != nullptr ? context.AttachedPlayer->GetGUID().GetCounter() : 0);
+            return ROWOWScriptValue::FromNumber(0);
+        }
+        std::string itemName = item->GetTemplate()->Name1;
+        PCUnequipItem(context.AttachedPlayer, EquipIndexes[arguments[0].GetNumber()].second, 1);
+        uint32 count = 1;
+        context.AttachedPlayer->DestroyItemCount(item, count, true);
+        ChatHandler(context.AttachedPlayer->GetSession()).SendSysMessage(fmt::format("Upgrade failed!! {} was destroyed.", itemName)); // clif_refine failure
+        return ROWOWScriptValue::FromNumber(1);
     });
     ROWOWSCRIPT->RegisterCommand("isequipped", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
     {

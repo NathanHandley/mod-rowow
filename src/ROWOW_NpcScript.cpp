@@ -555,7 +555,7 @@ void ROWOWMod::LoadNpcScriptData()
         ROWOWScriptCommand const* command = ROWOWSCRIPT->GetCommand(commandIndex);
         static std::set<std::string> const languageWords = { "if", "switch", "for", "while", "do", "set", "end", "return", "goto", "callsub", "callfunc", "function",
             "break", "continue", "getd" };
-        char const* status = command == nullptr ? (languageWords.count(commandUse.first) != 0 ? "language" : "missing")
+        char const* status = command == nullptr ? (languageWords.count(commandUse.first) != 0 || ROWOWSCRIPT->GetFunction(commandUse.first) != nullptr ? "language" : "missing")
             : (command->IsStub == true ? "stub" : (command->IsParameter == true ? "parameter" : "done"));
         commandReport += fmt::format("{}{}:{}:{}:{}", commandReport.empty() == true ? "" : ";", commandUse.first, commandUse.second.first, commandUse.second.second.size(), status);
     }
@@ -634,6 +634,12 @@ void ROWOWMod::SetupNpcRunContext(ROWOWScriptContext& context, Player* player, R
         context.PlayerVariables = &identity->PlayerVariables;
         context.AccountVariables = &identity->AccountVariables;
     }
+}
+
+bool ROWOWMod::IsItemUseBlockedByNpc(Player* player)
+{
+    ROWOWIdentity* identity = GetIdentity(player);
+    return identity->NpcRun != nullptr && identity->NpcRun->IsItemUseDisabled == true;
 }
 
 bool ROWOWMod::StartNpcRun(Player* player, ROWOWNpc const* npc, std::string const& label, ROWOWScriptDialog* dialog)
@@ -1147,9 +1153,11 @@ void ROWOWMod::UpdateNpcScripts(uint32 diff)
     std::vector<ROWOWScriptMobKill> kills;
     std::vector<std::pair<uint32, ObjectGuid>> killedMobs;
     std::vector<ROWOWPendingScriptMob> loadedMapMobs;
+    std::vector<ROWOWNpcMapWarp> mapWarps;
     {
         std::lock_guard<std::mutex> lock(NpcStateMutex);
         dueEvents.swap(PendingNpcEvents);
+        mapWarps.swap(PendingNpcMapWarps);
         visibilityChangedIDs.swap(NpcVisibilityChangedIDs);
         announcements.swap(PendingNpcAnnouncements);
         kills.swap(PendingScriptMobKills);
@@ -1267,6 +1275,47 @@ void ROWOWMod::UpdateNpcScripts(uint32 diff)
         Map* map = sMapMgr->FindBaseNonInstanceMap(killedMob.first);
         if (Creature* creature = map != nullptr ? map->GetCreature(killedMob.second) : nullptr)
             creature->DespawnOrUnsummon();
+    }
+
+    // mapwarp and areawarp: the players in the RO form on the map (or in the box) go
+    for (ROWOWNpcMapWarp const& mapWarp : mapWarps)
+    {
+        Map* map = sMapMgr->FindBaseNonInstanceMap(mapWarp.MapID);
+        if (map == nullptr)
+            continue;
+        std::vector<Player*> warpedPlayers;
+        map->DoForAllPlayers([this, &mapWarp, &warpedPlayers](Player* player)
+        {
+            if (IsInROForm(player) == false || player->IsBeingTeleported() == true)
+                return;
+            int32 x = 0, y = 0;
+            GetUnitCell(player, x, y);
+            if (mapWarp.X1 >= 0 && (x < std::min(mapWarp.X1, mapWarp.X2) || x > std::max(mapWarp.X1, mapWarp.X2) || y < std::min(mapWarp.Y1, mapWarp.Y2) ||
+                y > std::max(mapWarp.Y1, mapWarp.Y2)))
+                return;
+            warpedPlayers.push_back(player);
+        });
+        for (Player* player : warpedPlayers)
+        {
+            int32 destX = mapWarp.DestX;
+            int32 destY = mapWarp.DestY;
+            if (mapWarp.DestX2 >= 0 && mapWarp.DestY2 >= 0)
+            {
+                destX = int32(urand(uint32(std::min(mapWarp.DestX, mapWarp.DestX2)), uint32(std::max(mapWarp.DestX, mapWarp.DestX2))));
+                destY = int32(urand(uint32(std::min(mapWarp.DestY, mapWarp.DestY2)), uint32(std::max(mapWarp.DestY, mapWarp.DestY2))));
+            }
+            WarpPlayerToCell(player, mapWarp.DestMapName, destX, destY);
+        }
+    }
+
+    // map_getmapdata(m)->users for getmapusers, as of now (the map threads read it until the next update)
+    {
+        std::unordered_map<uint32, uint32> mapUserCounts;
+        for (auto const& mapGridByMapID : MapGridsByMapID)
+            if (Map* map = sMapMgr->FindBaseNonInstanceMap(mapGridByMapID.first))
+                mapUserCounts[mapGridByMapID.first] = uint32(map->GetPlayers().getSize());
+        std::lock_guard<std::mutex> lock(NpcStateMutex);
+        MapUserCounts.swap(mapUserCounts);
     }
 
     // Runs with no player waking from sleep
@@ -1456,14 +1505,36 @@ public:
         Player* killerPlayer = killer != nullptr ? killer->GetCharmerOrOwnerPlayerOrPlayerItself() : nullptr;
         if (killerPlayer != nullptr && killerPlayer->GetMap() != unit->GetMap())
             killerPlayer = nullptr;
+        // The ids the events read (pc_setparam's SP_KILLERRID/SP_KILLEDRID/SP_KILLEDGID): a player's is its account (rAthena's bl id), a
+        // monster's killedrid its mob_db Id and killedgid the creature
+        auto getRID = [](Unit* ridUnit) -> int64
+        {
+            if (Player* ridPlayer = ridUnit != nullptr ? ridUnit->ToPlayer() : nullptr)
+                return ridPlayer->GetSession() != nullptr ? int64(ridPlayer->GetSession()->GetAccountId()) : 0;
+            return ridUnit != nullptr ? int64(ridUnit->GetGUID().GetCounter()) : 0;
+        };
         if (unit->IsCreature() == true)
         {
+            if (killerPlayer != nullptr && ROWOW->IsInROForm(killerPlayer) == true)
+            {
+                // mob_dead: the killer's (and its party's) hunting quests, then the kill's ids for the monster's event or OnNPCKillEvent
+                ROWOW->QuestKillUpdate(unit->ToCreature(), killerPlayer);
+                ROWOWIdentity* killerIdentity = ROWOW->GetIdentity(killerPlayer);
+                killerIdentity->KilledGID = int64(unit->GetGUID().GetCounter());
+                killerIdentity->KilledRID = int64(ROWOW->GetROMobID(unit->ToCreature()));
+                killerIdentity->KillerRID = getRID(killerPlayer);
+            }
             if (ROWOW->OnScriptMobDeath(unit->ToCreature(), killer) == false && killerPlayer != nullptr)
                 ROWOW->RunPlayerEvent(killerPlayer, ROWOW_NPC_EVENT_KILL_NPC);
             return;
         }
         if (unit->IsPlayer() == false)
             return;
+        // pc_dead: the dead player's killerrid, then the killer's killedrid
+        if (ROWOW->IsInROForm(unit->ToPlayer()) == true)
+            ROWOW->GetIdentity(unit->ToPlayer())->KillerRID = killer != nullptr && killer->IsInMap(unit) == true ? getRID(killer) : 0;
+        if (killerPlayer != nullptr && killerPlayer != unit && ROWOW->IsInROForm(killerPlayer) == true)
+            ROWOW->GetIdentity(killerPlayer)->KilledRID = getRID(unit);
         ROWOW->RunPlayerEvent(unit->ToPlayer(), ROWOW_NPC_EVENT_DIE);
         if (killerPlayer != nullptr && killerPlayer != unit)
             ROWOW->RunPlayerEvent(killerPlayer, ROWOW_NPC_EVENT_KILL_PC);

@@ -130,6 +130,22 @@ struct ROWOWScriptMobKill
     bool IsAll = false;
 };
 
+// A warp of other players for the world update (mapwarp, areawarp): the players in the RO form on a map, or in a box of it (X1 -1 for the
+// whole map), go to the destination cell (or a random cell of the destination box, DestX2/DestY2 -1 for none)
+struct ROWOWNpcMapWarp
+{
+    uint32 MapID = 0;
+    int32 X1 = -1;
+    int32 Y1 = -1;
+    int32 X2 = -1;
+    int32 Y2 = -1;
+    std::string DestMapName;
+    int32 DestX = 0;
+    int32 DestY = 0;
+    int32 DestX2 = -1;
+    int32 DestY2 = -1;
+};
+
 // The NPC dialog going to the chat, for GM testing (.ro npc talk -chat): .ro npc next / select / input / close answer it
 class ROWOWChatScriptDialog : public ROWOWScriptDialog
 {

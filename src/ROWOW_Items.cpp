@@ -531,19 +531,7 @@ void ROWOWMod::LoadItemScriptData()
         // warp "<map>",<x>,<y>: "SavePoint" and "Random" are the save point and a random spot on the map
         if (context.AttachedPlayer == nullptr || arguments.empty() == true)
             return ROWOWScriptValue::FromNumber(0);
-        std::string mapName = arguments[0].GetText();
-        if (mapName == "SavePoint" || mapName == "Save")
-            TeleportToSavePoint(context.AttachedPlayer);
-        else if (mapName == "Random")
-            TeleportToRandomSpot(context.AttachedPlayer);
-        else
-        {
-            ROWOWPosition destination;
-            if (GetCellPosition(GetMapIDByMapName(mapName), GetArgumentNumber(arguments, 1, 0), GetArgumentNumber(arguments, 2, 0), destination) == true)
-                context.AttachedPlayer->TeleportTo(destination.MapID, destination.X, destination.Y, destination.Z, context.AttachedPlayer->GetOrientation());
-            else
-                LOG_ERROR("module.ROWOW", "ROWOWMod warp: no RO cell {},{} on map '{}'", GetArgumentNumber(arguments, 1, 0), GetArgumentNumber(arguments, 2, 0), mapName);
-        }
+        WarpPlayerToCell(context.AttachedPlayer, arguments[0].GetText(), GetArgumentNumber(arguments, 1, 0), GetArgumentNumber(arguments, 2, 0));
         return ROWOWScriptValue::FromNumber(0);
     });
     ROWOWSCRIPT->RegisterCommand("getexp", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
@@ -966,6 +954,10 @@ bool ROWOWMod::PCIsUseItem(Player* player, Item const* item, bool isReporting)
         return false;
     }
 
+    // A dialog that turned items off (disable_items: npc_id with no npc_item_flag)
+    if (IsItemUseBlockedByNpc(player) == true)
+        return false;
+
     // Statuses that keep the player from using items (Hiding, Stomach Ache...)
     if (ROWOWStatusChange const* sc = GetStatusChange(static_cast<Unit const*>(player)); sc != nullptr && sc->Cant.Consume == true)
         return false;
@@ -1031,6 +1023,23 @@ bool ROWOWMod::PCIsUseItem(Player* player, Item const* item, bool isReporting)
         return false;
     }
     return true;
+}
+
+void ROWOWMod::WarpPlayerToCell(Player* player, std::string const& mapName, int32 x, int32 y)
+{
+    // pc_setpos for a script's warp: "SavePoint" and "Random" are the save point and a random spot on the map
+    if (mapName == "SavePoint" || mapName == "Save")
+        TeleportToSavePoint(player);
+    else if (mapName == "Random")
+        TeleportToRandomSpot(player);
+    else
+    {
+        ROWOWPosition destination;
+        if (GetCellPosition(GetMapIDByMapName(mapName), x, y, destination) == true)
+            player->TeleportTo(destination.MapID, destination.X, destination.Y, destination.Z, player->GetOrientation());
+        else
+            LOG_ERROR("module.ROWOW", "ROWOWMod warp: no RO cell {},{} on map '{}'", x, y, mapName);
+    }
 }
 
 void ROWOWMod::PCUseItem(Player* player, ObjectGuid itemGUID)

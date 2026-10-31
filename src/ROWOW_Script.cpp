@@ -997,15 +997,16 @@ namespace
         void EmitCall(string const& name, uint32 argumentCount, vector<size_t> const& argumentStarts)
         {
             string lowerName = ToLower(name);
+            if (Engine.IsNpcLanguage == true && LocalFunctionNames.find(lowerName) != LocalFunctionNames.end())
+            {
+                // The script's own function (not a command, so not counted as one)
+                EmitLabelJump(ROWOW_SCRIPT_OP_CALL_SUB, lowerName, true, int64(argumentCount));
+                return;
+            }
             CountUse(lowerName);
             if (Engine.IsNpcLanguage == true && lowerName == "callfunc")
             {
                 Emit(ROWOW_SCRIPT_OP_CALL_FUNCTION, 0, int64(argumentCount));
-                return;
-            }
-            if (Engine.IsNpcLanguage == true && LocalFunctionNames.find(lowerName) != LocalFunctionNames.end())
-            {
-                EmitLabelJump(ROWOW_SCRIPT_OP_CALL_SUB, lowerName, true, int64(argumentCount));
                 return;
             }
             int32 commandIndex = Engine.GetCommandIndex(name);
@@ -1240,7 +1241,6 @@ namespace
                 if (Engine.IsNpcLanguage == true && LocalFunctionNames.find(ToLower(token.Text)) != LocalFunctionNames.end())
                 {
                     // The script's own function called without arguments or parentheses
-                    CountUse(token.Text);
                     EmitLabelJump(ROWOW_SCRIPT_OP_CALL_SUB, token.Text, true, 0);
                     return;
                 }
@@ -2079,6 +2079,25 @@ bool ROWOWScriptEngine::Execute(ROWOWScriptContext& context, bool isLenient) con
                 {
                     context.Stack.resize(context.Stack.size() - argumentCount);
                     context.Stack.push_back(ROWOWScriptValue::FromNumber(0));
+                    break;
+                }
+                if (command == nullptr && context.IsNpcRun == true && instruction.Argument < 0 &&
+                    GetFunction(script.Strings[size_t(-instruction.Argument - 1)]) != nullptr && context.Stack.size() >= argumentCount)
+                {
+                    // A global function called by its name (rAthena's C_USERFUNC: "F_GetNumSuffix(1)" is callfunc "F_GetNumSuffix",1)
+                    if (context.Frames.size() >= MAX_FRAMES)
+                    {
+                        stop("calls nested too deep");
+                        break;
+                    }
+                    ROWOWScriptFrame calledFrame;
+                    calledFrame.Script = GetFunction(script.Strings[size_t(-instruction.Argument - 1)]);
+                    calledFrame.ReturnIndex = context.InstructionIndex;
+                    calledFrame.Arguments.assign(context.Stack.end() - argumentCount, context.Stack.end());
+                    context.Stack.resize(context.Stack.size() - argumentCount);
+                    calledFrame.StackBase = context.Stack.size();
+                    context.Frames.push_back(std::move(calledFrame));
+                    context.InstructionIndex = 0;
                     break;
                 }
                 if (command == nullptr && context.IsNpcRun == true)

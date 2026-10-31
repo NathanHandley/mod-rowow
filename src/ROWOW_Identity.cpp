@@ -413,13 +413,19 @@ bool ROWOWMod::GetCellPosition(uint32 mapID, int32 cellX, int32 cellY, ROWOWPosi
     if (mapGrid == nullptr)
         return false;
 
-    // The ground height from the map's terrain and models, as the .go commands find it (the map may not be the player's)
+    // The ground height (the map may not be the player's).  An RO map's ground is its models: their highest floor, which is where the client
+    // lands on the cell from above.  The terrain under them isn't the ground (the converted terrain is up to 70 yards above an indoor map's
+    // floor, and falling from it kills), so it's only the answer when the models' collision isn't loaded (a map no one is on): then
+    // the arrival puts the player down on the floor (CheckArrivalFloor)
     Map* map = sMapMgr->CreateBaseMap(mapID);
     if (map == nullptr)
         return false;
     float x = mapGrid->GetCellCenterWorldX(cellY);
     float y = mapGrid->GetCellCenterWorldY(cellX);
-    float z = std::max(map->GetHeight(x, y, MAX_HEIGHT), map->GetWaterLevel(x, y));
+    float z = map->GetMapCollisionData().GetStaticTree().getHeight(x, y, MAX_HEIGHT, MAX_FALL_DISTANCE);
+    if (z <= INVALID_HEIGHT)
+        z = map->GetHeight(x, y, MAX_HEIGHT);
+    z = std::max(z, map->GetWaterLevel(x, y));
     if (z <= INVALID_HEIGHT)
         return false;
     positionOut.IsSet = true;
@@ -429,6 +435,25 @@ bool ROWOWMod::GetCellPosition(uint32 mapID, int32 cellX, int32 cellY, ROWOWPosi
     positionOut.Z = z + 0.5f; // A little above, so arriving there never starts under the ground
     positionOut.O = 0;
     return true;
+}
+
+void ROWOWMod::CheckArrivalFloor(Player* player)
+{
+    // Once after arriving on an RO map in the form (its map's thread, the grid around it loaded): a player left in the air above the floor
+    // (an arrival worked out before the map's models were loaded, see GetCellPosition) is put down on it, as RO has no falling
+    ROWOWIdentity* identity = GetIdentity(player);
+    if (identity->IsArrivalFloorCheckPending == false || player->IsBeingTeleported() == true)
+        return;
+    identity->IsArrivalFloorCheckPending = false;
+    if (player->GetTransport() != nullptr || player->IsFlying() == true)
+        return;
+    Map* map = player->GetMap();
+    float floorZ = map->GetMapCollisionData().GetStaticTree().getHeight(player->GetPositionX(), player->GetPositionY(), player->GetPositionZ() + 1.0f, MAX_FALL_DISTANCE);
+    if (floorZ <= INVALID_HEIGHT)
+        return;
+    floorZ = std::max(floorZ, map->GetWaterLevel(player->GetPositionX(), player->GetPositionY()));
+    if (player->GetPositionZ() - floorZ > ROWOW_ARRIVAL_FLOOR_TOLERANCE)
+        player->NearTeleportTo(player->GetPositionX(), player->GetPositionY(), floorZ + 0.5f, player->GetOrientation());
 }
 
 ROWOWIdentity* ROWOWMod::GetIdentity(Player* player)
@@ -510,6 +535,7 @@ ROWOWIdentity* ROWOWMod::GetIdentity(Player* player)
     }
     LoadIdentityCart(player, *identity);
     LoadIdentityMemo(player, *identity);
+    LoadIdentityQuests(player, *identity);
     PCCalcSkillTree(*identity);
     return identity;
 }
@@ -571,6 +597,7 @@ void ROWOWMod::SaveIdentity(Player* player, CharacterDatabaseTransaction trans)
     SaveIdentityStatusChanges(player, *identity, trans);
     SaveIdentityCart(player, *identity, trans);
     SaveIdentityMemo(player, *identity, trans);
+    SaveIdentityQuests(player, *identity, trans);
 }
 
 bool ROWOWMod::IsSpellKeptInROForm(SpellInfo const* spellInfo) const
@@ -633,6 +660,8 @@ void ROWOWMod::EnterROForm(Player* player)
         identity->AreCartItemsChanged = true;
         identity->MemoPoints.fill(ROWOWMemoPoint());
         identity->AreMemoPointsChanged = true;
+        identity->Quests.clear();
+        identity->AreQuestsChanged = true;
         identity->Option = 0;
         identity->IsNewIdentityPending = true;
     }

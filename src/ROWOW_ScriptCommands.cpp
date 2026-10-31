@@ -35,6 +35,8 @@
 #include "ROWOW.h"
 
 #include <ctime>
+#include <mutex>
+#include <set>
 
 using namespace std;
 
@@ -106,6 +108,16 @@ namespace
             }
         }
         return count;
+    }
+
+    // A stub command (one of a system that isn't here, or isn't in yet) says so in the log the first time a run uses it
+    std::mutex LoggedStubCommandMutex;
+    std::set<std::string> LoggedStubCommands;
+    void LogStubCommandOnce(std::string const& commandName, char const* reason)
+    {
+        std::lock_guard<std::mutex> lock(LoggedStubCommandMutex);
+        if (LoggedStubCommands.insert(commandName).second == true)
+            LOG_INFO("module.ROWOW", "ROWOWScriptEngine: the NPC scripts' command '{}' does nothing here: {}", commandName, reason);
     }
 
     // The options of a menu's strings joined as rAthena sends them, split for the dialog
@@ -960,6 +972,664 @@ void ROWOWMod::RegisterNpcScriptCommands()
         queueKill(GetMapIDByMapName(GetTextArgument(arguments, 0)), std::string(), true);
         return ROWOWScriptValue::FromNumber(0);
     });
+
+    // The quest log (R8, ROWOW_Quest.cpp: quest.cpp).  The <char_id> argument (script_charid2sd) may only name the attached player: a run
+    // touches no other player's quests
+    auto getQuestPlayer = [](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments, size_t charIDIndex, char const* commandName) -> Player*
+    {
+        Player* player = GetAttachedPlayer(context, commandName);
+        if (player != nullptr && charIDIndex < arguments.size() && arguments[charIDIndex].GetNumber() != int64(player->GetGUID().GetCounter()))
+        {
+            Fail(context, std::string(commandName) + " of a character other than the attached one");
+            return nullptr;
+        }
+        return player;
+    };
+    auto reportQuestError = [](ROWOWScriptContext& context, char const* commandName)
+    {
+        // script_reportsrc and script_reportfunc
+        LOG_ERROR("module.ROWOW", "{} failed in the script of {}", commandName, context.Npc != nullptr ? context.Npc->UniqueName : std::string("a function"));
+    };
+    engine->RegisterCommand("setquest", [this, getQuestPlayer, reportQuestError](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // setquest <ID>{,<char_id>}
+        if (Player* player = getQuestPlayer(context, arguments, 1, "setquest"))
+            if (QuestAdd(player, uint32(GetArgument(arguments, 0, 0))) == -1)
+                reportQuestError(context, "setquest");
+        return ROWOWScriptValue::FromNumber(0);
+    });
+    engine->RegisterCommand("erasequest", [this, getQuestPlayer, reportQuestError](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // erasequest <ID>{,<char_id>}
+        if (Player* player = getQuestPlayer(context, arguments, 1, "erasequest"))
+            if (QuestDelete(player, uint32(GetArgument(arguments, 0, 0))) == -1)
+                reportQuestError(context, "erasequest");
+        return ROWOWScriptValue::FromNumber(0);
+    });
+    engine->RegisterCommand("completequest", [this, getQuestPlayer](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // completequest <ID>{,<char_id>}
+        if (Player* player = getQuestPlayer(context, arguments, 1, "completequest"))
+            QuestUpdateStatus(player, uint32(GetArgument(arguments, 0, 0)), ROWOW_QUEST_STATE_COMPLETE);
+        return ROWOWScriptValue::FromNumber(0);
+    });
+    engine->RegisterCommand("changequest", [this, getQuestPlayer, reportQuestError](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // changequest <ID>,<ID2>{,<char_id>}
+        if (Player* player = getQuestPlayer(context, arguments, 2, "changequest"))
+            if (QuestChange(player, uint32(GetArgument(arguments, 0, 0)), uint32(GetArgument(arguments, 1, 0))) == -1)
+                reportQuestError(context, "changequest");
+        return ROWOWScriptValue::FromNumber(0);
+    });
+    engine->RegisterCommand("checkquest", [this, getQuestPlayer](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // checkquest(<ID>{,PLAYTIME|HUNTING{,<char_id>}}): -1 when the character doesn't have it
+        Player* player = getQuestPlayer(context, arguments, 2, "checkquest");
+        if (player == nullptr)
+            return ROWOWScriptValue::FromNumber(-1);
+        return ROWOWScriptValue::FromNumber(QuestCheck(*context.Identity, uint32(GetArgument(arguments, 0, 0)), uint8(GetArgument(arguments, 1, ROWOW_QUEST_CHECK_HAVEQUEST))));
+    });
+    engine->RegisterCommand("isbegin_quest", [this, getQuestPlayer](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // isbegin_quest(<ID>{,<char_id>}): 0 not taken, 1 taken, 2 complete
+        Player* player = getQuestPlayer(context, arguments, 1, "isbegin_quest");
+        if (player == nullptr)
+            return ROWOWScriptValue::FromNumber(0);
+        int32 state = QuestCheck(*context.Identity, uint32(GetArgument(arguments, 0, 0)), ROWOW_QUEST_CHECK_HAVEQUEST);
+        return ROWOWScriptValue::FromNumber(state + (state < 1 ? 1 : 0));
+    });
+
+    // The die and kill events' ids (set by OnUnitDeath, pc_dead and mob_dead), which scripts may also set
+    struct KillParameter
+    {
+        char const* Name;
+        int64 ROWOWIdentity::* Value;
+    };
+    for (KillParameter const& killParameter : { KillParameter{ "KillerRID", &ROWOWIdentity::KillerRID }, KillParameter{ "KilledRID", &ROWOWIdentity::KilledRID },
+        KillParameter{ "KilledGID", &ROWOWIdentity::KilledGID } })
+    {
+        int64 ROWOWIdentity::* value = killParameter.Value;
+        engine->RegisterParameter(killParameter.Name, [value](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const&)
+        {
+            return ROWOWScriptValue::FromNumber(context.Identity != nullptr ? context.Identity->*value : 0);
+        });
+        engine->SetParameterSetter(killParameter.Name, [value](ROWOWScriptContext& context, ROWOWScriptValue const& newValue)
+        {
+            if (context.Identity != nullptr)
+                context.Identity->*value = newValue.GetNumber();
+        });
+    }
+
+    // Items while talking: pre-renewal lets the player use and put on items during a dialog (item_enabled_npc), until disable_items
+    engine->RegisterCommand("enable_items", [](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const&)
+    {
+        context.IsItemUseDisabled = false;
+        return ROWOWScriptValue::FromNumber(0);
+    });
+    engine->RegisterCommand("disable_items", [](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const&)
+    {
+        context.IsItemUseDisabled = true;
+        return ROWOWScriptValue::FromNumber(0);
+    });
+
+    // Warps of other players (the world update does them: the players may be on other maps) and map counts
+    auto queueMapWarp = [this](ROWOWNpcMapWarp const& mapWarp)
+    {
+        std::lock_guard<std::mutex> lock(NpcStateMutex);
+        PendingNpcMapWarps.push_back(mapWarp);
+    };
+    engine->RegisterCommand("mapwarp", [this, queueMapWarp](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // mapwarp "<from map>","<to map>",<x>,<y>{,<type>,<ID>}: everyone on the map (the guild and party filters aren't in)
+        ROWOWNpcMapWarp mapWarp;
+        mapWarp.MapID = GetMapIDByMapName(GetTextArgument(arguments, 0));
+        mapWarp.DestMapName = GetTextArgument(arguments, 1);
+        mapWarp.DestX = int32(GetArgument(arguments, 2, 0));
+        mapWarp.DestY = int32(GetArgument(arguments, 3, 0));
+        if (mapWarp.MapID != 0)
+            queueMapWarp(mapWarp);
+        return ROWOWScriptValue::FromNumber(0);
+    });
+    engine->RegisterCommand("areawarp", [this, queueMapWarp](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // areawarp "<from map>",<x1>,<y1>,<x2>,<y2>,"<to map>",<x3>,<y3>{,<x4>,<y4>}: everyone in the box, to the cell (or a random one of x3..x4,
+        // y3..y4)
+        ROWOWNpcMapWarp mapWarp;
+        mapWarp.MapID = GetMapIDByMapName(GetTextArgument(arguments, 0));
+        mapWarp.X1 = int32(GetArgument(arguments, 1, 0));
+        mapWarp.Y1 = int32(GetArgument(arguments, 2, 0));
+        mapWarp.X2 = int32(GetArgument(arguments, 3, 0));
+        mapWarp.Y2 = int32(GetArgument(arguments, 4, 0));
+        mapWarp.DestMapName = GetTextArgument(arguments, 5);
+        mapWarp.DestX = int32(GetArgument(arguments, 6, 0));
+        mapWarp.DestY = int32(GetArgument(arguments, 7, 0));
+        if (arguments.size() > 9)
+        {
+            mapWarp.DestX2 = int32(GetArgument(arguments, 8, 0));
+            mapWarp.DestY2 = int32(GetArgument(arguments, 9, 0));
+        }
+        if (mapWarp.MapID != 0)
+            queueMapWarp(mapWarp);
+        return ROWOWScriptValue::FromNumber(0);
+    });
+    engine->RegisterCommand("warpchar", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // warpchar "<map>",<x>,<y>,<char_id>: only the attached player can be warped from a run
+        Player* player = GetAttachedPlayer(context, "warpchar");
+        if (player != nullptr && GetArgument(arguments, 3, 0) == int64(player->GetGUID().GetCounter()))
+            WarpPlayerToCell(player, GetTextArgument(arguments, 0), int32(GetArgument(arguments, 1, 0)), int32(GetArgument(arguments, 2, 0)));
+        return ROWOWScriptValue::FromNumber(0);
+    });
+    engine->RegisterCommand("getmapusers", [this](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // getmapusers("<map>"): the players on it as of the last world update, -1 for a map that isn't converted
+        uint32 mapID = GetMapIDByMapName(GetTextArgument(arguments, 0));
+        if (mapID == 0)
+            return ROWOWScriptValue::FromNumber(-1);
+        std::lock_guard<std::mutex> lock(NpcStateMutex);
+        auto countIter = MapUserCounts.find(mapID);
+        return ROWOWScriptValue::FromNumber(countIter != MapUserCounts.end() ? int64(countIter->second) : 0);
+    });
+    engine->RegisterCommand("getareausers", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // getareausers("<map>",<x1>,<y1>,<x2>,<y2>): the players in the box; only the run's own map can be looked at (another map's players
+        // belong to its thread), so 0 for another
+        uint32 mapID = GetMapIDByMapName(GetTextArgument(arguments, 0));
+        Map* map = context.AttachedPlayer != nullptr ? context.AttachedPlayer->GetMap() : nullptr;
+        if (map == nullptr || map->GetId() != mapID)
+            return ROWOWScriptValue::FromNumber(0);
+        int32 x1 = int32(GetArgument(arguments, 1, 0)), y1 = int32(GetArgument(arguments, 2, 0));
+        int32 x2 = int32(GetArgument(arguments, 3, 0)), y2 = int32(GetArgument(arguments, 4, 0));
+        int64 count = 0;
+        map->DoForAllPlayers([this, x1, y1, x2, y2, &count](Player* player)
+        {
+            int32 x = 0, y = 0;
+            GetUnitCell(player, x, y);
+            if (x >= std::min(x1, x2) && x <= std::max(x1, x2) && y >= std::min(y1, y2) && y <= std::max(y1, y2))
+                count++;
+        });
+        return ROWOWScriptValue::FromNumber(count);
+    });
+
+    // Parties (a WoW group is the RO party), guilds and partners
+    engine->RegisterCommand("is_party_leader", [](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const&)
+    {
+        // is_party_leader({<party id>}): whether the attached player leads its group
+        Player* player = context.AttachedPlayer;
+        Group* group = player != nullptr ? player->GetGroup() : nullptr;
+        return ROWOWScriptValue::FromNumber(group != nullptr && group->GetLeaderGUID() == player->GetGUID() ? 1 : 0);
+    });
+    engine->RegisterCommand("getpartyname", [](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const&)
+    {
+        // WoW groups have no names: the leader's name stands in for a party that exists, "null" for none (rAthena's answer)
+        Player* player = context.AttachedPlayer;
+        Group* group = player != nullptr ? player->GetGroup() : nullptr;
+        if (group == nullptr)
+            return ROWOWScriptValue::FromText("null");
+        std::string leaderName;
+        for (Group::MemberSlot const& member : group->GetMemberSlots())
+            if (member.guid == group->GetLeaderGUID())
+                leaderName = member.name;
+        return ROWOWScriptValue::FromText(leaderName + "'s party");
+    });
+    engine->RegisterCommand("getpartymember", [](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // getpartymember <party id>{,<type>{,<array>}}: $@partymembercount, and $@partymembername$[] (0), $@partymembercid[] (1) or
+        // $@partymemberaid[] (2) of the attached player's group
+        Player* player = context.AttachedPlayer;
+        Group* group = player != nullptr ? player->GetGroup() : nullptr;
+        int64 type = GetArgument(arguments, 1, 0);
+        std::vector<ROWOWScriptValue> values;
+        if (group != nullptr)
+        {
+            for (Group::MemberSlot const& member : group->GetMemberSlots())
+            {
+                if (type == 0)
+                    values.push_back(ROWOWScriptValue::FromText(member.name));
+                else if (type == 1)
+                    values.push_back(ROWOWScriptValue::FromNumber(int64(member.guid.GetCounter())));
+                else
+                {
+                    Player* memberPlayer = ObjectAccessor::FindConnectedPlayer(member.guid);
+                    values.push_back(ROWOWScriptValue::FromNumber(memberPlayer != nullptr && memberPlayer->GetSession() != nullptr ? int64(memberPlayer->GetSession()->GetAccountId()) : 0));
+                }
+            }
+        }
+        std::string arrayName = type == 0 ? "$@partymembername$" : (type == 1 ? "$@partymembercid" : "$@partymemberaid");
+        std::lock_guard<std::mutex> lock(ROWOWSCRIPT->VariableMutex);
+        ROWOWSCRIPT->GlobalTempVariables.Set("$@partymembercount", 0, ROWOWScriptValue::FromNumber(int64(values.size())));
+        for (size_t index = 0; index < values.size(); index++)
+            ROWOWSCRIPT->GlobalTempVariables.Set(arrayName, uint32(index), values[index]);
+        return ROWOWScriptValue::FromNumber(0);
+    });
+    engine->RegisterCommand("getguildname", [](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // getguildname(<guild id>): "null" for none
+        Guild* guild = sGuildMgr->GetGuildById(uint32(GetArgument(arguments, 0, 0)));
+        return ROWOWScriptValue::FromText(guild != nullptr ? guild->GetName() : std::string("null"));
+    });
+    engine->RegisterCommand("getguildmaster", [](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // getguildmaster(<guild id>): its leader's name, "null" for none
+        Guild* guild = sGuildMgr->GetGuildById(uint32(GetArgument(arguments, 0, 0)));
+        if (guild == nullptr)
+            return ROWOWScriptValue::FromText("null");
+        Guild::Member const* leader = guild->GetMember(guild->GetLeaderGUID());
+        return ROWOWScriptValue::FromText(leader != nullptr ? leader->GetName() : std::string("null"));
+    });
+    engine->RegisterCommand("is_guild_leader", [](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const&)
+    {
+        Player* player = context.AttachedPlayer;
+        Guild* guild = player != nullptr && player->GetGuildId() != 0 ? sGuildMgr->GetGuildById(player->GetGuildId()) : nullptr;
+        return ROWOWScriptValue::FromNumber(guild != nullptr && guild->GetLeaderGUID() == player->GetGUID() ? 1 : 0);
+    });
+    engine->RegisterCommand("getpartnerid", [](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const&)
+    {
+        // Marriage is out of scope (plan section 8 item 10): nobody has a partner
+        return ROWOWScriptValue::FromNumber(0);
+    });
+
+    // Strings
+    engine->RegisterCommand("strtolower", [](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        return ROWOWScriptValue::FromText(ToLower(GetTextArgument(arguments, 0)));
+    });
+    engine->RegisterCommand("strtoupper", [](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        std::string text = GetTextArgument(arguments, 0);
+        for (char& curChar : text)
+            curChar = char(toupper((unsigned char)curChar));
+        return ROWOWScriptValue::FromText(text);
+    });
+    engine->RegisterCommand("charisalpha", [](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        std::string text = GetTextArgument(arguments, 0);
+        int64 index = GetArgument(arguments, 1, 0);
+        return ROWOWScriptValue::FromNumber(index >= 0 && size_t(index) < text.size() && isalpha((unsigned char)text[size_t(index)]) != 0 ? 1 : 0);
+    });
+    engine->RegisterCommand("strpos", [](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // strpos("<haystack>","<needle>"{,<offset>}): -1 when it isn't there
+        std::string haystack = GetTextArgument(arguments, 0);
+        size_t offset = size_t(std::max<int64>(0, GetArgument(arguments, 2, 0)));
+        size_t position = offset <= haystack.size() ? haystack.find(GetTextArgument(arguments, 1), offset) : std::string::npos;
+        return ROWOWScriptValue::FromNumber(position == std::string::npos ? -1 : int64(position));
+    });
+    engine->RegisterCommand("countstr", [](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // countstr("<haystack>","<needle>"{,<case sensitive>})
+        std::string haystack = GetTextArgument(arguments, 0);
+        std::string needle = GetTextArgument(arguments, 1);
+        if (GetArgument(arguments, 2, 1) == 0)
+        {
+            haystack = ToLower(haystack);
+            needle = ToLower(needle);
+        }
+        int64 count = 0;
+        for (size_t position = needle.empty() == true ? std::string::npos : haystack.find(needle); position != std::string::npos; position = haystack.find(needle, position + needle.size()))
+            count++;
+        return ROWOWScriptValue::FromNumber(count);
+    });
+    engine->RegisterCommand("replacestr", [](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // replacestr("<input>","<search>","<replace>"{,<case sensitive>{,<count>}})
+        std::string input = GetTextArgument(arguments, 0);
+        std::string search = GetTextArgument(arguments, 1);
+        std::string replace = GetTextArgument(arguments, 2);
+        bool isCaseSensitive = GetArgument(arguments, 3, 1) != 0;
+        int64 count = GetArgument(arguments, 4, 0);
+        if (search.empty() == true)
+            return ROWOWScriptValue::FromText(input);
+        std::string searchedInput = isCaseSensitive == true ? input : ToLower(input);
+        std::string searchedFor = isCaseSensitive == true ? search : ToLower(search);
+        std::string output;
+        size_t start = 0;
+        int64 replaced = 0;
+        for (size_t position = searchedInput.find(searchedFor); position != std::string::npos && (count <= 0 || replaced < count); position = searchedInput.find(searchedFor, start))
+        {
+            output += input.substr(start, position - start) + replace;
+            start = position + search.size();
+            replaced++;
+        }
+        return ROWOWScriptValue::FromText(output + input.substr(start));
+    });
+    engine->RegisterCommand("insertchar", [](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // insertchar("<text>","<char>",<index>)
+        std::string text = GetTextArgument(arguments, 0);
+        size_t index = size_t(std::clamp<int64>(GetArgument(arguments, 2, 0), 0, int64(text.size())));
+        return ROWOWScriptValue::FromText(text.insert(index, GetTextArgument(arguments, 1).substr(0, 1)));
+    });
+    engine->RegisterCommand("delchar", [](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // delchar("<text>",<index>)
+        std::string text = GetTextArgument(arguments, 0);
+        int64 index = GetArgument(arguments, 1, 0);
+        if (index >= 0 && size_t(index) < text.size())
+            text.erase(size_t(index), 1);
+        return ROWOWScriptValue::FromText(text);
+    });
+    engine->RegisterCommand("gettimestr", [](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // gettimestr("<strftime format>",<max length>{,<Unix time>})
+        time_t when = arguments.size() > 2 ? time_t(arguments[2].GetNumber()) : time(nullptr);
+        tm localTime = Acore::Time::TimeBreakdown(when);
+        size_t maxLength = size_t(std::clamp<int64>(GetArgument(arguments, 1, 0), 1, 256));
+        std::vector<char> buffer(maxLength + 1, '\0');
+        strftime(buffer.data(), maxLength, GetTextArgument(arguments, 0).c_str(), &localTime);
+        return ROWOWScriptValue::FromText(std::string(buffer.data()));
+    });
+    engine->RegisterCommand("sprintf", [](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // sprintf("<format>",...): C's format with %d/%i/%u/%x/%X/%o/%c (a number) and %s (a text), one value each, in order (no %n$ positions)
+        std::string format = GetTextArgument(arguments, 0);
+        std::string output;
+        size_t argumentIndex = 1;
+        for (size_t position = 0; position < format.size(); position++)
+        {
+            if (format[position] != '%')
+            {
+                output += format[position];
+                continue;
+            }
+            if (position + 1 < format.size() && format[position + 1] == '%')
+            {
+                output += '%';
+                position++;
+                continue;
+            }
+            size_t specEnd = position + 1;
+            while (specEnd < format.size() && strchr("diuxXocsfeEgG", format[specEnd]) == nullptr)
+                specEnd++;
+            if (specEnd >= format.size())
+            {
+                output += format.substr(position);
+                break;
+            }
+            std::string spec = format.substr(position, specEnd - position + 1);
+            char conversion = format[specEnd];
+            char buffer[512];
+            if (conversion == 's')
+                snprintf(buffer, sizeof(buffer), spec.c_str(), (argumentIndex < arguments.size() ? arguments[argumentIndex].GetText() : std::string()).c_str());
+            else if (strchr("feEgG", conversion) != nullptr)
+                snprintf(buffer, sizeof(buffer), spec.c_str(), double(argumentIndex < arguments.size() ? arguments[argumentIndex].GetNumber() : 0));
+            else
+            {
+                spec.insert(spec.size() - 1, "ll");
+                snprintf(buffer, sizeof(buffer), spec.c_str(), (long long)(argumentIndex < arguments.size() ? arguments[argumentIndex].GetNumber() : 0));
+            }
+            argumentIndex++;
+            output += buffer;
+            position = specEnd;
+        }
+        return ROWOWScriptValue::FromText(output);
+    });
+
+    // The player
+    engine->RegisterCommand("getsavepoint", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // getsavepoint(<0 map, 1 x, 2 y>)
+        if (context.Identity == nullptr || context.Identity->SavePoint.IsSet == false)
+            return GetArgument(arguments, 0, 0) == 0 ? ROWOWScriptValue::FromText(std::string()) : ROWOWScriptValue::FromNumber(0);
+        ROWOWPosition const& savePoint = context.Identity->SavePoint;
+        int32 x = 0, y = 0;
+        GetWorldCell(savePoint.MapID, savePoint.X, savePoint.Y, x, y);
+        switch (GetArgument(arguments, 0, 0))
+        {
+            case 0:
+            {
+                auto mapNameIter = MapNamesByMapID.find(savePoint.MapID);
+                return ROWOWScriptValue::FromText(mapNameIter != MapNamesByMapID.end() ? mapNameIter->second : std::string());
+            }
+            case 1: return ROWOWScriptValue::FromNumber(x);
+            case 2: return ROWOWScriptValue::FromNumber(y);
+            default: return ROWOWScriptValue::FromNumber(0);
+        }
+    });
+    engine->RegisterCommand("getgmlevel", [](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const&)
+    {
+        // The account's security level stands for the group level
+        return ROWOWScriptValue::FromNumber(context.AttachedPlayer != nullptr ? int64(context.AttachedPlayer->GetSession()->GetSecurity()) : 0);
+    });
+    engine->RegisterCommand("vip_status", [](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const&)
+    {
+        // No VIP system (rAthena's VIP_SCRIPT off): never VIP
+        return ROWOWScriptValue::FromNumber(0);
+    });
+    engine->RegisterCommand("basicskillcheck", [this](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const&)
+    {
+        auto flagIter = BattleFlagsByName.find("basic_skill_check");
+        return ROWOWScriptValue::FromNumber(flagIter != BattleFlagsByName.end() ? flagIter->second : 1);
+    });
+    engine->RegisterCommand("dispbottom", [](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // dispbottom "<message>"{,<color>}: a line in the player's chat
+        if (Player* player = GetAttachedPlayer(context, "dispbottom"))
+            ChatHandler(player->GetSession()).SendSysMessage(GetTextArgument(arguments, 0));
+        return ROWOWScriptValue::FromNumber(0);
+    });
+    for (char const* logCommandName : { "logmes", "debugmes" })
+    {
+        engine->RegisterCommand(logCommandName, [logCommandName](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+        {
+            LOG_INFO("module.ROWOW", "{} ({}): {}", logCommandName, context.Npc != nullptr ? context.Npc->UniqueName : std::string("a function"), GetTextArgument(arguments, 0));
+            return ROWOWScriptValue::FromNumber(0);
+        });
+    }
+    engine->RegisterCommand("progressbar", [](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // progressbar "<color>",<seconds>: the player waits that long (no bar drawn yet; moving doesn't cancel it), as sleep2 does
+        Player* player = GetAttachedPlayer(context, "progressbar");
+        if (player == nullptr)
+            return ROWOWScriptValue::FromNumber(0);
+        context.Wait = ROWOW_SCRIPT_WAIT_SLEEP;
+        context.SleepUntil = uint64(GameTime::GetGameTimeMS().count()) + uint64(std::max<int64>(0, GetArgument(arguments, 1, 0))) * 1000;
+        return ROWOWScriptValue::FromNumber(1);
+    });
+    engine->RegisterCommand("unloadnpc", [this](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // unloadnpc "<NPC>": gone for good (NPCs are startup data here, so it stays disabled until the server restarts)
+        SetNpcEnabled(GetNpcByName(GetTextArgument(arguments, 0)), false);
+        return ROWOWScriptValue::FromNumber(0);
+    });
+    engine->RegisterCommand("nude", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const&)
+    {
+        // nude: everything worn comes off (pc_unequipitem flag 2, then one status calculation)
+        Player* player = GetAttachedPlayer(context, "nude");
+        if (player == nullptr)
+            return ROWOWScriptValue::FromNumber(0);
+        std::vector<uint32> equipPositions;
+        for (auto const& itemGUIDByEquipPosition : context.Identity->ItemGUIDsByEquipPosition)
+            equipPositions.push_back(itemGUIDByEquipPosition.first);
+        for (uint32 equipPosition : equipPositions)
+            PCUnequipItem(player, equipPosition, 2);
+        RefreshROForm(player);
+        return ROWOWScriptValue::FromNumber(0);
+    });
+    engine->RegisterCommand("getlook", [](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // getlook(<LOOK_*>): the hair style (1) and color (6); the clothes color (7) isn't kept (no palettes yet), so 0
+        if (context.Identity == nullptr)
+            return ROWOWScriptValue::FromNumber(-1);
+        switch (GetArgument(arguments, 0, 0))
+        {
+            case 1: return ROWOWScriptValue::FromNumber(context.Identity->HairStyle);
+            case 6: return ROWOWScriptValue::FromNumber(context.Identity->HairColor);
+            case 7: return ROWOWScriptValue::FromNumber(0);
+            default: return ROWOWScriptValue::FromNumber(-1);
+        }
+    });
+    engine->RegisterCommand("setlook", [](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // setlook <LOOK_*>,<value>: the stylists' hair style (1) and color (6), kept with the identity (the sprite shows them with R9's
+        // heads); the clothes color (7) isn't kept yet
+        if (context.Identity == nullptr)
+            return ROWOWScriptValue::FromNumber(0);
+        int64 value = GetArgument(arguments, 1, 0);
+        switch (GetArgument(arguments, 0, 0))
+        {
+            case 1: context.Identity->HairStyle = uint8(std::clamp<int64>(value, 0, 255)); break;
+            case 6: context.Identity->HairColor = uint8(std::clamp<int64>(value, 0, 255)); break;
+            default: break;
+        }
+        return ROWOWScriptValue::FromNumber(0);
+    });
+    engine->RegisterCommand("checkcart", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const&)
+    {
+        return ROWOWScriptValue::FromNumber(context.AttachedPlayer != nullptr && PCIsCartOn(context.AttachedPlayer) == true ? 1 : 0);
+    });
+    engine->RegisterCommand("setcart", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // setcart {<type>}: a Kafra's cart rental (pc_setcart: it needs Pushcart), 0 takes it off
+        if (Player* player = GetAttachedPlayer(context, "setcart"))
+            PCSetCart(player, int32(GetArgument(arguments, 0, 1)));
+        return ROWOWScriptValue::FromNumber(0);
+    });
+    engine->RegisterCommand("checkriding", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const&)
+    {
+        return ROWOWScriptValue::FromNumber(context.AttachedPlayer != nullptr && PCIsRiding(context.AttachedPlayer) == true ? 1 : 0);
+    });
+    engine->RegisterCommand("setriding", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // setriding {<flag>}: a Peco Peco breeder's (it needs Riding)
+        if (Player* player = GetAttachedPlayer(context, "setriding"))
+            PCSetRiding(player, GetArgument(arguments, 0, 1) != 0);
+        return ROWOWScriptValue::FromNumber(0);
+    });
+    engine->RegisterCommand("checkfalcon", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const&)
+    {
+        return ROWOWScriptValue::FromNumber(context.AttachedPlayer != nullptr && PCIsFalcon(context.AttachedPlayer) == true ? 1 : 0);
+    });
+    engine->RegisterCommand("setfalcon", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // setfalcon {<flag>}: the Hunter guild's falcon breeder (it needs Falconry Mastery)
+        if (Player* player = GetAttachedPlayer(context, "setfalcon"))
+            PCSetFalcon(player, GetArgument(arguments, 0, 1) != 0);
+        return ROWOWScriptValue::FromNumber(0);
+    });
+    for (char const* noMountCommandName : { "ismounting", "checkwug", "checkdragon", "checkmadogear" })
+    {
+        // The renewal and third job mounts (and the cash mount) don't exist in pre-renewal
+        engine->RegisterCommand(noMountCommandName, [](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const&) { return ROWOWScriptValue::FromNumber(0); });
+    }
+    engine->RegisterCommand("getiteminfo", [this](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // getiteminfo(<item id or "AegisName">,<ITEMINFO_*>): -1 for an unknown item or a field not kept
+        uint32 itemID = arguments.empty() == false && arguments[0].IsString == true ? 0 : uint32(GetArgument(arguments, 0, 0));
+        if (arguments.empty() == false && arguments[0].IsString == true)
+        {
+            auto itemIDIter = ItemIDsByAegisName.find(ToLower(arguments[0].Text));
+            itemID = itemIDIter != ItemIDsByAegisName.end() ? itemIDIter->second : 0;
+        }
+        auto itemTemplateIDIter = ItemTemplateIDsByItemID.find(itemID);
+        auto itemIter = itemTemplateIDIter != ItemTemplateIDsByItemID.end() ? ItemsByItemTemplateID.find(itemTemplateIDIter->second) : ItemsByItemTemplateID.end();
+        if (itemIter == ItemsByItemTemplateID.end())
+            return ROWOWScriptValue::FromNumber(-1);
+        ROWOWItem const& item = itemIter->second;
+        switch (GetArgument(arguments, 1, -1))
+        {
+            case 0: return ROWOWScriptValue::FromNumber(item.Buy); // ITEMINFO_BUY
+            case 1: return ROWOWScriptValue::FromNumber(item.Buy / 2); // ITEMINFO_SELL (item_db's default)
+            case 2: return ROWOWScriptValue::FromNumber(item.Type); // ITEMINFO_TYPE
+            case 4: return ROWOWScriptValue::FromNumber(item.Gender); // ITEMINFO_GENDER
+            case 5: return ROWOWScriptValue::FromNumber(int64(item.Locations)); // ITEMINFO_LOCATIONS
+            case 6: return ROWOWScriptValue::FromNumber(item.Weight); // ITEMINFO_WEIGHT
+            case 7: return ROWOWScriptValue::FromNumber(item.Attack); // ITEMINFO_ATTACK
+            case 8: return ROWOWScriptValue::FromNumber(item.Defense); // ITEMINFO_DEFENSE
+            case 9: return ROWOWScriptValue::FromNumber(item.Range); // ITEMINFO_RANGE
+            case 10: return ROWOWScriptValue::FromNumber(item.Slots); // ITEMINFO_SLOT
+            case 12: return ROWOWScriptValue::FromNumber(int64(item.EquipLevelMin)); // ITEMINFO_EQUIPLEVELMIN
+            case 13: return ROWOWScriptValue::FromNumber(item.WeaponLevel); // ITEMINFO_WEAPONLEVEL
+            case 15: return ROWOWScriptValue::FromNumber(int64(item.EquipLevelMax)); // ITEMINFO_EQUIPLEVELMAX
+            case 17: return ROWOWScriptValue::FromNumber(int64(item.ItemID)); // ITEMINFO_ID
+            case 19: return ROWOWScriptValue::FromNumber(item.IsArmor == true ? 1 : 0); // ITEMINFO_ARMORLEVEL (pre-renewal armor is level 1)
+            default: return ROWOWScriptValue::FromNumber(-1);
+        }
+    });
+    engine->RegisterCommand("readbook", [](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const&)
+    {
+        // The client's book reader isn't in: the book doesn't open
+        return ROWOWScriptValue::FromNumber(0);
+    });
+
+    // Systems out of scope (plan section 8 item 10: War of Emperium, battlegrounds) or not here (instances): the commands answer "none" so
+    // the scripts' OnInit and dialogs go on, and do nothing
+    struct StubCommand
+    {
+        char const* Name;
+        char const* Reason;
+    };
+    char const* const WoEReason = "War of Emperium is out of scope (plan section 8 item 10)";
+    char const* const BattlegroundReason = "battlegrounds are out of scope (plan section 8 item 10)";
+    char const* const InstanceReason = "there are no RO instances";
+    char const* const MapCellReason = "map cells and flags can't be changed at run time yet";
+    for (StubCommand const& stubCommand : { StubCommand{ "getcastledata", WoEReason }, StubCommand{ "agitcheck", WoEReason }, StubCommand{ "agitcheck2", WoEReason },
+        StubCommand{ "guardian", WoEReason }, StubCommand{ "bg_get_data", BattlegroundReason }, StubCommand{ "instance_id", InstanceReason },
+        StubCommand{ "instance_check_party", InstanceReason } })
+    {
+        std::string name = stubCommand.Name;
+        char const* reason = stubCommand.Reason;
+        engine->RegisterCommand(name, [name, reason](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const&)
+        {
+            LogStubCommandOnce(name, reason);
+            return ROWOWScriptValue::FromNumber(0);
+        });
+        engine->SetStub(name);
+    }
+    for (StubCommand const& stubCommand : { StubCommand{ "setcastledata", WoEReason }, StubCommand{ "flagemblem", WoEReason }, StubCommand{ "gvgon", WoEReason },
+        StubCommand{ "gvgoff", WoEReason }, StubCommand{ "maprespawnguildid", WoEReason }, StubCommand{ "agitstart", WoEReason }, StubCommand{ "agitend", WoEReason },
+        StubCommand{ "agitstart2", WoEReason }, StubCommand{ "agitend2", WoEReason }, StubCommand{ "bg_warp", BattlegroundReason },
+        StubCommand{ "bg_monster", BattlegroundReason }, StubCommand{ "bg_reserve", BattlegroundReason }, StubCommand{ "bg_unbook", BattlegroundReason },
+        StubCommand{ "bg_leave", BattlegroundReason }, StubCommand{ "bg_desert", BattlegroundReason }, StubCommand{ "bg_destroy", BattlegroundReason },
+        StubCommand{ "bg_updatescore", BattlegroundReason }, StubCommand{ "bg_team_setxy", BattlegroundReason }, StubCommand{ "instance_warpall", InstanceReason },
+        StubCommand{ "setmapflag", MapCellReason }, StubCommand{ "removemapflag", MapCellReason }, StubCommand{ "setcell", MapCellReason },
+        StubCommand{ "setwall", MapCellReason }, StubCommand{ "delwall", MapCellReason }, StubCommand{ "setnpcdisplay", "NPC looks can't change yet (R9)" },
+        StubCommand{ "movenpc", "NPCs can't move yet" }, StubCommand{ "refineui", "the refine window is a renewal feature (feature.refineui is off)" },
+        StubCommand{ "waitingroom", "waiting rooms belong to the job tests (R8.3) and hold nobody yet" },
+        StubCommand{ "delwaitingroom", "waiting rooms belong to the job tests (R8.3)" },
+        StubCommand{ "enablewaitingroomevent", "waiting rooms belong to the job tests (R8.3)" },
+        StubCommand{ "disablewaitingroomevent", "waiting rooms belong to the job tests (R8.3)" },
+        StubCommand{ "warpwaitingpc", "waiting rooms belong to the job tests (R8.3): nobody to warp" },
+        StubCommand{ "kickwaitingroomall", "waiting rooms belong to the job tests (R8.3)" } })
+    {
+        std::string name = stubCommand.Name;
+        char const* reason = stubCommand.Reason;
+        engine->RegisterCommand(name, [name, reason](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const&)
+        {
+            LogStubCommandOnce(name, reason);
+            return ROWOWScriptValue::FromNumber(0);
+        });
+        engine->SetStub(name);
+    }
+    engine->RegisterCommand("getcastlename", [](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const&) { return ROWOWScriptValue::FromText(std::string()); });
+    engine->SetStub("getcastlename");
+    engine->RegisterCommand("guardianinfo", [](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const&) { return ROWOWScriptValue::FromNumber(-1); });
+    engine->SetStub("guardianinfo");
+    engine->RegisterCommand("checkwall", [](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const&) { return ROWOWScriptValue::FromNumber(0); });
+    engine->SetStub("checkwall");
+    engine->RegisterCommand("instance_create", [InstanceReason](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const&)
+    {
+        // No instances: creating one fails as an unknown instance does (-1)
+        LogStubCommandOnce("instance_create", InstanceReason);
+        return ROWOWScriptValue::FromNumber(-1);
+    });
+    engine->SetStub("instance_create");
+    engine->RegisterCommand("instance_enter", [](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const&)
+    {
+        return ROWOWScriptValue::FromNumber(1); // IE_NOINSTANCE
+    });
+    engine->SetStub("instance_enter");
+    for (char const* instanceNameCommandName : { "instance_npcname", "instance_mapname" })
+    {
+        // Outside an instance rAthena reports an invalid instance and gives ""
+        engine->RegisterCommand(instanceNameCommandName, [](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const&) { return ROWOWScriptValue::FromText(std::string()); });
+        engine->SetStub(instanceNameCommandName);
+    }
+
+    // Waiting rooms (chat rooms on NPCs, above) belong to the job tests that use them (R8.3): until then they hold nobody, so their events
+    // never go
+    engine->RegisterCommand("getwaitingroomstate", [](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const&) { return ROWOWScriptValue::FromNumber(-1); });
+    engine->SetStub("getwaitingroomstate");
 
     // Looks and sounds the client can't show yet: they do nothing, so the dialogs go on past them
     for (char const* lookCommandName : { "emotion", "viewpoint", "soundeffect", "soundeffectall", "misceffect" })
