@@ -592,6 +592,7 @@ public:
         static ChatCommandTable roCommandTable =
         {
             { "sync",     HandleROSyncCommand,   SEC_PLAYER,     Console::No },
+            { "hair",     HandleROHairCommand,   SEC_PLAYER,     Console::No },
             { "statup",   HandleROStatUpCommand, SEC_PLAYER,     Console::No },
             { "wear",     HandleROWearCommand,   SEC_PLAYER,     Console::No },
             { "takeoff",  HandleROTakeOffCommand, SEC_PLAYER,    Console::No },
@@ -666,6 +667,7 @@ public:
             return false;
         ROWOW->SendROFormStateToClient(player);
         ROWOW->SendROStatusToClient(player);
+        ROWOW->SendHairToClient(player);
         if (ROWOW->IsInROForm(player) == true)
         {
             ROWOW->SendEquipmentToClient(player, *ROWOW->GetIdentity(player), true);
@@ -1508,6 +1510,21 @@ public:
         if (player == nullptr || ROWOW->IsInROForm(player) == false)
             return false;
         ROWOW->SkillIdentify(player, ROWOWMod::GetItemByClientPosition(player, bag, slot));
+        return true;
+    }
+
+    static bool HandleROHairCommand(ChatHandler* handler, uint32 style, uint32 color)
+    {
+        // Options > Video > Ragnarok (the RO_Identity addon): the identity's hair style and color, as a stylist sets them (R9.1)
+        Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
+        if (player == nullptr)
+            return false;
+        if (ROWOW->SetIdentityHair(player, style, color) == false)
+        {
+            handler->PSendSysMessage("There's no RO hair style {} in color {}.", style, color);
+            ROWOW->SendHairToClient(player);
+            return false;
+        }
         return true;
     }
 

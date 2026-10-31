@@ -1558,18 +1558,24 @@ void ROWOWMod::RegisterNpcScriptCommands()
             default: return ROWOWScriptValue::FromNumber(-1);
         }
     });
-    engine->RegisterCommand("setlook", [](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    engine->RegisterCommand("setlook", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
     {
-        // setlook <LOOK_*>,<value>: the stylists' hair style (1) and color (6), kept with the identity (the sprite shows them with R9's
-        // heads); the clothes color (7) isn't kept yet
+        // setlook <LOOK_*>,<value>: the stylists' hair style (1) and color (6), kept with the identity and shown at once on the sprite (its
+        // head, R9.1) and in the addon's hair options; the clothes color (7) isn't kept yet
         if (context.Identity == nullptr)
             return ROWOWScriptValue::FromNumber(0);
         int64 value = GetArgument(arguments, 1, 0);
-        switch (GetArgument(arguments, 0, 0))
+        int64 look = GetArgument(arguments, 0, 0);
+        switch (look)
         {
             case 1: context.Identity->HairStyle = uint8(std::clamp<int64>(value, 0, 255)); break;
             case 6: context.Identity->HairColor = uint8(std::clamp<int64>(value, 0, 255)); break;
             default: break;
+        }
+        if ((look == 1 || look == 6) && context.AttachedPlayer != nullptr)
+        {
+            RefreshIllusionDisplay(context.AttachedPlayer);
+            SendHairToClient(context.AttachedPlayer);
         }
         return ROWOWScriptValue::FromNumber(0);
     });

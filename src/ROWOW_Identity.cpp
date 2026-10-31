@@ -916,6 +916,7 @@ void ROWOWMod::RemoveROFormAuras(Player* player)
             illusionSpellIDs.push_back(illusionBySpellID.first);
     for (uint32 spellID : illusionSpellIDs)
         player->RemoveAurasDueToSpell(spellID);
+    RefreshIllusionHead(player, nullptr);
     RefreshIllusionHeadgear(player, nullptr);
 }
 

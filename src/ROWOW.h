@@ -89,6 +89,7 @@ struct ROWOWIllusion
 #define ROWOW_ITEM_VISUAL_TYPE_HEADGEAR_TOP         2
 #define ROWOW_ITEM_VISUAL_TYPE_HEADGEAR_MID         3
 #define ROWOW_ITEM_VISUAL_TYPE_HEADGEAR_LOW         4
+#define ROWOW_HAIR_STYLE_DEFAULT                    1 // The head shown for a hair style or color with no head (RO's first style, its own colors)
 struct ROWOWItemVisual
 {
     uint8 VisualType = 0;
@@ -1202,6 +1203,8 @@ public:
     std::unordered_map<uint32, ROWOWItemVisual> ItemVisualsByItemID;
     std::unordered_map<uint64, uint32> HeadgearSpellIDsByKey; // See GetHeadgearKey
     std::unordered_set<uint32> HeadgearSpellIDs;
+    std::unordered_map<uint32, uint32> HeadSpellIDsByKey; // See GetHeadKey
+    std::unordered_set<uint32> HeadSpellIDs;
     std::unordered_map<uint32, ROWOWMapGrid> MapGridsByMapID;
     std::unordered_map<std::string, ROWOWDataTable> DataTablesByName; // The rAthena data, by table name (ROWOW_DATA_TABLE_*)
     std::unordered_map<uint32, uint32> MobIDsByCreatureEntry; // The RO monster (mob_db Id) behind each RO creature template
@@ -1268,6 +1271,15 @@ public:
     static uint64 GetHeadgearKey(uint32 viewID, uint8 visualType, bool isMale) { return (uint64(viewID) << 16) | (uint64(visualType) << 1) | (isMale == true ? 1 : 0); }
     void RefreshIllusionHeadgear(Player* player, ROWOWIllusion const* illusion);
 
+    // RO illusions show the head (the identity's hair style and color, RO's own head outside one) through a hidden aura that attaches
+    // the head model, like headgear (R9.1).  Hair is the identity's: the stylists' setlook and the Options > Video > Ragnarok choice
+    // (.ro hair) set it, and the RO_Identity addon hears it under the ROWOWHAIR prefix
+    static uint32 GetHeadKey(uint32 style, uint32 color, bool isMale) { return (style << 16) | (color << 1) | (isMale == true ? 1 : 0); }
+    uint32 GetHeadSpellID(uint32 style, uint32 color, bool isMale) const;
+    void RefreshIllusionHead(Player* player, ROWOWIllusion const* illusion);
+    bool SetIdentityHair(Player* player, uint32 style, uint32 color); // False if there's no head for it
+    void SendHairToClient(Player* player);
+
     // A table of rAthena data (ROWOW_DATA_TABLE_*), or null when the converter hasn't written it
     ROWOWDataTable const* GetDataTable(std::string const& tableName) const;
 
@@ -1314,7 +1326,7 @@ public:
     void RefreshROForm(Player* player); // After the identity's job, level, stats or equipment change
     void RefreshROFormValues(Player* player, ROWOWIdentity& identity); // The level, exp bar, status and maximums
     void RefreshROFormLook(Player* player); // The job's look
-    void RemoveROFormAuras(Player* player); // The job's look and its headgear
+    void RemoveROFormAuras(Player* player); // The job's look, its head and headgear
     bool IsSpellKeptInROForm(SpellInfo const* spellInfo) const;
 
     // RO status (ROWOW_Status.cpp): the port of rAthena's pre-renewal status calculation for a player (status.cpp)

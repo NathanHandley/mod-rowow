@@ -15,6 +15,7 @@
 //  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 
+#include "Chat.h"
 #include "DatabaseEnv.h"
 #include "Item.h"
 #include "Log.h"
@@ -26,7 +27,7 @@
 
 using namespace std;
 
-// RO illusions: the job sprite displays (by weapon and shield held) and the headgear auras of a player transformed into an RO job
+// RO illusions: the job sprite displays (by weapon and shield held) and the head and headgear auras of a player transformed into an RO job
 
 namespace
 {
@@ -44,6 +45,8 @@ void ROWOWMod::LoadIllusionData()
     IllusionsBySpellID.clear();
     IllusionSpellIDsByJobKey.clear();
     ItemVisualsByItemID.clear();
+    HeadSpellIDsByKey.clear();
+    HeadSpellIDs.clear();
     if (IsEnabled == false)
         return;
 
@@ -121,7 +124,22 @@ void ROWOWMod::LoadIllusionData()
             } while (result->NextRow());
         }
     }
-    LOG_INFO("module.ROWOW", "ROWOWMod::LoadIllusionData loaded {} RO illusions, {} item visuals and {} headgear auras", IllusionsBySpellID.size(), ItemVisualsByItemID.size(), HeadgearSpellIDs.size());
+    QueryResult headTableResult = WorldDatabase.Query("SELECT 1 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'mod_rowow_head'");
+    if (headTableResult)
+    {
+        if (QueryResult result = WorldDatabase.Query("SELECT `Style`, `Color`, `IsMale`, `SpellID` FROM `mod_rowow_head`"))
+        {
+            do
+            {
+                Field* fields = result->Fetch();
+                uint32 spellID = fields[3].Get<uint32>();
+                HeadSpellIDsByKey[GetHeadKey(fields[0].Get<uint32>(), fields[1].Get<uint32>(), fields[2].Get<uint8>() != 0)] = spellID;
+                HeadSpellIDs.insert(spellID);
+            } while (result->NextRow());
+        }
+    }
+    LOG_INFO("module.ROWOW", "ROWOWMod::LoadIllusionData loaded {} RO illusions, {} item visuals, {} headgear auras and {} head auras", IllusionsBySpellID.size(),
+        ItemVisualsByItemID.size(), HeadgearSpellIDs.size(), HeadSpellIDs.size());
 }
 
 ROWOWIllusion const* ROWOWMod::GetActiveIllusion(Player* player) const
@@ -220,6 +238,7 @@ void ROWOWMod::RefreshIllusionDisplay(Player* player)
     if (IsEnabled == false || player == nullptr)
         return;
     ROWOWIllusion const* illusion = GetActiveIllusion(player);
+    RefreshIllusionHead(player, illusion);
     RefreshIllusionHeadgear(player, illusion);
     if (illusion == nullptr)
         return;
@@ -300,4 +319,68 @@ void ROWOWMod::RefreshIllusionHeadgear(Player* player, ROWOWIllusion const* illu
     for (uint8 i = 0; i < 3; ++i)
         if (wantedSpellIDs[i] != 0 && player->HasAura(wantedSpellIDs[i]) == false)
             player->AddAura(wantedSpellIDs[i], player);
+}
+
+uint32 ROWOWMod::GetHeadSpellID(uint32 style, uint32 color, bool isMale) const
+{
+    // A style or color with no head (rAthena allows style 0) shows the style's own colors, else the first style
+    uint32 const candidateKeys[4] = { GetHeadKey(style, color, isMale), GetHeadKey(style, 0, isMale), GetHeadKey(ROWOW_HAIR_STYLE_DEFAULT, color, isMale),
+        GetHeadKey(ROWOW_HAIR_STYLE_DEFAULT, 0, isMale) };
+    for (uint32 candidateKey : candidateKeys)
+    {
+        auto spellIter = HeadSpellIDsByKey.find(candidateKey);
+        if (spellIter != HeadSpellIDsByKey.end())
+            return spellIter->second;
+    }
+    return 0;
+}
+
+void ROWOWMod::RefreshIllusionHead(Player* player, ROWOWIllusion const* illusion)
+{
+    if (HeadSpellIDs.empty() == true)
+        return;
+
+    // The head wanted: the identity's hair in the illusion's gender, while in an RO illusion (in the form or not; a character that never
+    // entered the RO world has the identity's first hair, RO's style 1 in its own color)
+    uint32 wantedSpellID = 0;
+    if (illusion != nullptr)
+    {
+        ROWOWIdentity const* identity = GetIdentity(player);
+        wantedSpellID = GetHeadSpellID(identity->HairStyle, identity->HairColor, illusion->IsMale);
+    }
+
+    // Take off the head auras that aren't wanted (dummy auras, like the headgear's), and put on the wanted one
+    std::vector<uint32> spellIDsToRemove;
+    for (AuraEffect const* auraEffect : player->GetAuraEffectsByType(SPELL_AURA_DUMMY))
+    {
+        uint32 spellID = auraEffect->GetId();
+        if (spellID != wantedSpellID && HeadSpellIDs.find(spellID) != HeadSpellIDs.end())
+            spellIDsToRemove.push_back(spellID);
+    }
+    for (uint32 spellID : spellIDsToRemove)
+        player->RemoveAurasDueToSpell(spellID);
+    if (wantedSpellID != 0 && player->HasAura(wantedSpellID) == false)
+        player->AddAura(wantedSpellID, player);
+}
+
+bool ROWOWMod::SetIdentityHair(Player* player, uint32 style, uint32 color)
+{
+    // Kept with the identity (saved with it once it exists), shown at once on the illusion, and told to the addon's options
+    if (HeadSpellIDsByKey.find(GetHeadKey(style, color, player->getGender() == GENDER_MALE)) == HeadSpellIDsByKey.end())
+        return false;
+    ROWOWIdentity* identity = GetIdentity(player);
+    identity->HairStyle = uint8(style);
+    identity->HairColor = uint8(color);
+    RefreshIllusionDisplay(player);
+    SendHairToClient(player);
+    return true;
+}
+
+void ROWOWMod::SendHairToClient(Player* player)
+{
+    ROWOWIdentity const* identity = GetIdentity(player);
+    std::string addonMessage = fmt::format("ROWOWHAIR\t{}\t{}", identity->HairStyle, identity->HairColor);
+    WorldPacket data;
+    ChatHandler::BuildChatPacket(data, CHAT_MSG_SYSTEM, LANG_ADDON, nullptr, nullptr, addonMessage);
+    player->SendDirectMessage(&data);
 }
