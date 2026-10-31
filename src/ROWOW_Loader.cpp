@@ -22,6 +22,7 @@ void AddROWOWIdentityScripts();
 void AddROWOWBattleScripts();
 void AddROWOWItemScripts();
 void AddROWOWNpcScripts();
+void AddROWOWStorageScripts();
 
 void Addmod_rowowScripts()
 {
@@ -33,4 +34,5 @@ void Addmod_rowowScripts()
     AddROWOWBattleScripts();
     AddROWOWItemScripts();
     AddROWOWNpcScripts();
+    AddROWOWStorageScripts();
 }

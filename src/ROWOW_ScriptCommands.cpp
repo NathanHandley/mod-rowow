@@ -36,6 +36,7 @@
 
 #include <ctime>
 #include <mutex>
+#include <regex>
 #include <set>
 
 using namespace std;
@@ -1552,6 +1553,168 @@ void ROWOWMod::RegisterNpcScriptCommands()
         return ROWOWScriptValue::FromNumber(0);
     });
 
+    // Kafra storage (R8.2, ROWOW_Storage.cpp): the character's WoW bank, and its guild's bank when the guild has one (plan section 8 item 7)
+    engine->RegisterCommand("openstorage", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const&)
+    {
+        if (Player* player = GetAttachedPlayer(context, "openstorage"))
+            StorageStorageOpen(player);
+        return ROWOWScriptValue::FromNumber(0);
+    });
+    engine->RegisterCommand("guildopenstorage", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const&)
+    {
+        // guildopenstorage(): GSTORAGE_OPEN (0) when the guild bank opens, else why not
+        Player* player = GetAttachedPlayer(context, "guildopenstorage");
+        return ROWOWScriptValue::FromNumber(player != nullptr ? StorageGuildStorageOpen(player) : int64(ROWOW_GSTORAGE_NO_GUILD));
+    });
+
+    // The NPCs' services (R8.4): an NPC's skill on the player (inns, the job quests' blessings and heals), and the repairmen
+    engine->RegisterCommand("npcskill", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // npcskill <skill id or "name">,<skill level>,<stat point>,<NPC level>: the NPC talking with the player uses the skill on it, with
+        // every stat at stat point and the level given (status_calc_npc), at once (unit_skilluse_id2; an NPC's skills have no cast time here)
+        Player* player = GetAttachedPlayer(context, "npcskill");
+        if (player == nullptr || arguments.size() < 4)
+            return ROWOWScriptValue::FromNumber(0);
+        uint16 skillID = arguments[0].IsString == true ? GetSkillIDByName(arguments[0].Text) : uint16(arguments[0].GetNumber());
+        ROWOWSkill const* skill = GetSkill(skillID);
+        if (skill == nullptr)
+            return Fail(context, "npcskill: invalid skill " + arguments[0].GetText());
+        uint16 skillLevel = uint16(std::clamp<int64>(arguments[1].GetNumber(), 1, UINT16_MAX));
+        int64 statPoint = arguments[2].GetNumber();
+        int64 npcLevel = arguments[3].GetNumber();
+        if (statPoint < 0 || statPoint > 99 || npcLevel < 0 || npcLevel > 99)
+            return Fail(context, "npcskill: stat point or level over the maximum");
+        // The NPC is its creature on the player's map (rAthena's npc_id)
+        Creature* npcCreature = nullptr;
+        if (context.Npc != nullptr && context.Npc->MapID == player->GetMapId())
+        {
+            for (ObjectGuid::LowType spawnID : context.Npc->CreatureSpawnIDs)
+            {
+                auto creatureRange = player->GetMap()->GetCreatureBySpawnIdStore().equal_range(spawnID);
+                if (creatureRange.first != creatureRange.second)
+                {
+                    npcCreature = creatureRange.first->second;
+                    break;
+                }
+            }
+        }
+        if (npcCreature == nullptr || npcCreature->IsInWorld() == false)
+            return Fail(context, "npcskill: the NPC isn't on the player's map");
+        // status_calc_npc: SCO_FIRST's fixed values the first time, then the stats and what the level makes of them
+        ROWOWStatus& status = npcCreature->CustomData.GetDefault<ROWOWMobStatus>("ROWOWMobStatus")->Status;
+        if (status.IsPlayer == true)
+        {
+            status.IsPlayer = false;
+            status.MaxHP = 1;
+            status.MaxSP = 1;
+            status.DefElement = ROWOW_ELEMENT_NEUTRAL;
+            status.ElementLevel = 1;
+            status.Race = ROWOW_RACE_DEMIHUMAN;
+            status.Class = ROWOW_CLASS_NORMAL;
+            status.Size = ROWOW_SIZE_SMALL;
+            status.Range = 1 + status.Size;
+            status.Mode = ROWOW_MODE_CANMOVE | ROWOW_MODE_CANATTACK;
+        }
+        status.Level = uint32(npcLevel);
+        for (int32& stat : status.Stats)
+            stat = int32(statPoint);
+        StatusCalcMisc(status, status.Level);
+        if ((skill->Inf & ROWOW_INF_GROUND_SKILL) != 0)
+        {
+            int32 x = 0, y = 0;
+            GetUnitCell(player, x, y);
+            GetSkillUnitData(npcCreature)->SkillZ = player->GetPositionZ();
+            SkillCastendPos2(npcCreature, x, y, skillID, skillLevel, GetTick(), 0);
+        }
+        else
+            SkillCastendNoDamageID(npcCreature, player, skillID, skillLevel, GetTick(), 0);
+        return ROWOWScriptValue::FromNumber(0);
+    });
+    // The broken items (attribute 1) in the bags in their order, as rAthena counts its inventory
+    auto getBrokenItem = [this](Player* player, int64 number) -> Item*
+    {
+        int64 brokenCounter = 0;
+        for (uint8 bag = 0; bag <= 4; bag++)
+        {
+            for (uint32 slot = 1; slot <= MAX_BAG_SIZE; slot++)
+            {
+                Item* item = GetItemByClientPosition(player, bag, slot);
+                if (item == nullptr || GetROItem(item) == nullptr || IsItemBroken(item) == false)
+                    continue;
+                if (++brokenCounter == number)
+                    return item;
+            }
+        }
+        return nullptr;
+    };
+    // A command's <char id> may only be the attached player (as the quest commands')
+    auto getCharIDPlayer = [](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments, size_t index, char const* commandName) -> Player*
+    {
+        Player* player = GetAttachedPlayer(context, commandName);
+        if (player != nullptr && index < arguments.size() && arguments[index].GetNumber() != int64(player->GetGUID().GetCounter()))
+        {
+            Fail(context, std::string(commandName) + ": only the attached player's character");
+            return nullptr;
+        }
+        return player;
+    };
+    engine->RegisterCommand("getbrokenid", [this, getBrokenItem, getCharIDPlayer](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // getbrokenid(<number>{,<char id>}): the item_db Id of the number-th broken item, 0 when there are fewer
+        Player* player = getCharIDPlayer(context, arguments, 1, "getbrokenid");
+        if (player == nullptr)
+            return ROWOWScriptValue::FromNumber(0);
+        ROWOWItem const* roItem = GetROItem(getBrokenItem(player, GetArgument(arguments, 0, 0)));
+        return ROWOWScriptValue::FromNumber(roItem != nullptr ? int64(roItem->ItemID) : 0);
+    });
+    engine->RegisterCommand("repair", [this, getBrokenItem, getCharIDPlayer](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // repair <number>{,<char id>}: the number-th broken item mended (clif_produceeffect's repair message)
+        Player* player = getCharIDPlayer(context, arguments, 1, "repair");
+        Item* item = player != nullptr ? getBrokenItem(player, GetArgument(arguments, 0, 0)) : nullptr;
+        if (item == nullptr)
+            return ROWOWScriptValue::FromNumber(0);
+        SetItemState(player, item, GetItemRefine(item), false, IsItemIdentified(item));
+        ChatHandler(player->GetSession()).PSendSysMessage("{} has been repaired.", item->GetTemplate()->Name1);
+        return ROWOWScriptValue::FromNumber(0);
+    });
+    engine->RegisterCommand("repairall", [this, getBrokenItem, getCharIDPlayer](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // repairall {<char id>}: every broken item mended
+        Player* player = getCharIDPlayer(context, arguments, 0, "repairall");
+        if (player == nullptr)
+            return ROWOWScriptValue::FromNumber(0);
+        while (Item* item = getBrokenItem(player, 1))
+        {
+            SetItemState(player, item, GetItemRefine(item), false, IsItemIdentified(item));
+            ChatHandler(player->GetSession()).PSendSysMessage("{} has been repaired.", item->GetTemplate()->Name1);
+        }
+        return ROWOWScriptValue::FromNumber(0);
+    });
+    engine->RegisterCommand("preg_match", [](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // preg_match(<pattern>,<string>{,<offset>}): 0 for no match, else the captures + 1 as pcre_exec counts them (an ECMAScript regex here,
+        // which has the lookaheads and \b the scripts use)
+        std::string subject = GetTextArgument(arguments, 1);
+        size_t offset = size_t(std::clamp<int64>(GetArgument(arguments, 2, 0), 0, int64(subject.size())));
+        try
+        {
+            std::regex pattern(GetTextArgument(arguments, 0));
+            std::smatch match;
+            std::string const searched = subject.substr(offset);
+            if (std::regex_search(searched, match, pattern) == false)
+                return ROWOWScriptValue::FromNumber(0);
+            int64 count = int64(match.size());
+            while (count > 1 && match[size_t(count - 1)].matched == false)
+                count--;
+            return ROWOWScriptValue::FromNumber(count);
+        }
+        catch (std::regex_error const&)
+        {
+            return ROWOWScriptValue::FromNumber(0);
+        }
+    });
+
     // Systems out of scope (plan section 8 item 10: War of Emperium, battlegrounds) or not here (instances): the commands answer "none" so
     // the scripts' OnInit and dialogs go on, and do nothing
     struct StubCommand
@@ -1590,7 +1753,8 @@ void ROWOWMod::RegisterNpcScriptCommands()
         StubCommand{ "enablewaitingroomevent", "waiting rooms belong to the job tests (R8.3)" },
         StubCommand{ "disablewaitingroomevent", "waiting rooms belong to the job tests (R8.3)" },
         StubCommand{ "warpwaitingpc", "waiting rooms belong to the job tests (R8.3): nobody to warp" },
-        StubCommand{ "kickwaitingroomall", "waiting rooms belong to the job tests (R8.3)" } })
+        StubCommand{ "kickwaitingroomall", "waiting rooms belong to the job tests (R8.3)" },
+        StubCommand{ "makeitem", "items on the floor come with the ground drops (R10.4)" } })
     {
         std::string name = stubCommand.Name;
         char const* reason = stubCommand.Reason;

@@ -971,6 +971,17 @@ struct ROWOWMemoPoint
     int32 CellY = 0;
 };
 
+// What opening the guild storage gives (e_guild_storage_open, storage.hpp)
+enum ROWOWGuildStorageOpen : int32
+{
+    ROWOW_GSTORAGE_OPEN = 0,
+    ROWOW_GSTORAGE_STORAGE_ALREADY_OPEN = 1,
+    ROWOW_GSTORAGE_ALREADY_OPEN = 2,
+    ROWOW_GSTORAGE_NO_GUILD = 3,
+    ROWOW_GSTORAGE_NO_STORAGE = 4, // Here: the guild has no bank tab
+    ROWOW_GSTORAGE_NO_PERMISSION = 5,
+};
+
 // The quest log (ROWOW_Quest.cpp, R8): rAthena's quest_db (the converter's mod_rowow_db_quest, from RoQuests.csv) and a character's quests
 #define ROWOW_MAX_QUEST_OBJECTIVES                  3       // MAX_QUEST_OBJECTIVES
 
@@ -1056,6 +1067,7 @@ struct ROWOWIdentity : public DataMap::Base
     uint64 CanEquipTick = 0; // canequip_tick: no equipment goes on before it (Desperado), in the skill engine's ticks
     std::unordered_map<uint32, uint32> ItemDelayEndTimes; // By item_db Id: when each item with a reuse delay can be used again
     bool IsIdentifyMenuOpen = false; // A Magnifier's list of items to appraise is up (menuskill_id MC_IDENTIFY)
+    uint8 StorageFlag = 0; // state.storage_flag: a Kafra opened its storage (1, the WoW bank) on this map, until it leaves the map
     std::map<uint16, uint16> SkillLevelsByID; // The skills learned (mod_rowow_identity_skill), and their levels
     bool AreSkillsChanged = false;
     std::set<uint16> TreeSkillIDs; // The skills of the tree it may use and raise now, learned or not (pc_calc_skilltree sets their id)
@@ -1925,6 +1937,13 @@ public:
     void LoadIdentityQuests(Player* player, ROWOWIdentity& identity);
     void SaveIdentityQuests(Player* player, ROWOWIdentity& identity, CharacterDatabaseTransaction trans);
     std::unordered_map<uint32, ROWOWQuestData> QuestsByID;
+    // Kafra storage (ROWOW_Storage.cpp, R8.2): rAthena's storage.cpp opens the character's own WoW bank, and its guild's bank when the guild has
+    // one (plan section 8 item 7), each with the player as its own banker as AzerothCore's bank command does
+    void StorageStorageOpen(Player* player); // storage_storageopen: the WoW bank window
+    int32 StorageGuildStorageOpen(Player* player); // storage_guild_storageopen: ROWOW_GSTORAGE_*; the guild bank window opens at the next world update
+    void StorageClose(Player* player); // Leaving the map: the storage ends (storage_storageclose, storage_guild_storageclose)
+    void OpenPendingGuildStorages(); // The world update, with the maps idle: the guild bank windows asked for
+    std::set<ObjectGuid> PendingGuildStorageOpens; // Under NpcStateMutex
 
     ROWOWChatScriptDialog ChatScriptDialog; // For GM testing (.ro npc talk -chat)
     ROWOWWindowScriptDialog WindowScriptDialog; // The RO NPC window: every player run's dialog

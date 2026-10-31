@@ -608,6 +608,7 @@ public:
             { "feel",     HandleROFeelCommand,   SEC_PLAYER, Console::No },
             { "produce",  HandleROProduceCommand, SEC_PLAYER,    Console::No },
             { "repair",   HandleRORepairCommand, SEC_PLAYER,     Console::No },
+            { "gstorage", HandleROGuildStorageCommand, SEC_PLAYER, Console::No },
             { "weaponrefine", HandleROWeaponRefineCommand, SEC_PLAYER, Console::No },
             { "message",  HandleROMessageCommand, SEC_PLAYER,    Console::No },
             { "mobcast",  HandleROMobCastCommand, SEC_GAMEMASTER, Console::No },
@@ -1152,6 +1153,35 @@ public:
         if (player == nullptr)
             return false;
         ROWOW->SkillRepairWeapon(player, ObjectGuid::LowType(itemGUID));
+        return true;
+    }
+
+    static bool HandleROGuildStorageCommand(ChatHandler* handler)
+    {
+        // The bank window's Guild Storage button (RO_Identity): while a Kafra's storage is open, the guild's bank too (plan section 8 item 7),
+        // with storage_guild_storageopen's answers (the @gstorage command's messages)
+        Player* player = GetFormPlayer(handler);
+        if (player == nullptr)
+            return false;
+        if (ROWOW->GetIdentity(player)->StorageFlag == 0)
+        {
+            handler->SendSysMessage("Talk to a Kafra to use the storage.");
+            return true;
+        }
+        switch (ROWOW->StorageGuildStorageOpen(player))
+        {
+            case ROWOW_GSTORAGE_OPEN:
+                break;
+            case ROWOW_GSTORAGE_NO_GUILD:
+                handler->SendSysMessage("You are not in a guild.");
+                break;
+            case ROWOW_GSTORAGE_NO_STORAGE:
+                handler->SendSysMessage("Your guild hasn't bought a guild bank tab yet.");
+                break;
+            default:
+                handler->SendSysMessage("The guild storage can't be opened.");
+                break;
+        }
         return true;
     }
 

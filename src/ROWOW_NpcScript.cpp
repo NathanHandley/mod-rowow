@@ -292,6 +292,9 @@ void ROWOWMod::LoadNpcScriptData()
         for (size_t rowIndex = 0; rowIndex < battleConfigTable->Rows.size(); rowIndex++)
             BattleFlagsByName[ToLower(battleConfigTable->GetCell(rowIndex, keyColumnIndex))] = ParseBattleFlagValue(battleConfigTable->GetCell(rowIndex, valueColumnIndex));
     }
+    // The refine window is a client feature this client doesn't have: rAthena turns feature.refineui off for clients before 2016-10-12
+    // (battle.cpp's PACKETVER check), so the refiners talk (refinemain) instead
+    BattleFlagsByName["feature.refineui"] = 0;
 
     // The global variables kept from before ($name)
     {
