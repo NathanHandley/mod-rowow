@@ -26,6 +26,7 @@
 #include "Log.h"
 #include "Map.h"
 #include "MapMgr.h"
+#include "ObjectAccessor.h"
 #include "ObjectMgr.h"
 #include "Player.h"
 #include "TemporarySummon.h"
@@ -157,9 +158,10 @@ void ROWOWMod::RegisterNpcScriptCommands()
         context.Wait = ROWOW_SCRIPT_WAIT_NEXT;
         return ROWOWScriptValue::FromNumber(0);
     });
-    engine->RegisterCommand("close", [](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const&)
+    // close and close3: the Close button, and the run ends when it's pressed (with no dialog open it just ends).  close3 also takes the
+    // cutin away after, which the RO NPC window does at every run's end
+    auto closeCommand = [](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const&)
     {
-        // The Close button, and the run ends when it's pressed (with no dialog open it just ends)
         Player* player = GetAttachedPlayer(context, "close");
         if (player == nullptr)
             return ROWOWScriptValue::FromNumber(0);
@@ -171,7 +173,9 @@ void ROWOWMod::RegisterNpcScriptCommands()
         context.Dialog->SendClose(player, context.Npc);
         context.Wait = ROWOW_SCRIPT_WAIT_CLOSE_END;
         return ROWOWScriptValue::FromNumber(0);
-    });
+    };
+    engine->RegisterCommand("close", closeCommand);
+    engine->RegisterCommand("close3", closeCommand);
     engine->RegisterCommand("close2", [](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const&)
     {
         // The Close button, and the run goes on once it's pressed
@@ -181,12 +185,6 @@ void ROWOWMod::RegisterNpcScriptCommands()
         if (context.Dialog != nullptr)
             context.Dialog->SendClose(player, context.Npc);
         context.Wait = ROWOW_SCRIPT_WAIT_CLOSE;
-        return ROWOWScriptValue::FromNumber(0);
-    });
-    engine->RegisterCommand("close3", [](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const&)
-    {
-        // The dialog closes without a button, and the run ends
-        context.IsStopped = true;
         return ROWOWScriptValue::FromNumber(0);
     });
     engine->RegisterCommand("clear", [](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const&)
@@ -271,7 +269,7 @@ void ROWOWMod::RegisterNpcScriptCommands()
         {
             context.IsMenuOrInput = true;
             if (context.Dialog != nullptr)
-                context.Dialog->SendInput(player, context.Npc, isString);
+                context.Dialog->SendInput(player, context.Npc, isString, minimum, maximum);
             context.Wait = ROWOW_SCRIPT_WAIT_INPUT;
             context.IsRerunLine = true;
             return ROWOWScriptValue::FromNumber(0);
@@ -384,6 +382,51 @@ void ROWOWMod::RegisterNpcScriptCommands()
         return ROWOWScriptValue::FromNumber(0);
     });
     engine->SetReferenceArguments("deletearray", 1);
+    engine->RegisterCommand("implode", [](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // implode(<string array>{,"<glue>"}): its elements from 0 to the highest set, joined ("NULL" for an empty one).  The Kafras'
+        // menus are built with it
+        if (arguments.empty() == true || arguments[0].IsReference == false || arguments[0].Text.empty() == true || arguments[0].Text.back() != '$')
+            return Fail(context, "implode needs a string array");
+        std::string const& name = arguments[0].Text;
+        uint32 size = ROWOWSCRIPT->GetArraySize(context, name);
+        if (size == 0)
+            return ROWOWScriptValue::FromText("NULL");
+        std::string glue = GetTextArgument(arguments, 1);
+        std::string joined;
+        for (uint32 index = 0; index < size; index++)
+        {
+            if (index > 0)
+                joined += glue;
+            joined += ROWOWSCRIPT->GetVariable(context, name, index).GetText();
+        }
+        return ROWOWScriptValue::FromText(joined);
+    });
+    engine->SetReferenceArguments("implode", 1);
+    engine->RegisterCommand("explode", [](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // explode(<string array>,"<text>","<delimiter>"): the text split at the delimiter's first character, from the array's index on
+        if (arguments.empty() == true || arguments[0].IsReference == false || arguments[0].Text.empty() == true || arguments[0].Text.back() != '$')
+            return Fail(context, "explode needs a string array");
+        std::string const& name = arguments[0].Text;
+        std::string text = GetTextArgument(arguments, 1);
+        std::string delimiter = GetTextArgument(arguments, 2);
+        int64 index = arguments[0].Number;
+        std::string piece;
+        for (char curChar : text)
+        {
+            if (delimiter.empty() == false && curChar == delimiter[0])
+            {
+                ROWOWSCRIPT->SetVariable(context, name, uint32(index++), ROWOWScriptValue::FromText(piece));
+                piece.clear();
+            }
+            else
+                piece += curChar;
+        }
+        ROWOWSCRIPT->SetVariable(context, name, uint32(index), ROWOWScriptValue::FromText(piece));
+        return ROWOWScriptValue::FromNumber(0);
+    });
+    engine->SetReferenceArguments("explode", 1);
     engine->RegisterCommand("getelementofarray", [](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
     {
         if (arguments.empty() == true || arguments[0].IsReference == false)
@@ -770,15 +813,40 @@ void ROWOWMod::RegisterNpcScriptCommands()
         // donpcevent "<NPC>::<label>": run with no player at the next world update; 1 when there's such an event
         return ROWOWScriptValue::FromNumber(QueueNpcEvent(GetTextArgument(arguments, 0)) == true ? 1 : 0);
     });
-    engine->RegisterCommand("initnpctimer", [this, getNpc](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    auto startNpcTimer = [this, getNpc](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments, bool isFromZero)
     {
-        // initnpctimer{ "<NPC>"{,<attach>}}: from 0 (attaching the player isn't in; the labels run with no player)
-        NpcTimerStart(getNpc(context, arguments, arguments.empty() == false && arguments[0].IsString == true ? 0 : 1), true);
+        // initnpctimer and startnpctimer{ "<NPC>"{,<attach>}} or { <attach>}: the attach flag gives the timer the run's player, whose
+        // labels then run with it attached (the timer stops if it leaves)
+        bool isNamed = arguments.empty() == false && arguments[0].IsString == true;
+        ROWOWNpc const* npc = getNpc(context, arguments, isNamed == true ? 0 : 1);
+        int64 attachFlag = GetArgument(arguments, isNamed == true ? 1 : 0, 0);
+        if (attachFlag != 0 && context.AttachedPlayer != nullptr)
+            SetNpcTimerPlayer(npc, context.AttachedPlayer->GetGUID());
+        NpcTimerStart(npc, isFromZero);
+    };
+    engine->RegisterCommand("initnpctimer", [startNpcTimer](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        startNpcTimer(context, arguments, true);
         return ROWOWScriptValue::FromNumber(0);
     });
-    engine->RegisterCommand("startnpctimer", [this, getNpc](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    engine->RegisterCommand("startnpctimer", [startNpcTimer](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
     {
-        NpcTimerStart(getNpc(context, arguments, arguments.empty() == false && arguments[0].IsString == true ? 0 : 1), false);
+        startNpcTimer(context, arguments, false);
+        return ROWOWScriptValue::FromNumber(0);
+    });
+    engine->RegisterCommand("attachnpctimer", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // attachnpctimer{ "<character name>"}: the run's NPC's timer runs its labels with that player (the run's own by default)
+        Player* player = arguments.empty() == false ? ObjectAccessor::FindPlayerByName(GetTextArgument(arguments, 0)) : context.AttachedPlayer;
+        if (player == nullptr || context.Npc == nullptr)
+            return ROWOWScriptValue::FromNumber(0);
+        SetNpcTimerPlayer(context.Npc, player->GetGUID());
+        return ROWOWScriptValue::FromNumber(1);
+    });
+    engine->RegisterCommand("detachnpctimer", [this, getNpc](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // detachnpctimer{ "<NPC>"}
+        SetNpcTimerPlayer(getNpc(context, arguments, 0), ObjectGuid::Empty);
         return ROWOWScriptValue::FromNumber(0);
     });
     engine->RegisterCommand("stopnpctimer", [this, getNpc](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
@@ -818,7 +886,23 @@ void ROWOWMod::RegisterNpcScriptCommands()
         else
             map = sMapMgr->FindBaseNonInstanceMap(mapID);
         if (map == nullptr)
+        {
+            // An RO map that isn't loaded (an OnInit's monster at startup) gets them once it is (the world update spawns them)
+            if (mapID == 0 || context.AttachedPlayer != nullptr || IsROMap(mapID) == false)
+                return;
+            std::lock_guard<std::mutex> lock(NpcStateMutex);
+            for (int64 spawnIndex = 0; spawnIndex < std::min<int64>(amount, 1000); spawnIndex++)
+            {
+                ROWOWPendingScriptMob mob;
+                mob.MapID = mapID;
+                mob.X = x1 == x2 ? x1 : int32(urand(uint32(std::min(x1, x2)), uint32(std::max(x1, x2))));
+                mob.Y = y1 == y2 ? y1 : int32(urand(uint32(std::min(y1, y2)), uint32(std::max(y1, y2))));
+                mob.MobID = mobID;
+                mob.Event = event;
+                PendingScriptMobs.push_back(mob);
+            }
             return;
+        }
         for (int64 spawnIndex = 0; spawnIndex < std::min<int64>(amount, 1000); spawnIndex++)
         {
             int32 x = x1 == x2 ? x1 : int32(urand(uint32(std::min(x1, x2)), uint32(std::max(x1, x2))));
@@ -907,31 +991,32 @@ Creature* ROWOWMod::SpawnScriptMob(Map* map, uint32 mobID, int32 x, int32 y, std
     return creature;
 }
 
-void ROWOWMod::OnScriptMobDeath(Creature* creature, Unit* killer)
+bool ROWOWMod::OnScriptMobDeath(Creature* creature, Unit* killer)
 {
     // The monster's event (OnMyMobDead and the like) runs now, on its map's thread, with the player who killed it attached (mob_dead's
-    // npc_event with the killer's sd)
+    // npc_event with the killer's sd, after its run if it's in one).  True when it had an event
     std::string event;
     {
         std::lock_guard<std::mutex> lock(NpcStateMutex);
         auto scriptMobIter = ScriptMobsByGUID.find(creature->GetGUID());
         if (scriptMobIter == ScriptMobsByGUID.end())
-            return;
+            return false;
         event = scriptMobIter->second.Event;
         ScriptMobsByGUID.erase(scriptMobIter);
     }
     size_t separatorPosition = event.find("::");
     if (separatorPosition == std::string::npos)
-        return;
+        return false;
     ROWOWNpc const* npc = GetNpcByName(event.substr(0, separatorPosition));
     if (npc == nullptr || npc->Script == nullptr)
-        return;
+        return true;
     int64 labelIndex = npc->Script->GetLabel(event.substr(separatorPosition + 2));
     if (labelIndex < 0)
-        return;
+        return true;
     Player* killerPlayer = killer != nullptr ? killer->GetCharmerOrOwnerPlayerOrPlayerItself() : nullptr;
-    if (killerPlayer != nullptr && killerPlayer->GetMap() == creature->GetMap())
-        RunNpcEvent(npc, uint32(labelIndex), killerPlayer);
+    if (killerPlayer != nullptr && killerPlayer->GetMap() == creature->GetMap() && IsInROForm(killerPlayer) == true)
+        RunPlayerNpcEvent(killerPlayer, npc, uint32(labelIndex));
     else
         QueueNpcEvent(npc, event.substr(separatorPosition + 2));
+    return true;
 }

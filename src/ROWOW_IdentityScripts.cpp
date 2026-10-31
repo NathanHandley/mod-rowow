@@ -768,20 +768,27 @@ public:
         return true;
     }
 
-    // The NPC scripts (R7) until the RO NPC window: talk starts an NPC's script for the player (by name, or the selected NPC creature),
-    // and its dialog comes to the chat; next, select, input and close answer it, as the window's buttons will
-    static bool HandleRONpcTalkCommand(ChatHandler* handler, Optional<std::string> label, Tail npcName)
+    // The NPC scripts (R7): talk starts an NPC's script for the player from anywhere (by name, or the selected NPC creature), its dialog
+    // in the RO NPC window or, with -chat, the chat; next, select, input, close and cancel are the window's answers (players' too)
+    static bool HandleRONpcTalkCommand(ChatHandler* handler, Tail arguments)
     {
         Player* player = GetFormPlayer(handler);
         if (player == nullptr)
             return false;
-        // .ro npc talk <name> runs the NPC's start; .ro npc talk @<label> <name> one of its labels
-        std::string name = std::string(npcName);
+        // .ro npc talk [-chat] [@<label>] [<name>]: the NPC's start, or one of its labels
+        std::string name;
         std::string startLabel;
-        if (label.has_value() == true && label->empty() == false && (*label)[0] == '@')
-            startLabel = label->substr(1);
-        else if (label.has_value() == true)
-            name = name.empty() == true ? *label : *label + " " + name;
+        bool isChat = false;
+        for (std::string_view wordView : Acore::Tokenize(arguments, ' ', false))
+        {
+            std::string word(wordView);
+            if (name.empty() == true && word == "-chat")
+                isChat = true;
+            else if (name.empty() == true && startLabel.empty() == true && word.size() > 1 && word[0] == '@')
+                startLabel = word.substr(1);
+            else
+                name += (name.empty() == true ? "" : " ") + word;
+        }
         ROWOWNpc const* npc = name.empty() == true ? ROWOW->GetCreatureNpc(handler->getSelectedCreature()) : ROWOW->GetNpcByName(name, player->GetMapId());
         if (npc == nullptr || npc->Script == nullptr)
         {
@@ -789,7 +796,8 @@ public:
             return false;
         }
         handler->PSendSysMessage("Talking to {} ({}:{}).", npc->FullName, npc->SourceFile, npc->SourceLine);
-        if (ROWOW->StartNpcRun(player, npc, startLabel) == false)
+        ROWOWScriptDialog* dialog = isChat == true ? static_cast<ROWOWScriptDialog*>(&ROWOW->ChatScriptDialog) : &ROWOW->WindowScriptDialog;
+        if (ROWOW->StartNpcRun(player, npc, startLabel, dialog) == false)
             handler->SendSysMessage("That NPC can't be talked to now (disabled, or no such label).");
         return true;
     }

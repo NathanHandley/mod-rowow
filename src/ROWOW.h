@@ -1017,6 +1017,13 @@ struct ROWOWIdentity : public DataMap::Base
     ROWOWScriptVariables AccountVariables; // Its account's (#name and ##name, mod_rowow_account_variable), loaded and saved with it
     ROWOWScriptVariables PlayerVariables; // @name: the NPC scripts' variables until logout
     std::unique_ptr<ROWOWScriptContext> NpcRun; // The NPC script run talking with it (one at a time), waiting for its answer
+    std::deque<ROWOWNpcEvent> QueuedNpcEvents; // eventqueue: events for it that came during its run, run after it (npc_event_dequeue)
+    uint32 NpcTouchMapID = 0; // The cell its OnTouch areas were last checked on (they're checked when it moves to another)
+    int32 NpcTouchX = -1;
+    int32 NpcTouchY = -1;
+    std::vector<uint32> AreaNpcIDs; // areanpc: the NPCs whose OnTouch (or click) it set off and whose area it's still on
+    std::vector<uint32> OnTouchNpcIDs; // npc_ontouch_: the NPCs whose OnTouch_ it set off and whose area it's still on
+    uint32 NpcRangeCheckTimer = 0;
     std::array<ROWOWCartItem, ROWOW_MAX_CART> CartItems; // Its cart's items (mod_rowow_identity_cart), by cart slot
     int32 CartNum = 0; // cart_num: the slots in use
     int32 CartWeight = 0; // cart_weight and cart_weight_max, in tenths (item_db's Weight)
@@ -1792,7 +1799,8 @@ public:
     ROWOWNpc const* GetNpc(uint32 npcID) const;
     ROWOWNpc const* GetNpcByName(std::string const& name, uint32 preferredMapID = 0) const; // By exname, or else by the shown name
     ROWOWNpc const* GetCreatureNpc(Creature const* creature) const; // The NPC a creature stands for, or null
-    bool StartNpcRun(Player* player, ROWOWNpc const* npc, std::string const& label = std::string()); // Talking to the NPC (its start, or a label)
+    // Talking to the NPC (npc_click: its start, or a label), the dialog going to the RO NPC window (or the dialog given)
+    bool StartNpcRun(Player* player, ROWOWNpc const* npc, std::string const& label = std::string(), ROWOWScriptDialog* dialog = nullptr);
     void NpcDialogNext(Player* player); // The answers: Next, a menu choice (1 up, 255 cancels), an input, the Close button
     void NpcDialogSelect(Player* player, int32 choice);
     void NpcDialogInput(Player* player, std::string const& value);
@@ -1802,6 +1810,15 @@ public:
     void QueueNpcEvent(ROWOWNpc const* npc, std::string const& label); // Runs it with no player at the next world update (donpcevent)
     bool QueueNpcEvent(std::string const& eventName); // "<NPC>::<label>", false when there's no such NPC or label
     void RunNpcEvent(ROWOWNpc const* npc, uint32 instructionIndex, Player* player = nullptr); // Now, in the world update (or the player's thread)
+    void RunPlayerNpcEvent(Player* player, ROWOWNpc const* npc, uint32 instructionIndex, bool isTouch = false); // npc_event_sub: now, or after its run
+    void RunPlayerEvent(Player* player, uint8 eventType); // npc_script_event: an ROWOW_NPC_EVENT_* label of every NPC that has it, for the player
+    void UpdatePlayerNpcScripts(Player* player, uint32 diff); // Its sleeping run, queued events, OnTouch areas and the dialog's range (its update)
+    void CheckNpcTouchAreas(Player* player); // npc_touchnext_areanpc and npc_touch_area_allnpc at the cell it's on
+    void TouchNpcArea(Player* player, ROWOWNpc const* npc); // npc_touch_areanpc's script part: OnTouch_, else OnTouch, else a click
+    void ForgetNpcTouches(Player* player); // Leaving the world: the OnTouch_ NPCs it held are free
+    bool IsHidingFromNpcs(Player* player) const; // pc_ishiding: hidden, cloaked or chase walking
+    void SetNpcTimerPlayer(ROWOWNpc const* npc, ObjectGuid playerGUID); // attachnpctimer (detachnpctimer: an empty GUID)
+
     void SetNpcEnabled(ROWOWNpc const* npc, bool isEnabled); // enablenpc and disablenpc
     void SetNpcHidden(ROWOWNpc const* npc, bool isHidden); // hideoffnpc and hideonnpc
     void NpcTimerStart(ROWOWNpc const* npc, bool isFromZero); // initnpctimer (from 0) and startnpctimer
@@ -1824,8 +1841,14 @@ public:
     std::unordered_map<ObjectGuid, ROWOWScriptMob> ScriptMobsByGUID; // Living script monsters, under NpcStateMutex
     std::vector<ROWOWScriptMobKill> PendingScriptMobKills; // Under NpcStateMutex
     Creature* SpawnScriptMob(Map* map, uint32 mobID, int32 x, int32 y, std::string const& event); // monster: on the map's thread (or with maps idle)
-    void OnScriptMobDeath(Creature* creature, Unit* killer); // The event its death runs, with the killer attached
-    ROWOWChatScriptDialog ChatScriptDialog; // Where player runs' dialogs go until the RO NPC window (R7.3)
+    bool OnScriptMobDeath(Creature* creature, Unit* killer); // The event its death runs, with the killer attached (false: it had none)
+    std::vector<ROWOWPendingScriptMob> PendingScriptMobs; // Under NpcStateMutex: monsters for maps not loaded yet
+    std::unordered_map<uint32, std::vector<uint32>> TouchNpcIDsByMapID; // The NPCs with an OnTouch area, by WoW map (startup data)
+    std::vector<ROWOWNpcEvent> PlayerEventLabels[ROWOW_NPC_EVENT_COUNT]; // script_event: each player event's labels (startup data)
+    std::unordered_map<std::string, std::vector<ROWOWNpcEvent>> ClockEventsByLabel; // OnClock/OnHour/OnMinute/On<day>/OnDay labels, lowercase
+    int64 LastClockMinute = 0; // The minute (since the epoch) npc_event_do_clock last ran for
+    ROWOWChatScriptDialog ChatScriptDialog; // For GM testing (.ro npc talk -chat)
+    ROWOWWindowScriptDialog WindowScriptDialog; // The RO NPC window: every player run's dialog
     uint32 GlobalVariableSaveTimer = 0;
 
 private:

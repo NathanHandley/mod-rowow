@@ -200,6 +200,7 @@ struct ROWOWScriptContext
     bool IsRerunLine = false; // RERUNLINE: the waiting command runs again (with the same arguments) when the answer comes
     uint64 SleepUntil = 0; // GameTime::GetGameTimeMS of the wake up
     ROWOWScriptDialog* Dialog = nullptr; // Where the dialog goes, null when the run has none (an event)
+    bool IsNearNpcNeeded = false; // npc_checknear: the player's run ends when it goes out of the NPC's range (not for the GM's talk)
     bool IsMesActive = false; // mes_active: a dialog window is open
     bool IsMenuOrInput = false; // state.menu_or_input: the answer to the menu or input asked is in
     int32 NpcMenu = 0; // npc_menu: the choice made (1 up, 255 cancel)
@@ -211,8 +212,8 @@ struct ROWOWScriptContext
     ROWOWScript const* GetScript() const { return Frames.empty() == true ? nullptr : Frames.back().Script; }
 };
 
-// Where an NPC dialog goes: the RO NPC window (R7.3) or, for testing, the chat.  The engine's dialog commands call it; the answers come
-// back through ROWOWMod's NpcDialog* functions (next, select, input, close), which resume the run
+// Where an NPC dialog goes: the RO NPC window (ROWOWWindowScriptDialog) or, for testing, the chat.  The engine's dialog commands call it;
+// the answers come back through ROWOWMod's NpcDialog* functions (next, select, input, close), which resume the run
 class ROWOWScriptDialog
 {
 public:
@@ -222,7 +223,7 @@ public:
     virtual void SendClose(Player* player, ROWOWNpc const* npc) = 0; // clif_scriptclose: the Close button
     virtual void SendClear(Player* player, ROWOWNpc const* npc) = 0; // clif_scriptclear (clear): the text so far goes
     virtual void SendMenu(Player* player, ROWOWNpc const* npc, std::vector<std::string> const& options) = 0; // clif_scriptmenu
-    virtual void SendInput(Player* player, ROWOWNpc const* npc, bool isString) = 0; // clif_scriptinput, clif_scriptinputstr
+    virtual void SendInput(Player* player, ROWOWNpc const* npc, bool isString, int64 minimum, int64 maximum) = 0; // clif_scriptinput(str), with its bounds
     virtual void SendCutin(Player* player, std::string const& image, int32 position) = 0; // clif_cutin (position 255 takes it off)
     virtual void SendEnd(Player* player, ROWOWNpc const* npc) = 0; // The run is over: the window goes
 };

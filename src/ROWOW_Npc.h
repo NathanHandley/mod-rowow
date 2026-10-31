@@ -31,6 +31,17 @@
 // and functions once at startup.  An NPC that stands in the world is a creature row (the converter's town NPCs), tied to its NPC by
 // mod_rowow_creature_npc
 
+// The player events of rAthena's script_event (npce_event) the scripts use: every NPC's label of that name runs with the player attached
+enum ROWOWNpcEventType : uint8
+{
+    ROWOW_NPC_EVENT_LOGIN,      // OnPCLoginEvent: entering the RO world in the form (a login, or the form starting)
+    ROWOW_NPC_EVENT_LOGOUT,     // OnPCLogoutEvent
+    ROWOW_NPC_EVENT_DIE,        // OnPCDieEvent
+    ROWOW_NPC_EVENT_KILL_PC,    // OnPCKillEvent: the player killed a player
+    ROWOW_NPC_EVENT_KILL_NPC,   // OnNPCKillEvent: the player killed a monster
+    ROWOW_NPC_EVENT_COUNT
+};
+
 // An NPC's timer (rAthena's npc_data u.scr timer fields): its OnTimer<ms> labels go off as the time passes them, attached to no player
 struct ROWOWNpcTimer
 {
@@ -67,13 +78,34 @@ struct ROWOWNpc
     bool IsEnabled = true; // disablenpc
     bool IsHidden = false; // hideonnpc
     ROWOWNpcTimer Timer;
+    ObjectGuid TimerPlayerGUID; // The player its timer's labels run with (attachnpctimer, initnpctimer's attach flag), empty for none
+    ObjectGuid TouchingPlayerGUID; // touching_id: the one player its OnTouch_ ran for, until that player leaves the area
+
+    bool IsClassless() const { return Sprite == "-1" || Sprite == "FAKE_NPC"; } // class_ < 0: clicked from anywhere (npc_checknear)
+    bool IsInArea(uint32 mapID, int32 x, int32 y) const // On its OnTouch area
+    {
+        return TriggerSpanX >= 0 && TriggerSpanY >= 0 && mapID == MapID && x >= X - TriggerSpanX && x <= X + TriggerSpanX && y >= Y - TriggerSpanY && y <= Y + TriggerSpanY;
+    }
 };
 
-// An NPC event waiting for the world update (donpcevent from a map thread, a timer's label): run attached to no player
+// An NPC event waiting for the world update (donpcevent from a map thread, a timer's label): run attached to no player, or to the player
+// of TimerPlayerGUID (an attached timer).  For a player's queue (npc_event_enqueue), one that waits for its current run to end
 struct ROWOWNpcEvent
 {
     uint32 NpcID = 0;
     uint32 InstructionIndex = 0;
+    ObjectGuid PlayerGUID;
+    bool IsTouch = false; // An OnTouch label: it runs only if the player is still on the NPC's area (npc_event_dequeue)
+};
+
+// A monster a script spawned on a map that isn't loaded yet (an OnInit's monster at startup): it spawns once the map is (world update)
+struct ROWOWPendingScriptMob
+{
+    uint32 MapID = 0;
+    int32 X = 0;
+    int32 Y = 0;
+    uint32 MobID = 0;
+    std::string Event;
 };
 
 // An announcement a script made (announce, mapannounce), sent by the world update: to everyone, or to the players of a map
@@ -98,7 +130,7 @@ struct ROWOWScriptMobKill
     bool IsAll = false;
 };
 
-// The NPC dialog going to the chat, for testing until the RO NPC window (R7.3): .ro npc next / select / input / close answer it
+// The NPC dialog going to the chat, for GM testing (.ro npc talk -chat): .ro npc next / select / input / close answer it
 class ROWOWChatScriptDialog : public ROWOWScriptDialog
 {
 public:
@@ -107,7 +139,22 @@ public:
     void SendClose(Player* player, ROWOWNpc const* npc) override;
     void SendClear(Player* player, ROWOWNpc const* npc) override;
     void SendMenu(Player* player, ROWOWNpc const* npc, std::vector<std::string> const& options) override;
-    void SendInput(Player* player, ROWOWNpc const* npc, bool isString) override;
+    void SendInput(Player* player, ROWOWNpc const* npc, bool isString, int64 minimum, int64 maximum) override;
+    void SendCutin(Player* player, std::string const& image, int32 position) override;
+    void SendEnd(Player* player, ROWOWNpc const* npc) override;
+};
+
+// The NPC dialog going to the RO NPC window (RO_Identity_NpcDialog.lua) as ROWOWNPC addon messages; its buttons answer with the same
+// .ro npc next / select / input / close commands.  See RONotes\R7-script.md "The RO NPC window"
+class ROWOWWindowScriptDialog : public ROWOWScriptDialog
+{
+public:
+    void SendMes(Player* player, ROWOWNpc const* npc, std::string const& text) override;
+    void SendNext(Player* player, ROWOWNpc const* npc) override;
+    void SendClose(Player* player, ROWOWNpc const* npc) override;
+    void SendClear(Player* player, ROWOWNpc const* npc) override;
+    void SendMenu(Player* player, ROWOWNpc const* npc, std::vector<std::string> const& options) override;
+    void SendInput(Player* player, ROWOWNpc const* npc, bool isString, int64 minimum, int64 maximum) override;
     void SendCutin(Player* player, std::string const& image, int32 position) override;
     void SendEnd(Player* player, ROWOWNpc const* npc) override;
 };

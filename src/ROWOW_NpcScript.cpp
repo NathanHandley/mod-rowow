@@ -25,14 +25,18 @@
 #include "Log.h"
 #include "Map.h"
 #include "MapMgr.h"
+#include "ObjectAccessor.h"
 #include "Player.h"
 #include "QueryResult.h"
 #include "ScriptMgr.h"
 #include "Timer.h"
+#include "WorldPacket.h"
 #include "WorldSession.h"
 
 #include "ROWOW.h"
 #include "ROWOW_ScriptConstants.h"
+
+#include <ctime>
 
 using namespace std;
 
@@ -93,6 +97,97 @@ namespace
             return ROWOWScriptValue::FromText(text);
         return ROWOWScriptValue::FromNumber(value);
     }
+
+    // The most text one ROWOWNPC message carries; a longer mes line goes in pieces
+    constexpr size_t NPC_WINDOW_TEXT_PIECE_LENGTH = 200;
+
+    // MAX_EVENTQUEUE: the events a player's queue holds while its run goes on
+    constexpr size_t MAX_QUEUED_NPC_EVENTS = 2;
+
+    // How often a player's dialog checks it's still in the NPC's range
+    constexpr uint32 NPC_RANGE_CHECK_INTERVAL_IN_MS = 500;
+
+    // The label names of the player events (script_config's *_event_name), by ROWOWNpcEventType
+    char const* const PLAYER_EVENT_LABEL_NAMES[ROWOW_NPC_EVENT_COUNT] = { "OnPCLoginEvent", "OnPCLogoutEvent", "OnPCDieEvent", "OnPCKillEvent", "OnNPCKillEvent" };
+
+    // The RO NPC window's messages (RO_Identity_NpcDialog.lua): "ROWOWNPC<tab><kind>[<tab><values>]"
+    void SendNpcWindowMessage(Player* player, std::string const& message)
+    {
+        WorldPacket data;
+        ChatHandler::BuildChatPacket(data, CHAT_MSG_SYSTEM, LANG_ADDON, nullptr, nullptr, "ROWOWNPC\t" + message);
+        player->SendDirectMessage(&data);
+    }
+
+    // Text as a message value: no tabs or line breaks (the message's separators)
+    std::string GetNpcWindowText(std::string text)
+    {
+        for (char& curChar : text)
+            if (curChar == '\t' || curChar == '\r' || curChar == '\n')
+                curChar = ' ';
+        return text;
+    }
+}
+
+void ROWOWWindowScriptDialog::SendMes(Player* player, ROWOWNpc const* /*npc*/, std::string const& text)
+{
+    // "M<tab><line>", after "P<tab><piece>" for each piece of a long line (never cut inside a UTF-8 character).  The line is RO's text,
+    // ^RRGGBB colors and all, which the window turns into its own
+    std::string line = GetNpcWindowText(text);
+    while (line.size() > NPC_WINDOW_TEXT_PIECE_LENGTH)
+    {
+        size_t pieceLength = NPC_WINDOW_TEXT_PIECE_LENGTH;
+        while (pieceLength > 0 && (uint8(line[pieceLength]) & 0xC0) == 0x80)
+            pieceLength--;
+        SendNpcWindowMessage(player, "P\t" + line.substr(0, pieceLength));
+        line.erase(0, pieceLength);
+    }
+    SendNpcWindowMessage(player, "M\t" + line);
+}
+
+void ROWOWWindowScriptDialog::SendNext(Player* player, ROWOWNpc const* /*npc*/)
+{
+    SendNpcWindowMessage(player, "N");
+}
+
+void ROWOWWindowScriptDialog::SendClose(Player* player, ROWOWNpc const* /*npc*/)
+{
+    SendNpcWindowMessage(player, "C");
+}
+
+void ROWOWWindowScriptDialog::SendClear(Player* player, ROWOWNpc const* /*npc*/)
+{
+    SendNpcWindowMessage(player, "L");
+}
+
+void ROWOWWindowScriptDialog::SendMenu(Player* player, ROWOWNpc const* /*npc*/, std::vector<std::string> const& options)
+{
+    // "O<tab><option>" for each option in order (the empty ones too, which the window hides but counts), then "U" shows them
+    for (std::string const& option : options)
+    {
+        std::string optionText = GetNpcWindowText(option);
+        size_t optionLength = std::min(optionText.size(), NPC_WINDOW_TEXT_PIECE_LENGTH);
+        while (optionLength < optionText.size() && optionLength > 0 && (uint8(optionText[optionLength]) & 0xC0) == 0x80)
+            optionLength--;
+        SendNpcWindowMessage(player, "O\t" + optionText.substr(0, optionLength));
+    }
+    SendNpcWindowMessage(player, "U");
+}
+
+void ROWOWWindowScriptDialog::SendInput(Player* player, ROWOWNpc const* /*npc*/, bool isString, int64 minimum, int64 maximum)
+{
+    // "I<tab><1 for text, 0 for a number><tab><min><tab><max>" (a text's bounds are its length)
+    SendNpcWindowMessage(player, fmt::format("I\t{}\t{}\t{}", isString == true ? 1 : 0, minimum, maximum));
+}
+
+void ROWOWWindowScriptDialog::SendCutin(Player* player, std::string const& image, int32 position)
+{
+    // "X<tab><image><tab><position>": 0 bottom left, 1 bottom center, 2 bottom right, 3 and 4 the middle; 255 takes them away
+    SendNpcWindowMessage(player, fmt::format("X\t{}\t{}", GetNpcWindowText(image), position));
+}
+
+void ROWOWWindowScriptDialog::SendEnd(Player* player, ROWOWNpc const* /*npc*/)
+{
+    SendNpcWindowMessage(player, "E");
 }
 
 void ROWOWChatScriptDialog::SendMes(Player* player, ROWOWNpc const* npc, std::string const& text)
@@ -124,9 +219,9 @@ void ROWOWChatScriptDialog::SendMenu(Player* player, ROWOWNpc const* /*npc*/, st
     handler.SendSysMessage("|cff88ccff[Menu]|r (.ro npc select <number>, 255 cancels)");
 }
 
-void ROWOWChatScriptDialog::SendInput(Player* player, ROWOWNpc const* /*npc*/, bool isString)
+void ROWOWChatScriptDialog::SendInput(Player* player, ROWOWNpc const* /*npc*/, bool isString, int64 minimum, int64 maximum)
 {
-    ChatHandler(player->GetSession()).PSendSysMessage("|cff88ccff[Input {}]|r (.ro npc input <value>)", isString == true ? "text" : "number");
+    ChatHandler(player->GetSession()).PSendSysMessage("|cff88ccff[Input {} {}-{}]|r (.ro npc input <value>)", isString == true ? "text" : "number", minimum, maximum);
 }
 
 void ROWOWChatScriptDialog::SendCutin(Player* player, std::string const& image, int32 position)
@@ -146,6 +241,10 @@ void ROWOWMod::LoadNpcScriptData()
     NpcsByName.clear();
     NpcsByCreatureSpawnID.clear();
     BattleFlagsByName.clear();
+    TouchNpcIDsByMapID.clear();
+    for (std::vector<ROWOWNpcEvent>& eventLabels : PlayerEventLabels)
+        eventLabels.clear();
+    ClockEventsByLabel.clear();
     if (IsEnabled == false)
         return;
     uint32 oldMSTime = getMSTime();
@@ -382,6 +481,52 @@ void ROWOWMod::LoadNpcScriptData()
         }
     }
 
+    // The NPCs with an OnTouch area on a converted map, each player event's labels (npc_read_event_script), and the clock labels
+    // (npc_event_do_clock's OnMinute<mm>, OnClock<hhmm>, OnHour<hh>, On<Day><hhmm>, OnDay<MMdd>)
+    uint32 touchNpcCount = 0;
+    uint32 clockLabelCount = 0;
+    for (std::unique_ptr<ROWOWNpc> const& npc : NpcsByID)
+    {
+        if (npc->Script == nullptr || npc->Script->Error.empty() == false)
+            continue;
+        if (npc->TriggerSpanX >= 0 && npc->TriggerSpanY >= 0 && npc->MapID != 0)
+        {
+            TouchNpcIDsByMapID[npc->MapID].push_back(npc->ID);
+            touchNpcCount++;
+        }
+        for (uint8 eventType = 0; eventType < ROWOW_NPC_EVENT_COUNT; eventType++)
+        {
+            int64 labelIndex = npc->Script->GetLabel(PLAYER_EVENT_LABEL_NAMES[eventType]);
+            if (labelIndex < 0)
+                continue;
+            ROWOWNpcEvent npcEvent;
+            npcEvent.NpcID = npc->ID;
+            npcEvent.InstructionIndex = uint32(labelIndex);
+            PlayerEventLabels[eventType].push_back(npcEvent);
+        }
+        for (auto const& labelByName : npc->Script->LabelsByName)
+        {
+            std::string const& labelName = labelByName.first;
+            static char const* const clockPrefixes[] = { "onminute", "onclock", "onhour", "onsun", "onmon", "ontue", "onwed", "onthu", "onfri", "onsat", "onday" };
+            bool isClockLabel = false;
+            for (char const* clockPrefix : clockPrefixes)
+            {
+                size_t prefixLength = strlen(clockPrefix);
+                if (labelName.size() > prefixLength && labelName.compare(0, prefixLength, clockPrefix) == 0 && isdigit((unsigned char)labelName[prefixLength]))
+                    isClockLabel = true;
+            }
+            if (isClockLabel == false)
+                continue;
+            ROWOWNpcEvent npcEvent;
+            npcEvent.NpcID = npc->ID;
+            npcEvent.InstructionIndex = labelByName.second;
+            ClockEventsByLabel[labelName].push_back(npcEvent);
+            clockLabelCount++;
+        }
+    }
+    time_t nowTime = time(nullptr);
+    LastClockMinute = int64(nowTime / 60);
+
     uint32 scriptNpcCount = 0;
     uint32 floatingNpcCount = 0;
     uint32 shopCount = 0;
@@ -398,9 +543,9 @@ void ROWOWMod::LoadNpcScriptData()
         LOG_ERROR("module.ROWOW", "ROWOWMod::LoadNpcScriptData: {}", parseErrors[errorIndex]);
     LOG_INFO("module.ROWOW", "ROWOWMod::LoadNpcScriptData read {} script files: {} NPCs ({} placed, {} floating, {} of them duplicates, {} shops), {} functions, "
         "{} other definitions (warps, monsters, map flags), {} duplicates of warps or unknown NPCs, {} exnames given twice, {} parse errors; {} creatures tied to "
-        "their NPCs ({} creature rows match no NPC) in {} ms", scriptFiles.size(), NpcsByID.size(), scriptNpcCount, floatingNpcCount, duplicateCount, shopCount,
-        functionCount, otherDefinitionCount, warpDuplicateCount, duplicateNameCount, parseErrors.size(), mappedCreatureCount, unmatchedCreatureCount,
-        GetMSTimeDiffToNow(oldMSTime));
+        "their NPCs ({} creature rows match no NPC), {} OnTouch areas, {} clock labels in {} ms", scriptFiles.size(), NpcsByID.size(), scriptNpcCount,
+        floatingNpcCount, duplicateCount, shopCount, functionCount, otherDefinitionCount, warpDuplicateCount, duplicateNameCount, parseErrors.size(), mappedCreatureCount,
+        unmatchedCreatureCount, touchNpcCount, clockLabelCount, GetMSTimeDiffToNow(oldMSTime));
 
     // The commands the scripts use, how often, in how many files, and whether the engine has them (for RONotes\script-commands.md)
     std::string commandReport;
@@ -436,7 +581,13 @@ void ROWOWMod::LoadNpcScriptData()
         else if (context.Wait == ROWOW_SCRIPT_WAIT_SLEEP)
             SleepingNpcRuns.push_back(std::make_unique<ROWOWScriptContext>(std::move(context)));
     }
-    LOG_INFO("module.ROWOW", "ROWOWMod::LoadNpcScriptData ran {} OnInit labels, {} of them stopped early (a command not in yet, or an error)", initCount, initStoppedCount);
+    size_t pendingMobCount = 0;
+    {
+        std::lock_guard<std::mutex> lock(NpcStateMutex);
+        pendingMobCount = PendingScriptMobs.size();
+    }
+    LOG_INFO("module.ROWOW", "ROWOWMod::LoadNpcScriptData ran {} OnInit labels, {} of them stopped early (a command not in yet, or an error); {} script monsters wait for "
+        "their maps to load", initCount, initStoppedCount, pendingMobCount);
 }
 
 ROWOWNpc const* ROWOWMod::GetNpc(uint32 npcID) const
@@ -485,9 +636,10 @@ void ROWOWMod::SetupNpcRunContext(ROWOWScriptContext& context, Player* player, R
     }
 }
 
-bool ROWOWMod::StartNpcRun(Player* player, ROWOWNpc const* npc, std::string const& label)
+bool ROWOWMod::StartNpcRun(Player* player, ROWOWNpc const* npc, std::string const& label, ROWOWScriptDialog* dialog)
 {
-    // npc_click / npc_event: one run per player, so a new one ends the one before
+    // npc_click / npc_event: one run per player, so a new one ends the one before.  A click's dialog goes to the RO NPC window and ends
+    // when the player goes out of range (npc_checknear); the GM's talk gives its dialog (the window or the chat) and talks from anywhere
     if (player == nullptr || npc == nullptr || npc->Script == nullptr || npc->Script->Error.empty() == false)
         return false;
     {
@@ -509,7 +661,8 @@ bool ROWOWMod::StartNpcRun(Player* player, ROWOWNpc const* npc, std::string cons
     identity->NpcRun = std::make_unique<ROWOWScriptContext>();
     ROWOWScriptContext& context = *identity->NpcRun;
     SetupNpcRunContext(context, player, npc);
-    context.Dialog = &ChatScriptDialog;
+    context.Dialog = dialog != nullptr ? dialog : &WindowScriptDialog;
+    context.IsNearNpcNeeded = dialog == nullptr;
     context.InstructionIndex = startIndex;
     ROWOWSCRIPT->Run(*npc->Script, context);
     if (identity->NpcRun != nullptr && identity->NpcRun->IsStopped == true)
@@ -597,10 +750,18 @@ void ROWOWMod::RunNpcEvent(ROWOWNpc const* npc, uint32 instructionIndex, Player*
     SetupNpcRunContext(*context, player, npc);
     context->InstructionIndex = instructionIndex;
     if (player != nullptr)
-        context->Dialog = &ChatScriptDialog;
+    {
+        context->Dialog = &WindowScriptDialog;
+        context->IsNearNpcNeeded = true;
+    }
     ROWOWSCRIPT->Run(*npc->Script, *context);
     if (context->IsStopped == true || context->IsWaiting() == false)
+    {
+        // A dialog the run opened goes with it
+        if (player != nullptr && context->IsMesActive == true && player->GetSession() != nullptr)
+            context->Dialog->SendEnd(player, npc);
         return;
+    }
     if (player == nullptr)
     {
         if (context->Wait == ROWOW_SCRIPT_WAIT_SLEEP)
@@ -610,6 +771,235 @@ void ROWOWMod::RunNpcEvent(ROWOWNpc const* npc, uint32 instructionIndex, Player*
     ROWOWIdentity* identity = GetIdentity(player);
     if (identity->NpcRun == nullptr)
         identity->NpcRun = std::move(context);
+}
+
+void ROWOWMod::RunPlayerNpcEvent(Player* player, ROWOWNpc const* npc, uint32 instructionIndex, bool isTouch)
+{
+    // npc_event_sub: a player in a run gets the event once the run ends (npc_event_enqueue, at most MAX_EVENTQUEUE).  In its thread
+    if (player == nullptr || npc == nullptr)
+        return;
+    ROWOWIdentity* identity = GetIdentity(player);
+    if (identity->NpcRun != nullptr)
+    {
+        if (identity->QueuedNpcEvents.size() >= MAX_QUEUED_NPC_EVENTS)
+            return;
+        ROWOWNpcEvent npcEvent;
+        npcEvent.NpcID = npc->ID;
+        npcEvent.InstructionIndex = instructionIndex;
+        npcEvent.IsTouch = isTouch;
+        identity->QueuedNpcEvents.push_back(npcEvent);
+        return;
+    }
+    RunNpcEvent(npc, instructionIndex, player);
+}
+
+void ROWOWMod::RunPlayerEvent(Player* player, uint8 eventType)
+{
+    // npc_script_event: OnPCDieEvent and the others, every NPC's label of the name, with the player attached
+    if (player == nullptr || eventType >= ROWOW_NPC_EVENT_COUNT || IsInROForm(player) == false)
+        return;
+    for (ROWOWNpcEvent const& npcEvent : PlayerEventLabels[eventType])
+        RunPlayerNpcEvent(player, GetNpc(npcEvent.NpcID), npcEvent.InstructionIndex);
+}
+
+void ROWOWMod::UpdatePlayerNpcScripts(Player* player, uint32 diff)
+{
+    // The player's update (its map's thread): its sleeping run wakes, its queued events run once it has no run, its OnTouch areas are
+    // checked when it's on another cell, and its dialog ends when it's out of the NPC's range
+    ROWOWIdentity* identity = GetIdentity(player);
+    if (identity->NpcRun != nullptr && identity->NpcRun->Wait == ROWOW_SCRIPT_WAIT_SLEEP && uint64(GameTime::GetGameTimeMS().count()) >= identity->NpcRun->SleepUntil)
+    {
+        ROWOWSCRIPT->Resume(*identity->NpcRun);
+        if (identity->NpcRun != nullptr && identity->NpcRun->IsStopped == true)
+            EndNpcRun(player);
+    }
+
+    // npc_event_dequeue: an OnTouch event only while the player is still on the area
+    while (identity->NpcRun == nullptr && identity->QueuedNpcEvents.empty() == false)
+    {
+        ROWOWNpcEvent npcEvent = identity->QueuedNpcEvents.front();
+        identity->QueuedNpcEvents.pop_front();
+        ROWOWNpc const* npc = GetNpc(npcEvent.NpcID);
+        if (npc == nullptr)
+            continue;
+        if (npcEvent.IsTouch == true)
+        {
+            int32 x = 0, y = 0;
+            GetUnitCell(player, x, y);
+            if (npc->IsInArea(player->GetMapId(), x, y) == false)
+                continue;
+        }
+        RunNpcEvent(npc, npcEvent.InstructionIndex, player);
+    }
+
+    CheckNpcTouchAreas(player);
+
+    // The dialog of an NPC with a place ends when the player is off its map or more than AREA_SIZE + 1 cells away (npc_checknear)
+    identity->NpcRangeCheckTimer += diff;
+    if (identity->NpcRangeCheckTimer < NPC_RANGE_CHECK_INTERVAL_IN_MS)
+        return;
+    identity->NpcRangeCheckTimer = 0;
+    ROWOWScriptContext const* run = identity->NpcRun.get();
+    if (run == nullptr || run->IsNearNpcNeeded == false || run->Npc == nullptr || run->Npc->MapID == 0 || run->Npc->IsClassless() == true ||
+        run->Wait == ROWOW_SCRIPT_WAIT_SLEEP)
+        return;
+    int32 x = 0, y = 0;
+    GetUnitCell(player, x, y);
+    int32 range = BattleConfig.AreaSize + 1;
+    if (player->GetMapId() != run->Npc->MapID || std::abs(x - run->Npc->X) > range || std::abs(y - run->Npc->Y) > range)
+        EndNpcRun(player);
+}
+
+void ROWOWMod::CheckNpcTouchAreas(Player* player)
+{
+    // unit_walktoxy_timer's npc_touchnext_areanpc and npc_touch_area_allnpc, when the player is on another cell (its map's thread)
+    ROWOWIdentity* identity = GetIdentity(player);
+    uint32 mapID = player->GetMapId();
+    int32 x = 0, y = 0;
+    GetUnitCell(player, x, y);
+    if (mapID == identity->NpcTouchMapID && x == identity->NpcTouchX && y == identity->NpcTouchY)
+        return;
+    bool isSameMap = mapID == identity->NpcTouchMapID;
+    identity->NpcTouchMapID = mapID;
+    identity->NpcTouchX = x;
+    identity->NpcTouchY = y;
+
+    // npc_touchnext_areanpc: off an OnTouch_ area the NPC is free again, and its OnTouch_ goes to another player on the area (on this map
+    // only: another map is another thread's)
+    for (size_t npcIndex = 0; npcIndex < identity->OnTouchNpcIDs.size();)
+    {
+        ROWOWNpc const* npc = GetNpc(identity->OnTouchNpcIDs[npcIndex]);
+        if (npc != nullptr && npc->IsInArea(mapID, x, y) == true)
+        {
+            npcIndex++;
+            continue;
+        }
+        identity->OnTouchNpcIDs.erase(identity->OnTouchNpcIDs.begin() + npcIndex);
+        if (npc == nullptr)
+            continue;
+        bool wasTouching = false;
+        {
+            std::lock_guard<std::mutex> lock(NpcStateMutex);
+            ROWOWNpc* touchedNpc = NpcsByID[npc->ID - 1].get();
+            if (touchedNpc->TouchingPlayerGUID == player->GetGUID())
+            {
+                touchedNpc->TouchingPlayerGUID.Clear();
+                wasTouching = true;
+            }
+        }
+        if (wasTouching == false || isSameMap == false || player->GetMap() == nullptr)
+            continue;
+        Player* nextPlayer = nullptr;
+        player->GetMap()->DoForAllPlayers([&](Player* otherPlayer)
+        {
+            // npc_touch_areanpc_sub: not one warping, hiding or dead
+            if (nextPlayer != nullptr || otherPlayer == player || otherPlayer->IsBeingTeleported() == true || otherPlayer->IsAlive() == false ||
+                IsInROForm(otherPlayer) == false || IsHidingFromNpcs(otherPlayer) == true)
+                return;
+            int32 otherX = 0, otherY = 0;
+            GetUnitCell(otherPlayer, otherX, otherY);
+            if (npc->IsInArea(otherPlayer->GetMapId(), otherX, otherY) == true)
+                nextPlayer = otherPlayer;
+        });
+        int64 labelIndex = npc->Script->GetLabel("OnTouch_");
+        if (nextPlayer == nullptr || labelIndex < 0)
+            continue;
+        {
+            std::lock_guard<std::mutex> lock(NpcStateMutex);
+            NpcsByID[npc->ID - 1]->TouchingPlayerGUID = nextPlayer->GetGUID();
+        }
+        ROWOWIdentity* nextIdentity = GetIdentity(nextPlayer);
+        if (std::find(nextIdentity->OnTouchNpcIDs.begin(), nextIdentity->OnTouchNpcIDs.end(), npc->ID) == nextIdentity->OnTouchNpcIDs.end())
+            nextIdentity->OnTouchNpcIDs.push_back(npc->ID);
+        RunPlayerNpcEvent(nextPlayer, npc, uint32(labelIndex), true);
+    }
+
+    // npc_touch_area_allnpc: the areas it's left are forgotten, then each it's on is touched (warps are the converter's zone lines)
+    identity->AreaNpcIDs.erase(std::remove_if(identity->AreaNpcIDs.begin(), identity->AreaNpcIDs.end(), [&](uint32 npcID)
+    {
+        ROWOWNpc const* npc = GetNpc(npcID);
+        return npc == nullptr || npc->IsInArea(mapID, x, y) == false;
+    }), identity->AreaNpcIDs.end());
+    auto npcIDsIter = TouchNpcIDsByMapID.find(mapID);
+    if (npcIDsIter == TouchNpcIDsByMapID.end() || IsInROForm(player) == false || player->IsBeingTeleported() == true)
+        return;
+    for (uint32 npcID : npcIDsIter->second)
+    {
+        ROWOWNpc const* npc = GetNpc(npcID);
+        if (npc != nullptr && npc->IsInArea(mapID, x, y) == true)
+            TouchNpcArea(player, npc);
+    }
+}
+
+bool ROWOWMod::IsHidingFromNpcs(Player* player) const
+{
+    // pc_ishiding
+    ROWOWStatusChange const* sc = GetStatusChange(static_cast<Unit const*>(player));
+    return sc != nullptr && (sc->Option & (ROWOW_OPTION_HIDE | ROWOW_OPTION_CLOAK | ROWOW_OPTION_CHASEWALK)) != 0;
+}
+
+void ROWOWMod::TouchNpcArea(Player* player, ROWOWNpc const* npc)
+{
+    // npc_touch_areanpc for a script NPC: a disabled one does nothing.  OnTouch_ (npc_ontouch_event: one player at a time, not one dead
+    // or hiding), else OnTouch (npc_ontouch2_event: each player once per entry), else the NPC is clicked
+    if (player->IsAlive() == false)
+        return;
+    ROWOWIdentity* identity = GetIdentity(player);
+    int64 touchLabelIndex = npc->Script->GetLabel("OnTouch_");
+    {
+        std::lock_guard<std::mutex> lock(NpcStateMutex);
+        ROWOWNpc* touchedNpc = NpcsByID[npc->ID - 1].get();
+        if (touchedNpc->IsEnabled == false || touchedNpc->TouchingPlayerGUID.IsEmpty() == false)
+            return;
+        if (std::find(identity->OnTouchNpcIDs.begin(), identity->OnTouchNpcIDs.end(), npc->ID) != identity->OnTouchNpcIDs.end())
+            return;
+        if (touchLabelIndex >= 0)
+        {
+            if (IsHidingFromNpcs(player) == true)
+                return;
+            touchedNpc->TouchingPlayerGUID = player->GetGUID();
+        }
+    }
+    if (touchLabelIndex >= 0)
+    {
+        identity->OnTouchNpcIDs.push_back(npc->ID);
+        RunPlayerNpcEvent(player, npc, uint32(touchLabelIndex), true);
+        return;
+    }
+    if (std::find(identity->AreaNpcIDs.begin(), identity->AreaNpcIDs.end(), npc->ID) != identity->AreaNpcIDs.end())
+        return;
+    identity->AreaNpcIDs.push_back(npc->ID);
+    int64 touch2LabelIndex = npc->Script->GetLabel("OnTouch");
+    if (touch2LabelIndex >= 0)
+        RunPlayerNpcEvent(player, npc, uint32(touch2LabelIndex), true);
+    else if (identity->NpcRun == nullptr)
+        StartNpcRun(player, npc);
+}
+
+void ROWOWMod::ForgetNpcTouches(Player* player)
+{
+    // Leaving the world (npc_touchnext_areanpc's leavemap): the OnTouch_ NPCs it held are free again, with no hand-off (the next player to
+    // step on the area takes it)
+    ROWOWIdentity* identity = GetIdentity(player);
+    {
+        std::lock_guard<std::mutex> lock(NpcStateMutex);
+        for (uint32 npcID : identity->OnTouchNpcIDs)
+            if (npcID != 0 && npcID <= NpcsByID.size() && NpcsByID[npcID - 1]->TouchingPlayerGUID == player->GetGUID())
+                NpcsByID[npcID - 1]->TouchingPlayerGUID.Clear();
+    }
+    identity->OnTouchNpcIDs.clear();
+    identity->AreaNpcIDs.clear();
+    identity->NpcTouchMapID = 0;
+    identity->NpcTouchX = -1;
+    identity->NpcTouchY = -1;
+}
+
+void ROWOWMod::SetNpcTimerPlayer(ROWOWNpc const* npc, ObjectGuid playerGUID)
+{
+    if (npc == nullptr)
+        return;
+    std::lock_guard<std::mutex> lock(NpcStateMutex);
+    NpcsByID[npc->ID - 1]->TimerPlayerGUID = playerGUID;
 }
 
 void ROWOWMod::QueueNpcEvent(ROWOWNpc const* npc, std::string const& label)
@@ -756,12 +1146,25 @@ void ROWOWMod::UpdateNpcScripts(uint32 diff)
     std::vector<ROWOWNpcAnnouncement> announcements;
     std::vector<ROWOWScriptMobKill> kills;
     std::vector<std::pair<uint32, ObjectGuid>> killedMobs;
+    std::vector<ROWOWPendingScriptMob> loadedMapMobs;
     {
         std::lock_guard<std::mutex> lock(NpcStateMutex);
         dueEvents.swap(PendingNpcEvents);
         visibilityChangedIDs.swap(NpcVisibilityChangedIDs);
         announcements.swap(PendingNpcAnnouncements);
         kills.swap(PendingScriptMobKills);
+
+        // Monsters scripts spawned before their map was loaded (an OnInit's) come once it is
+        for (size_t mobIndex = 0; mobIndex < PendingScriptMobs.size();)
+        {
+            if (sMapMgr->FindBaseNonInstanceMap(PendingScriptMobs[mobIndex].MapID) == nullptr)
+            {
+                mobIndex++;
+                continue;
+            }
+            loadedMapMobs.push_back(PendingScriptMobs[mobIndex]);
+            PendingScriptMobs.erase(PendingScriptMobs.begin() + mobIndex);
+        }
         for (ROWOWScriptMobKill const& kill : kills)
             for (auto const& scriptMobByGUID : ScriptMobsByGUID)
                 if (scriptMobByGUID.second.MapID == kill.MapID && (kill.IsAll == true || scriptMobByGUID.second.Event == kill.Event))
@@ -778,6 +1181,7 @@ void ROWOWMod::UpdateNpcScripts(uint32 diff)
                 ROWOWNpcEvent npcEvent;
                 npcEvent.NpcID = npc->ID;
                 npcEvent.InstructionIndex = npc->TimerEvents[timer.NextEventIndex].second;
+                npcEvent.PlayerGUID = npc->TimerPlayerGUID;
                 dueEvents.push_back(npcEvent);
                 timer.NextEventIndex++;
             }
@@ -791,8 +1195,55 @@ void ROWOWMod::UpdateNpcScripts(uint32 diff)
                 ++timerIter;
         }
     }
+    for (ROWOWPendingScriptMob const& mob : loadedMapMobs)
+        SpawnScriptMob(sMapMgr->FindBaseNonInstanceMap(mob.MapID), mob.MobID, mob.X, mob.Y, mob.Event);
+    if (loadedMapMobs.empty() == false)
+        LOG_INFO("module.ROWOW", "ROWOWMod::UpdateNpcScripts spawned {} script monsters that waited for their map (first map {})", loadedMapMobs.size(),
+            loadedMapMobs.front().MapID);
+
+    // npc_event_do_clock: each minute's OnMinute<mm>, OnClock<hhmm> and On<Day><hhmm>, each hour's OnHour<hh>, each day's OnDay<MMdd>
+    // (local time), run with no player
+    int64 nowMinute = int64(time(nullptr) / 60);
+    if (nowMinute != LastClockMinute)
+    {
+        tm lastTime = Acore::Time::TimeBreakdown(time_t(LastClockMinute * 60));
+        tm nowTime = Acore::Time::TimeBreakdown(time_t(nowMinute * 60));
+        LastClockMinute = nowMinute;
+        static char const* const dayNames[] = { "sun", "mon", "tue", "wed", "thu", "fri", "sat" };
+        std::vector<std::string> labelNames;
+        labelNames.push_back(fmt::format("onminute{:02}", nowTime.tm_min));
+        labelNames.push_back(fmt::format("onclock{:02}{:02}", nowTime.tm_hour, nowTime.tm_min));
+        labelNames.push_back(fmt::format("on{}{:02}{:02}", dayNames[nowTime.tm_wday % 7], nowTime.tm_hour, nowTime.tm_min));
+        if (nowTime.tm_hour != lastTime.tm_hour)
+            labelNames.push_back(fmt::format("onhour{:02}", nowTime.tm_hour));
+        if (nowTime.tm_mday != lastTime.tm_mday)
+            labelNames.push_back(fmt::format("onday{:02}{:02}", nowTime.tm_mon + 1, nowTime.tm_mday));
+        for (std::string const& labelName : labelNames)
+        {
+            auto clockEventsIter = ClockEventsByLabel.find(labelName);
+            if (clockEventsIter != ClockEventsByLabel.end())
+                dueEvents.insert(dueEvents.end(), clockEventsIter->second.begin(), clockEventsIter->second.end());
+        }
+    }
+
+    // The events: an attached timer's with its player (the maps aren't updating, so any player's run can start here), whose leaving
+    // stops the timer (npc_timerevent)
     for (ROWOWNpcEvent const& npcEvent : dueEvents)
-        RunNpcEvent(GetNpc(npcEvent.NpcID), npcEvent.InstructionIndex);
+    {
+        if (npcEvent.PlayerGUID.IsEmpty() == true)
+        {
+            RunNpcEvent(GetNpc(npcEvent.NpcID), npcEvent.InstructionIndex);
+            continue;
+        }
+        Player* player = ObjectAccessor::FindPlayer(npcEvent.PlayerGUID);
+        if (player == nullptr || IsInROForm(player) == false)
+        {
+            NpcTimerStop(GetNpc(npcEvent.NpcID));
+            SetNpcTimerPlayer(GetNpc(npcEvent.NpcID), ObjectGuid::Empty);
+            continue;
+        }
+        RunPlayerNpcEvent(player, GetNpc(npcEvent.NpcID), npcEvent.InstructionIndex);
+    }
 
     // Announcements, to everyone or a map's players
     for (ROWOWNpcAnnouncement const& announcement : announcements)
@@ -958,26 +1409,36 @@ public:
 class ROWOW_NpcScriptPlayerScript : public PlayerScript
 {
 public:
-    ROWOW_NpcScriptPlayerScript() : PlayerScript("ROWOW_NpcScriptPlayerScript", { PLAYERHOOK_ON_UPDATE, PLAYERHOOK_ON_LOGOUT }) {}
+    ROWOW_NpcScriptPlayerScript() : PlayerScript("ROWOW_NpcScriptPlayerScript", { PLAYERHOOK_ON_UPDATE, PLAYERHOOK_ON_LOGIN, PLAYERHOOK_ON_LOGOUT }) {}
 
-    void OnPlayerUpdate(Player* player, uint32 /*p_time*/) override
+    void OnPlayerUpdate(Player* player, uint32 p_time) override
     {
-        // A run sleeping (sleep2) wakes in the player's own update
-        if (ROWOW->IsEnabled == false || ROWOW->IsInROForm(player) == false)
+        // A run sleeping (sleep2) wakes, queued events, OnTouch areas and the dialog's range, in the player's own update
+        if (ROWOW->IsEnabled == false || ROWOW->IsInROForm(player) == false || player->IsInWorld() == false)
             return;
-        ROWOWIdentity* identity = ROWOW->GetIdentity(player);
-        if (identity->NpcRun == nullptr || identity->NpcRun->Wait != ROWOW_SCRIPT_WAIT_SLEEP || uint64(GameTime::GetGameTimeMS().count()) < identity->NpcRun->SleepUntil)
+        ROWOW->UpdatePlayerNpcScripts(player, p_time);
+    }
+
+    void OnPlayerLogin(Player* player) override
+    {
+        // OnPCLoginEvent (in the form)
+        if (ROWOW->IsEnabled == false)
             return;
-        ROWOWSCRIPT->Resume(*identity->NpcRun);
-        if (identity->NpcRun != nullptr && identity->NpcRun->IsStopped == true)
-            ROWOW->EndNpcRun(player);
+        ROWOW->RunPlayerEvent(player, ROWOW_NPC_EVENT_LOGIN);
     }
 
     void OnPlayerLogout(Player* player) override
     {
+        // OnPCLogoutEvent, with the player still attached; then its run and queue go, and the OnTouch_ NPCs it held are free
         if (ROWOW->IsEnabled == false)
             return;
-        ROWOW->GetIdentity(player)->NpcRun.reset();
+        ROWOWIdentity* identity = ROWOW->GetIdentity(player);
+        identity->NpcRun.reset();
+        identity->QueuedNpcEvents.clear();
+        ROWOW->RunPlayerEvent(player, ROWOW_NPC_EVENT_LOGOUT);
+        identity->NpcRun.reset();
+        identity->QueuedNpcEvents.clear();
+        ROWOW->ForgetNpcTouches(player);
     }
 };
 
@@ -988,10 +1449,24 @@ public:
 
     void OnUnitDeath(Unit* unit, Unit* killer) override
     {
-        // A script monster's death runs its event (in its map's thread)
-        if (ROWOW->IsEnabled == false || unit == nullptr || unit->IsCreature() == false)
+        // A script monster's death runs its event; a player's runs OnPCDieEvent, and its killer's OnPCKillEvent; a monster's killer
+        // gets OnNPCKillEvent when the monster had no event of its own (pc_dead, mob_dead).  In the unit's map thread
+        if (ROWOW->IsEnabled == false || unit == nullptr)
             return;
-        ROWOW->OnScriptMobDeath(unit->ToCreature(), killer);
+        Player* killerPlayer = killer != nullptr ? killer->GetCharmerOrOwnerPlayerOrPlayerItself() : nullptr;
+        if (killerPlayer != nullptr && killerPlayer->GetMap() != unit->GetMap())
+            killerPlayer = nullptr;
+        if (unit->IsCreature() == true)
+        {
+            if (ROWOW->OnScriptMobDeath(unit->ToCreature(), killer) == false && killerPlayer != nullptr)
+                ROWOW->RunPlayerEvent(killerPlayer, ROWOW_NPC_EVENT_KILL_NPC);
+            return;
+        }
+        if (unit->IsPlayer() == false)
+            return;
+        ROWOW->RunPlayerEvent(unit->ToPlayer(), ROWOW_NPC_EVENT_DIE);
+        if (killerPlayer != nullptr && killerPlayer != unit)
+            ROWOW->RunPlayerEvent(killerPlayer, ROWOW_NPC_EVENT_KILL_PC);
     }
 };
 
@@ -1011,13 +1486,15 @@ public:
 
     void OnCreatureAddWorld(Creature* creature) override
     {
-        // An NPC that a script disabled or hid stays out of sight when its creature (re)spawns or its map loads.  Runs in the creature's map
-        // thread; the NPC's state is read under its lock
+        // An NPC's creature can be talked to (its script starts from the gossip hello), and one that a script disabled or hid stays out of
+        // sight when it (re)spawns or its map loads.  Runs in the creature's map thread; the NPC's state is read under its lock
         if (ROWOW->IsEnabled == false || ROWOW->NpcsByCreatureSpawnID.empty() == true)
             return;
         ROWOWNpc const* npc = ROWOW->GetCreatureNpc(creature);
         if (npc == nullptr)
             return;
+        if (npc->Script != nullptr && npc->IsShop == false)
+            creature->SetNpcFlag(UNIT_NPC_FLAG_GOSSIP);
         std::lock_guard<std::mutex> lock(ROWOW->NpcStateMutex);
         if (npc->IsEnabled == false || npc->IsHidden == true)
             creature->SetVisible(false);

@@ -21,6 +21,7 @@
 #include "MoveSplineInit.h"
 #include "ScriptMgr.h"
 #include "ScriptedCreature.h"
+#include "ScriptedGossip.h"
 
 #include "ROWOW.h"
 
@@ -495,6 +496,20 @@ public:
     CreatureAI* GetAI(Creature* creature) const override
     {
         return new ROWOW_CreatureScriptAI(creature);
+    }
+
+    bool OnGossipHello(Player* player, Creature* creature) override
+    {
+        // Clicking an RO NPC in the form starts its script (npc_click), its dialog in the RO NPC window; the converter's gossip (the
+        // script's first lines) is left for anyone else.  Shops stay the vendors they are
+        if (ROWOW->IsEnabled == false || ROWOW->IsInROForm(player) == false)
+            return false;
+        ROWOWNpc const* npc = ROWOW->GetCreatureNpc(creature);
+        if (npc == nullptr || npc->Script == nullptr || npc->IsShop == true)
+            return false;
+        CloseGossipMenuFor(player);
+        ROWOW->StartNpcRun(player, npc);
+        return true;
     }
 };
 
