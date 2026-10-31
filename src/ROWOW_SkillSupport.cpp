@@ -1651,7 +1651,7 @@ void ROWOWMod::SkillSit(Player* sd, bool sitting)
 {
     // skill_sit: a Rogue (Gangster's Paradise) sitting down beside another sitting one (its splash around it) puts every such Rogue there in
     // Gangster's Paradise; standing up takes it off those who no longer have two sitting together around them.  (The Taekwon's rests, flag
-    // 2, come with the Taekwon)
+    // 2, are SkillTaekwonRest's)
     int32 level = PCCheckSkill(sd, ROWOW_SKILL_RG_GANGSTER);
     if (level <= 0)
         return; // No need to count area if no skills are learned.
@@ -1699,6 +1699,7 @@ void ROWOWMod::UpdateSkillSit(Player* sd)
         return;
     identity->IsSitting = sitting;
     SkillSit(sd, sitting);
+    SkillTaekwonRest(sd, sitting);
 }
 
 bool ROWOWMod::MobCanTarget(Creature const* md, Unit const* target) const
@@ -1734,4 +1735,511 @@ void ROWOWMod::ClifGraffiti(Map* map, ROWOWSkillUnitGroup& group)
         return 0;
     });
     group.ViewerGUIDs = viewerGUIDs;
+}
+
+int32 ROWOWMod::MapCountOnCell(Unit* origin, int32 x, int32 y) const
+{
+    // map_count_oncell(m, x, y, BL_PC | BL_NPC | BL_MOB, 0): the living RO combatants standing on a cell of the origin's map
+    return MapForEachInCellArea(origin->GetMap(), origin->GetPhaseMask(), x, y, x, y, [](Unit* bl) { return bl->IsAlive() == true ? 1 : 0; });
+}
+
+bool ROWOWMod::MapSearchFreeCell(Unit* center, int32 range, int32& xOut, int32& yOut) const
+{
+    // map_search_freecell(center, 0, &x, &y, range, range, 0): a random walkable cell within range of the unit's cell, tried a number of times
+    ROWOWMapGrid const* mapGrid = GetMapGrid(center->GetMapId());
+    if (mapGrid == nullptr)
+        return false;
+    int32 centerX = 0, centerY = 0;
+    GetUnitCell(center, centerX, centerY);
+    int32 tries = (range * 2 + 1) * (range * 2 + 1);
+    if (tries > 100)
+        tries = 100;
+    while (tries-- > 0)
+    {
+        int32 x = centerX + int32(urand(0, uint32(range * 2))) - range;
+        int32 y = centerY + int32(urand(0, uint32(range * 2))) - range;
+        if (IsCellNoPass(center, *mapGrid, x, y) == false)
+        {
+            xOut = x;
+            yOut = y;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool ROWOWMod::UnitRun(Unit* bl)
+{
+    // unit_run: while it has SC_RUN the unit moves on the way the status keeps (val2), as far as the walkable cells with no one on them go
+    // (AREA_SIZE at most); when that's no more than a cell it ran into something (unit_run_hit).  WoW moves it there as one quick move at its
+    // walk speed (SC_RUN's), and UpdateUnitRun runs it on from there
+    ROWOWStatusChangeEntry const* sce = GetSCE(bl, ROWOW_SC_RUN);
+    ROWOWMapGrid const* mapGrid = GetMapGrid(bl->GetMapId());
+    if (sce == nullptr || mapGrid == nullptr)
+        return false;
+    if (GetStatusChange(static_cast<Unit const*>(bl))->Cant.Move == true || bl->HasUnitState(UNIT_STATE_ROOT) == true)
+    {
+        StatusChangeEnd(bl, ROWOW_SC_RUN);
+        return false;
+    }
+    static int32 const dirx[] = { 0, -1, -1, -1, 0, 1, 1, 1 };
+    static int32 const diry[] = { 1, 1, 0, -1, -1, -1, 0, 1 };
+    int32 dir = sce->Val2 & 7;
+    int32 dirX = dirx[dir];
+    int32 dirY = diry[dir];
+
+    // Determine destination cell
+    int32 blX = 0, blY = 0;
+    GetUnitCell(bl, blX, blY);
+    int32 toX = blX, toY = blY;
+    // Search for available path
+    for (int32 i = 0; i < ROWOW_AREA_SIZE; i++)
+    {
+        if (IsCellNoPass(bl, *mapGrid, toX + dirX, toY + dirY) == true)
+            break;
+        // If sprinting and there's a PC/Mob/NPC, block the path [Kevin]
+        if (MapCountOnCell(bl, toX + dirX, toY + dirY) != 0)
+            break;
+        toX += dirX;
+        toY += dirY;
+    }
+
+    // Can't run forward.
+    if ((toX == blX && toY == blY) || (toX == (blX + 1) || toY == (blY + 1)) || (toX == (blX - 1) || toY == (blY - 1)))
+    {
+        UnitRunHit(bl);
+        return false;
+    }
+    float x = 0, y = 0;
+    GetCellWorldPosition(bl->GetMapId(), toX, toY, x, y);
+    float z = bl->GetMap()->GetHeight(bl->GetPhaseMask(), x, y, bl->GetPositionZ() + ROWOW_SKILL_CELL_GROUND_SEARCH_HEIGHT, true, ROWOW_SKILL_CELL_GROUND_SEARCH_DISTANCE);
+    if (z <= INVALID_HEIGHT)
+    {
+        UnitRunHit(bl);
+        return false;
+    }
+    bl->GetMotionMaster()->MoveCharge(x, y, z, bl->GetSpeed(MOVE_RUN));
+    return true;
+}
+
+void ROWOWMod::UnitRunHit(Unit* bl)
+{
+    // unit_run_hit: if you can't run forward, you must be next to a wall, so bounce back. [Skotlex]  Set running to 0 beforehand so
+    // status_change_end knows not to enable spurt [Kevin]
+    ROWOWStatusChangeEntry const* sce = GetSCE(bl, ROWOW_SC_RUN);
+    if (sce == nullptr)
+        return;
+    int32 lv = sce->Val1;
+    int8 dir = int8(sce->Val2 & 7);
+    GetSkillUnitData(bl)->IsRunning = false;
+    StatusChangeEnd(bl, ROWOW_SC_RUN);
+    ROWOWSkill const* skill = GetSkill(ROWOW_SKILL_TK_RUN);
+    SkillBlown(bl, bl, skill != nullptr ? skill->Knockback[ROWOWSkill::GetLevelIndex(uint16(lv))] : 0, dir, ROWOW_BLOWN_NONE);
+}
+
+void ROWOWMod::UpdateUnitRun(Unit* bl)
+{
+    // unit_walktoxy_timer: once the run's move ended, keep trying to run
+    ROWOWSkillUnitData* ud = GetSkillUnitData(bl);
+    if (ud->IsRunning == false || bl->movespline->Finalized() == false)
+        return;
+    if (GetSCE(bl, ROWOW_SC_RUN) == nullptr || UnitRun(bl) == false)
+        ud->IsRunning = false;
+}
+
+void ROWOWMod::StatusSetHP(Unit* bl, uint32 hp)
+{
+    // status_set_hp: the HP set outright (at least 1, never past the maximum)
+    if (bl->IsAlive() == true)
+        bl->SetHealth(std::clamp<uint32>(hp, 1, bl->GetMaxHealth()));
+}
+
+uint32 ROWOWMod::PCGetFeelMap(ROWOWIdentity const& identity, int32 pos) const
+{
+    static char const* const feelVars[ROWOW_MAX_PC_FEELHATE] = ROWOW_SG_FEEL_VARS;
+    return pos >= 0 && pos < ROWOW_MAX_PC_FEELHATE ? uint32(GetIdentityVariable(identity, feelVars[pos])) : 0;
+}
+
+int32 ROWOWMod::PCGetHateMob(ROWOWIdentity const& identity, int32 pos) const
+{
+    // The variable holds the class + 1 (0 for none, rAthena's -1)
+    static char const* const hateVars[ROWOW_MAX_PC_FEELHATE] = ROWOW_SG_HATE_VARS;
+    return pos >= 0 && pos < ROWOW_MAX_PC_FEELHATE ? int32(GetIdentityVariable(identity, hateVars[pos])) - 1 : -1;
+}
+
+bool ROWOWMod::PCSetHateMob(Player* sd, int32 pos, Unit* bl)
+{
+    // pc_set_hate_mob: a hatred can't be changed (it's only shown).  A monster must be of the size of the place (small sun, medium moon, large
+    // star) and, for the moon and star, have 6000 or 20000 HP; a player (its job) needs neither
+    static char const* const hateVars[ROWOW_MAX_PC_FEELHATE] = ROWOW_SG_HATE_VARS;
+    if (bl == nullptr || pos < 0 || pos >= ROWOW_MAX_PC_FEELHATE)
+        return false;
+    ROWOWIdentity& identity = *GetIdentity(sd);
+    if (PCGetHateMob(identity, pos) != -1)
+    {
+        // Can't change hate targets.
+        ClifHateInfo(sd, pos, PCGetHateMob(identity, pos), 0); // Display current
+        return false;
+    }
+    int32 hateClass = 0;
+    if (Creature* md = bl->ToCreature())
+    {
+        ROWOWStatus const* status = GetROStatus(bl);
+        hateClass = int32(GetROMobID(md));
+        if (hateClass == 0 || status == nullptr)
+            return false;
+        if ((pos == 1 && status->MaxHP < 6000) || (pos == 2 && status->MaxHP < 20000))
+            return false;
+        if (pos != status->Size)
+            return false; // Wrong size
+    }
+    else if (Player* tsd = bl->ToPlayer())
+        hateClass = GetIdentity(tsd)->JobID;
+    else
+        return false;
+    SetIdentityVariable(identity, hateVars[pos], hateClass + 1);
+    ClifHateInfo(sd, pos, hateClass, 1);
+    return true;
+}
+
+void ROWOWMod::ClifFeelReq(Player* sd, uint16 skillLevel)
+{
+    // clif_feel_req (ZC_STARPLACE): RO asks the Star Gladiator to confirm the place, a choice it can't undo.  The RO_Identity addon's menu
+    // (ROWOWFEEL "<level>:<map name>") answers with .ro feel
+    ROWOWIdentity* identity = GetIdentity(sd);
+    identity->MenuSkillID = ROWOW_SKILL_SG_FEEL;
+    identity->MenuSkillValue = skillLevel;
+    auto mapNameIter = MapNamesByMapID.find(sd->GetMapId());
+    WorldPacket data;
+    ChatHandler::BuildChatPacket(data, CHAT_MSG_SYSTEM, LANG_ADDON, nullptr, nullptr,
+        fmt::format("ROWOWFEEL\t{}:{}", skillLevel, mapNameIter != MapNamesByMapID.end() ? mapNameIter->second : ""));
+    sd->SendDirectMessage(&data);
+}
+
+void ROWOWMod::ClifParseFeelSaveOk(Player* sd)
+{
+    // clif_parse_FeelSaveOk: the map the Star Gladiator stands on becomes the place the menu asked about
+    static char const* const feelVars[ROWOW_MAX_PC_FEELHATE] = ROWOW_SG_FEEL_VARS;
+    ROWOWIdentity& identity = *GetIdentity(sd);
+    if (identity.MenuSkillID != ROWOW_SKILL_SG_FEEL)
+        return;
+    int32 i = identity.MenuSkillValue - 1;
+    identity.MenuSkillID = 0; // clif_menuskill_clear
+    identity.MenuSkillValue = 0;
+    if (i < 0 || i >= ROWOW_MAX_PC_FEELHATE || IsROMap(sd->GetMapId()) == false)
+        return; // Bug?
+    SetIdentityVariable(identity, feelVars[i], sd->GetMapId());
+    ClifFeelInfo(sd, i, 0);
+}
+
+void ROWOWMod::ClifFeelInfo(Player* sd, int32 pos, int32 type) const
+{
+    // clif_feel_info (clif_starskill): the place of the sun, moon or star, as just registered (type 0, after the confirmation) or shown (1).
+    // The WoW client has no such window, so it's a system message
+    static char const* const placeNames[ROWOW_MAX_PC_FEELHATE] = { "Sun", "Moon", "Star" };
+    ROWOWIdentity const* identity = sd->CustomData.Get<ROWOWIdentity>("ROWOWIdentity");
+    if (identity == nullptr || pos < 0 || pos >= ROWOW_MAX_PC_FEELHATE)
+        return;
+    auto mapNameIter = MapNamesByMapID.find(PCGetFeelMap(*identity, pos));
+    std::string mapName = mapNameIter != MapNamesByMapID.end() ? mapNameIter->second : "?";
+    if (type == 0)
+        ChatHandler(sd->GetSession()).PSendSysMessage("{} is now your Place of the {}.", mapName, placeNames[pos]);
+    else
+        ChatHandler(sd->GetSession()).PSendSysMessage("Your Place of the {} is {}.", placeNames[pos], mapName);
+}
+
+void ROWOWMod::ClifHateInfo(Player* sd, int32 pos, int32 hateClass, int32 type) const
+{
+    // clif_hate_info (clif_starskill): the monster (or job) hated by the sun, moon or star, registered now (type 1) or shown (0)
+    static char const* const placeNames[ROWOW_MAX_PC_FEELHATE] = { "Sun", "Moon", "Star" };
+    if (pos < 0 || pos >= ROWOW_MAX_PC_FEELHATE)
+        return;
+    std::string name;
+    if (ROWOWJob const* job = (hateClass < 1000 || (hateClass >= 4000 && hateClass < 5000)) ? GetJob(uint16(hateClass)) : nullptr)
+        name = job->Name;
+    else if (CreatureTemplate const* creatureTemplate = sObjectMgr->GetCreatureTemplate(GetMobCreatureEntry(uint32(hateClass))))
+        name = creatureTemplate->Name;
+    else
+        name = std::to_string(hateClass);
+    if (type == 1)
+        ChatHandler(sd->GetSession()).PSendSysMessage("{} is now your Target of the {}.", name, placeNames[pos]);
+    else
+        ChatHandler(sd->GetSession()).PSendSysMessage("Your Target of the {} is {}.", placeNames[pos], name);
+}
+
+void ROWOWMod::ClifMissionInfo(Player* sd, uint32 mobID, int32 progress) const
+{
+    // clif_mission_info (clif_starskill): the Taekwon mission's monster and the kills so far
+    CreatureTemplate const* creatureTemplate = sObjectMgr->GetCreatureTemplate(GetMobCreatureEntry(mobID));
+    ChatHandler(sd->GetSession()).PSendSysMessage("Taekwon Mission: {} ({}/100)", creatureTemplate != nullptr ? creatureTemplate->Name : std::to_string(mobID), progress);
+}
+
+void ROWOWMod::PCResetFeel(Player* sd)
+{
+    // pc_resetfeel
+    static char const* const feelVars[ROWOW_MAX_PC_FEELHATE] = ROWOW_SG_FEEL_VARS;
+    ROWOWIdentity& identity = *GetIdentity(sd);
+    for (char const* feelVar : feelVars)
+        SetIdentityVariable(identity, feelVar, 0);
+}
+
+void ROWOWMod::PCResetHate(Player* sd)
+{
+    // pc_resethate
+    static char const* const hateVars[ROWOW_MAX_PC_FEELHATE] = ROWOW_SG_HATE_VARS;
+    ROWOWIdentity& identity = *GetIdentity(sd);
+    for (char const* hateVar : hateVars)
+        SetIdentityVariable(identity, hateVar, 0);
+}
+
+bool ROWOWMod::SGIsDay(int32 pos) const
+{
+    // sg_info's day_func: is_day_of_sun, is_day_of_moon and is_day_of_star by the server's day of the year (date_get_dayofyear, 0 the first)
+    if (BattleConfig.AllowSkillWithoutDay != 0)
+        return true;
+    time_t now = time(nullptr);
+    tm localTime = Acore::Time::TimeBreakdown(now);
+    int32 day = localTime.tm_yday + 1;
+    switch (pos)
+    {
+        case 0: return day % 2 == 0;
+        case 1: return day % 2 == 1;
+        case 2: return day % 5 == 0;
+    }
+    return false;
+}
+
+void ROWOWMod::PCSetDieCounter(Player* sd, int64 value)
+{
+    // pc_setparam(SP_PCDIECOUNTER): a Super Novice's first death loses its never-died bonus (status_calc_pc)
+    ROWOWIdentity& identity = *GetIdentity(sd);
+    if (GetIdentityVariable(identity, ROWOW_PCDIECOUNTER_VAR) == value)
+        return;
+    SetIdentityVariable(identity, ROWOW_PCDIECOUNTER_VAR, value);
+    if (identity.JobID == ROWOW_JOB_SUPER_NOVICE && identity.IsInForm == true)
+        RefreshROForm(sd);
+}
+
+void ROWOWMod::MobDeadSGTaekwon(Creature* md, Player* sd, int32& bonus)
+{
+    // mob_dead for the player who killed the monster: the Star Gladiator's Blessing of the Sun, Moon or Star (10% a level more exp, 20% for the
+    // star; Miracle makes every monster a star's) on its hated monster on its day, and the Taekwon mission's kill count (a new mission after
+    // 100: a Branch of Dead Tree monster; Taekwon fame isn't kept, so no ranking)
+    static uint16 const blessSkillIDs[ROWOW_MAX_PC_FEELHATE] = { ROWOW_SKILL_SG_SUN_BLESS, ROWOW_SKILL_SG_MOON_BLESS, ROWOW_SKILL_SG_STAR_BLESS };
+    ROWOWIdentity& identity = *GetIdentity(sd);
+    int32 mobID = int32(GetROMobID(md));
+    int32 i = 0;
+    if (GetSCE(sd, ROWOW_SC_MIRACLE) != nullptr)
+        i = 2; // All mobs are Star Targets
+    else
+        for (; i < ROWOW_MAX_PC_FEELHATE; i++)
+            if (mobID == PCGetHateMob(identity, i) && SGIsDay(i) == true)
+                break;
+    int32 temp = 0;
+    if (i < ROWOW_MAX_PC_FEELHATE && (temp = PCCheckSkill(sd, blessSkillIDs[i])) > 0)
+        bonus += (i == 2 ? 20 : 10) * temp;
+
+    // TK_MISSION [Skotlex]  (taekwon_mission_mobname's race and name matches need race2 and the names, not kept: only the monster itself)
+    if (mobID != 0 && GetIdentityVariable(identity, ROWOW_TKMISSIONID_VAR) == mobID)
+    {
+        int64 missionCount = GetIdentityVariable(identity, ROWOW_TKMISSIONCOUNT_VAR) + 1;
+        if (missionCount >= 100 && (temp = int32(MobGetRandomID("Branch_Of_Dead_Tree", false))) != 0)
+        {
+            SetIdentityVariable(identity, ROWOW_TKMISSIONID_VAR, temp);
+            missionCount = 0;
+            ClifMissionInfo(sd, uint32(temp), 0);
+        }
+        SetIdentityVariable(identity, ROWOW_TKMISSIONCOUNT_VAR, missionCount);
+    }
+}
+
+void ROWOWMod::PartySkillCheck(Player* sd, uint16 skillID, uint16 skillLevel)
+{
+    // party_skill_check: a Star Gladiator's Counter Kick raises the Triple Attack rate of the party's Monks (Friend's level), and a Monk's
+    // Combo Finish the Counter Kick rate of its Star Gladiators in the counter stance with Friend.  The party here is the WoW group on the
+    // sd's map
+    if (sd->GetGroup() == nullptr)
+        return;
+    PartyForEachSameMap(sd, 0, [this, skillID, skillLevel](Unit* member)
+    {
+        Player* pSD = member->ToPlayer();
+        if (pSD == nullptr || IsInROForm(pSD) == false)
+            return 0;
+        ROWOWJob const* job = GetJob(GetIdentity(pSD)->JobID);
+        uint16 jobID = job != nullptr ? job->JobID : 0;
+        switch (skillID)
+        {
+            case ROWOW_SKILL_TK_COUNTER: // Increase Triple Attack rate of Monks.
+                if ((jobID == ROWOW_JOB_MONK || jobID == ROWOW_JOB_CHAMPION) && PCCheckSkill(pSD, ROWOW_SKILL_MO_TRIPLEATTACK) > 0)
+                    SCStart4(pSD, pSD, ROWOW_SC_SKILLRATE_UP, 100, ROWOW_SKILL_MO_TRIPLEATTACK, 50 + 50 * skillLevel, 0, 0, SkillGetTime(ROWOW_SKILL_SG_FRIEND, 1)); // +100/150/200% rate
+                break;
+            case ROWOW_SKILL_MO_COMBOFINISH: // Increase Counter rate of Star Gladiators
+                if (jobID == ROWOW_JOB_STAR_GLADIATOR && GetSCE(pSD, ROWOW_SC_READYCOUNTER) != nullptr && PCCheckSkill(pSD, ROWOW_SKILL_SG_FRIEND) > 0)
+                    SCStart4(pSD, pSD, ROWOW_SC_SKILLRATE_UP, 100, ROWOW_SKILL_TK_COUNTER, 50 + 50 * PCCheckSkill(pSD, ROWOW_SKILL_SG_FRIEND), 0, 0,
+                        SkillGetTime(ROWOW_SKILL_SG_FRIEND, 1)); // +100/150/200% rate
+                break;
+        }
+        return 0;
+    });
+}
+
+bool ROWOWMod::StatusDamageRevive(Unit* bl)
+{
+    // status_damage's Kaizel: a unit about to die is revived at val2% HP, its statuses cleared, and gets Kyrie Eleison 10 for Kaizel's
+    // Duration2.  pc_dead's Super Novice: one that dies at 99% of its base level's exp is saved by its angel (full HP and SP, a moment of
+    // invincibility and Mental Strength 5), once a base level.  WoW's death already happened, so the player is resurrected just after it
+    // (players only: a monster's revive is R10's)
+    Player* sd = bl->ToPlayer();
+    if (sd == nullptr || IsInROForm(sd) == false)
+        return false;
+    ROWOWIdentity* identity = GetIdentity(sd);
+    if (ROWOWStatusChangeEntry const* kaizel = GetSCE(bl, ROWOW_SC_KAIZEL))
+    {
+        int32 kaizelLevel = kaizel->Val1;
+        int32 perHP = kaizel->Val2;
+        sd->m_Events.AddEventAtOffset([kaizelLevel, perHP, sd]()
+        {
+            if (sd->IsAlive() == true || ROWOW->IsInROForm(sd) == false)
+                return;
+            ROWOW->StatusRevive(sd, uint8(perHP), 0);
+            ROWOW->StatusChangeClear(sd, 0);
+            ROWOW->ClifSkillNoDamage(sd, sd, ROWOW_SKILL_ALL_RESURRECTION, 1);
+            ROWOW->SCStart(sd, sd, ROWOW_SC_KYRIE, 100, 10, ROWOW->SkillGetTime2(ROWOW_SKILL_SL_KAIZEL, uint16(kaizelLevel)));
+        }, 1ms);
+        return true;
+    }
+    // Activate Steel body if a super novice dies at 99+% exp [celest]
+    if (identity->IsSuperNoviceDeadFlag == false && identity->JobID == ROWOW_JOB_SUPER_NOVICE)
+    {
+        uint64 exp = PCNextBaseExp(*identity);
+        if (exp != 0 && identity->BaseExp * 100 / exp >= 99)
+        {
+            identity->IsSuperNoviceDeadFlag = true;
+            sd->m_Events.AddEventAtOffset([sd]()
+            {
+                if (sd->IsAlive() == true || ROWOW->IsInROForm(sd) == false)
+                    return;
+                ROWOW->StatusRevive(sd, 100, 100);
+                ROWOW->PCSetInvincibleTimer(sd);
+                ROWOW->SCStart(sd, sd, ROWOW_SC_STEELBODY, 100, 5, ROWOW->SkillGetTime(ROWOW_SKILL_MO_STEELBODY, 5));
+            }, 1ms);
+            return true;
+        }
+    }
+    return false;
+}
+
+void ROWOWMod::PCSuperNoviceCall(Player* sd, std::string const& message)
+{
+    // The Guardian Angel prayer: a Super Novice says "Dear angel, can you hear my voice?", "I am <name> Super Novice~" and "Help me out~
+    // Please~ T_T" in turn (the client's own msgstringtable lines, which it turns into CZ_CHOPOKGI); at a round 10% of its base exp the angel
+    // answers with Fury (clif_parse_NoviceExplosionSpirits: SC_EXPLOSIONSPIRITS at 17, +50 critical)
+    ROWOWIdentity* identity = GetIdentity(sd);
+    if (identity->IsInForm == false || identity->JobID != ROWOW_JOB_SUPER_NOVICE)
+        return;
+    switch (identity->SuperNoviceCallFlag)
+    {
+        case 0:
+            if (message.find("Dear angel, can you hear my voice?") != std::string::npos)
+                identity->SuperNoviceCallFlag = 1;
+            return;
+        case 1:
+            identity->SuperNoviceCallFlag = message.find(fmt::format("I am {} Super Novice~", sd->GetName())) != std::string::npos ? 2 : 0;
+            return;
+        default:
+            identity->SuperNoviceCallFlag = 0;
+            if (message.find("Help me out~ Please~ T_T") == std::string::npos)
+                return;
+            break;
+    }
+    uint64 next = PCNextBaseExp(*identity);
+    if (next == 0)
+        return;
+    int32 percent = int32((double(identity->BaseExp) / double(next)) * 1000.);
+    if (percent != 0 && (percent % 100) == 0) // 10.0%, 20.0%, ..., 90.0%
+    {
+        SCStart(sd, sd, ROWOW_SC_EXPLOSIONSPIRITS, 100, 17, SkillGetTime(ROWOW_SKILL_MO_EXPLOSIONSPIRITS, 5)); // Lv17-> +50 critical (noted by Poki) [Skotlex]
+        ClifSkillNoDamage(sd, sd, ROWOW_SKILL_MO_EXPLOSIONSPIRITS, 5); // prayer always shows successful Lv5 cast and disregards noskill restrictions
+    }
+}
+
+void ROWOWMod::PCLevelUpAngel(Player* sd)
+{
+    // pc_checkbaselevelup: a Super Novice gets every status with the SuperNoviceAngel flag (Kyrie Eleison, Magnificat, Gloria, Impositio Manus,
+    // Suffragium) at level 1 for 2 minutes and can be saved by its angel again; a Taekwon those with TaekwonAngel (Increase AGI, Blessing) at
+    // level 10 for 10 minutes
+    ROWOWIdentity* identity = GetIdentity(sd);
+    ROWOWJob const* job = GetJob(identity->JobID);
+    bool isSuperNovice = identity->JobID == ROWOW_JOB_SUPER_NOVICE;
+    bool isTaekwon = job != nullptr && (job->JobID == ROWOW_JOB_TAEKWON || job->FirstJobID == ROWOW_JOB_TAEKWON);
+    if (isSuperNovice == false && isTaekwon == false)
+        return;
+    for (auto const& statusByType : StatusChangeDBsByType)
+    {
+        if (isSuperNovice == true && statusByType.second.Flag[ROWOW_SCF_SUPERNOVICEANGEL] == true)
+            SCStart(sd, sd, statusByType.first, 100, 1, 120000); // All buffs with super novice flag for 2 minutes
+        else if (isTaekwon == true && statusByType.second.Flag[ROWOW_SCF_TAEKWONANGEL] == true)
+            SCStart(sd, sd, statusByType.first, 100, 10, 600000);
+    }
+    if (isSuperNovice == true)
+        identity->IsSuperNoviceDeadFlag = false; // Reenable steelbody resurrection on dead.
+}
+
+void ROWOWMod::SkillTaekwonRest(Player* sd, bool sitting)
+{
+    // skill_sit's flag 2: a Taekwon with Peaceful Break or Happy Break sitting down beside another sitting one (their splash around it) puts
+    // every such Taekwon there at rest (state.rest, which their regen reads); standing up ends it for those who no longer have two sitting
+    // together around them
+    int32 level = 0;
+    int32 range = 0;
+    if ((level = PCCheckSkill(sd, ROWOW_SKILL_TK_HPTIME)) > 0)
+        range = SkillGetSplash(ROWOW_SKILL_TK_HPTIME, uint16(level));
+    else if ((level = PCCheckSkill(sd, ROWOW_SKILL_TK_SPTIME)) > 0)
+        range = SkillGetSplash(ROWOW_SKILL_TK_SPTIME, uint16(level));
+    else
+        return; // No need to count area if no skills are learned.
+    auto isResting = [this](Player* tsd)
+    {
+        return tsd->IsSitState() == true && (PCCheckSkill(tsd, ROWOW_SKILL_TK_HPTIME) > 0 || PCCheckSkill(tsd, ROWOW_SKILL_TK_SPTIME) > 0);
+    };
+    // skill_sit_count
+    auto sitCount = [this, range, &isResting](Player* center)
+    {
+        return MapForEachInRange(center, range, [&isResting](Unit* bl)
+        {
+            Player* tsd = bl->ToPlayer();
+            return (tsd != nullptr && isResting(tsd) == true) ? 1 : 0;
+        });
+    };
+    auto setRest = [this](Player* tsd, bool isRest)
+    {
+        ROWOWIdentity* identity = GetIdentity(tsd);
+        if (identity->IsTaekwonRest == isRest)
+            return;
+        identity->IsTaekwonRest = isRest;
+        StatusCalcRegen(tsd, identity->Status);
+    };
+    if (sitting == true)
+    {
+        if (sitCount(sd) <= 1)
+            return;
+        // skill_sit_in
+        MapForEachInRange(sd, range, [&isResting, &setRest](Unit* bl)
+        {
+            Player* tsd = bl->ToPlayer();
+            if (tsd != nullptr && isResting(tsd) == true)
+                setRest(tsd, true);
+            return 0;
+        });
+        return;
+    }
+    // skill_sit_out
+    MapForEachInRange(sd, range, [&sitCount, &setRest](Unit* bl)
+    {
+        Player* tsd = bl->ToPlayer();
+        if (tsd == nullptr || sitCount(tsd) > 1)
+            return 0;
+        setRest(tsd, false);
+        return 0;
+    });
 }

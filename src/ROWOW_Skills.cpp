@@ -414,6 +414,9 @@ void ROWOWMod::LoadSkillData()
     AddROWOWSkillsArcher();
     AddROWOWSkillsMerchant();
     AddROWOWSkillsThief();
+    AddROWOWSkillsTaekwon();
+    AddROWOWSkillsGunslinger();
+    AddROWOWSkillsNinja();
     LOG_INFO("module.ROWOW", "ROWOWMod::LoadSkillData loaded {} skills ({} skill spells, {} with their own rules) and {} job skill trees ({} skills)", SkillsByID.size(),
         SkillIDsBySpellID.size(), SkillImplsBySkillID.size(), SkillTreesByJobID.size(), treeSkillCount);
 }
@@ -658,9 +661,11 @@ int32 ROWOWMod::PCCheckSkill(Unit const* unit, uint16 skillID) const
 int32 ROWOWMod::PCCheckSkill(ROWOWIdentity const& identity, uint16 skillID) const
 {
     // pc_checkskill: a skill counts while it's on the tree the identity may use (pc_calc_skilltree gave it its id), and the skill Plagiarism
-    // copied at its copied level
+    // copied at its copied level.  A skill it has for now (a spirit link's) counts at that level
     if (skillID != 0 && skillID == identity.CloneSkillID)
         return identity.CloneSkillLevel;
+    if (auto tempIter = identity.TempSkillLevelsByID.find(skillID); tempIter != identity.TempSkillLevelsByID.end())
+        return tempIter->second;
     if (identity.TreeSkillIDs.find(skillID) == identity.TreeSkillIDs.end())
         return 0;
     auto levelIter = identity.SkillLevelsByID.find(skillID);
@@ -728,8 +733,11 @@ uint16 ROWOWMod::PCCalcSkillTreeNormalizeJob(ROWOWIdentity const& identity) cons
 void ROWOWMod::PCCalcSkillTree(ROWOWIdentity& identity) const
 {
     // pc_calc_skilltree: the skills of the (normalized) job's tree it may learn or use now, those whose needed skills it learned and
-    // whose base and job levels it reached, found again until no more are added.  Quest, wedding and spirit skills only once learned
+    // whose base and job levels it reached, found again until no more are added.  Quest and wedding skills only once learned; spirit skills
+    // only while a Soul Linker's spirit links it, then at level 1 for now (SKILL_FLAG_TEMPORARY: not saved, not raised).  (No Taekwon ranking
+    // here, so no ranker's bonus tree)
     identity.TreeSkillIDs.clear();
+    identity.TempSkillLevelsByID.clear();
     identity.CloneSkillID = 0;
     identity.CloneSkillLevel = 0;
     uint16 jobID = PCCalcSkillTreeNormalizeJob(identity);
@@ -771,10 +779,29 @@ void ROWOWMod::PCCalcSkillTree(ROWOWIdentity& identity) const
             ROWOWSkill const* skill = GetSkill(skillID);
             if (skill == nullptr)
                 continue;
-            if (getLearnedLevel(skillID) == 0 && ((skill->IsQuest == true && BattleConfig.QuestSkillLearn == 0) || skill->IsWedding == true || skill->IsSpirit == true))
-                continue;
+            if (getLearnedLevel(skillID) == 0 && ((skill->IsQuest == true && BattleConfig.QuestSkillLearn == 0) || skill->IsWedding == true ||
+                (skill->IsSpirit == true && identity.SpiritSkillID == 0)))
+                continue; // Cannot be learned via normal means. Note this check DOES allows raising already known skills.
             identity.TreeSkillIDs.insert(skillID);
+            if (skill->IsSpirit == true) // Spirit skills cannot be learned, they will only show up on your tree when you get buffed.
+                identity.TempSkillLevelsByID[skillID] = 1;
             isChanged = true;
+        }
+    }
+
+    // Enable Bard/Dancer spirit linked skills: the other's song at 10 for each of its own it knows at 10.  (rAthena picks by sex; the Bard
+    // and Clown are the male jobs, the Dancer and Gypsy the female)
+    if (identity.SpiritSkillID == ROWOW_SKILL_SL_BARDDANCER)
+    {
+        static std::pair<uint16, uint16> const linkedSkills[] = { { ROWOW_SKILL_BA_WHISTLE, ROWOW_SKILL_DC_HUMMING },
+            { ROWOW_SKILL_BA_ASSASSINCROSS, ROWOW_SKILL_DC_DONTFORGETME }, { ROWOW_SKILL_BA_POEMBRAGI, ROWOW_SKILL_DC_FORTUNEKISS },
+            { ROWOW_SKILL_BA_APPLEIDUN, ROWOW_SKILL_DC_SERVICEFORYOU } };
+        bool isMale = identity.JobID == ROWOW_JOB_BARD || identity.JobID == ROWOW_JOB_CLOWN;
+        for (auto const& skill : linkedSkills)
+        {
+            if (PCCheckSkill(identity, isMale == true ? skill.first : skill.second) < 10)
+                continue;
+            identity.TempSkillLevelsByID[isMale == true ? skill.second : skill.first] = 10; // Tag it as a non-savable, non-uppable, bonus skill
         }
     }
 
@@ -797,7 +824,8 @@ bool ROWOWMod::PCSkillUp(Player* player, uint16 skillID)
         return false;
     auto levelIter = identity->SkillLevelsByID.find(skillID);
     uint16 level = levelIter != identity->SkillLevelsByID.end() ? levelIter->second : 0;
-    if (identity->SkillPoints == 0 || identity->TreeSkillIDs.find(skillID) == identity->TreeSkillIDs.end() || level >= SkillTreeGetMax(skillID, identity->JobID))
+    if (identity->SkillPoints == 0 || identity->TreeSkillIDs.find(skillID) == identity->TreeSkillIDs.end() || level >= SkillTreeGetMax(skillID, identity->JobID) ||
+        identity->TempSkillLevelsByID.find(skillID) != identity->TempSkillLevelsByID.end())
         return false;
     identity->SkillLevelsByID[skillID] = level + 1;
     identity->SkillPoints--;
@@ -835,6 +863,13 @@ void ROWOWMod::PCJobChange(Player* player, uint16 jobID)
         SetIdentityVariable(*identity, JobChange2ndVariable, identity->JobLevel);
     if (identity->CloneSkillID != 0)
         PCSkillPlagiarismReset(player);
+    if (identity->JobID == ROWOW_JOB_STAR_GLADIATOR && jobID != ROWOW_JOB_STAR_GLADIATOR)
+    {
+        // going off star glad lineage, reset feel and hate to not store no-longer-used vars in the database
+        PCResetFeel(player);
+        PCResetHate(player);
+    }
+    StatusChangeEnd(player, ROWOW_SC_SPIRIT); // A spirit links the old job only
     identity->JobID = jobID;
     identity->JobLevel = 1;
     identity->JobExp = 0;
@@ -920,6 +955,8 @@ void ROWOWMod::SendSkillsToClient(Player* player, ROWOWIdentity& identity, bool 
             skillIDs.insert(entryBySkillID.first);
     for (auto const& levelBySkillID : identity.SkillLevelsByID)
         skillIDs.insert(levelBySkillID.first);
+    for (auto const& levelBySkillID : identity.TempSkillLevelsByID)
+        skillIDs.insert(levelBySkillID.first);
     if (identity.CloneSkillID != 0)
         skillIDs.insert(identity.CloneSkillID);
     std::string skillsText;
@@ -927,6 +964,8 @@ void ROWOWMod::SendSkillsToClient(Player* player, ROWOWIdentity& identity, bool 
     {
         auto levelIter = identity.SkillLevelsByID.find(skillID);
         uint16 level = levelIter != identity.SkillLevelsByID.end() ? levelIter->second : 0;
+        if (auto tempIter = identity.TempSkillLevelsByID.find(skillID); tempIter != identity.TempSkillLevelsByID.end())
+            level = tempIter->second; // A spirit link's skill, at its level for now
         bool isOnTree = identity.TreeSkillIDs.find(skillID) != identity.TreeSkillIDs.end();
         std::string skillText = fmt::format("{}:{}:{}:{}", skillID, level, SkillTreeGetMax(skillID, identity.JobID), isOnTree == true ? 1 : 0);
         if (skillID == identity.CloneSkillID)

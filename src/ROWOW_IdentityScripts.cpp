@@ -79,6 +79,14 @@ public:
         ROWOW->CompleteROFormChange(player);
     }
 
+    void OnPlayerBeforeSendChatMessage(Player* player, uint32& /*type*/, uint32& /*lang*/, std::string& msg) override
+    {
+        // A Super Novice's Guardian Angel prayer is said in chat
+        if (ROWOW->IsEnabled == false || player == nullptr || ROWOW->IsInROForm(player) == false)
+            return;
+        ROWOW->PCSuperNoviceCall(player, msg);
+    }
+
     void OnPlayerUpdate(Player* player, uint32 p_time) override
     {
         ROWOW->UpdateNaturalRegen(player, p_time);
@@ -91,6 +99,7 @@ public:
         ROWOW->UpdateAutoBonuses(player);
         ROWOW->UpdateSpiritBalls(player);
         ROWOW->UpdateSkillSit(player);
+        ROWOW->UpdateUnitRun(player);
 
         // A vendor stays sitting by its shop: standing up or walking away closes it
         ROWOWIdentity* identity = ROWOW->GetIdentity(player);
@@ -415,9 +424,13 @@ public:
             ROWOW->MobLogDamage(victim->ToCreature(), attacker, damage);
     }
 
-    void OnUnitDeath(Unit* unit, Unit* /*killer*/) override
+    void OnUnitDeath(Unit* unit, Unit* killer) override
     {
         if (ROWOW->IsEnabled == false || unit == nullptr)
+            return;
+
+        // Kaizel and a Super Novice's angel: up again at once (status_damage, pc_dead), so it didn't die in RO's eyes
+        if (ROWOW->StatusDamageRevive(unit) == true)
             return;
 
         // status_damage's death: the statuses end, but those that stay through death (NoRemoveOnDead), and the ground units it stands in
@@ -436,15 +449,16 @@ public:
             ROWOW->VendingCloseVending(player);
             if (ROWOW->IsInROForm(player) == true)
             {
-                // pc_dead: its devotions end, and its Spirit Spheres go
+                // pc_dead: its devotions end, its Spirit Spheres go and it counts the death (PC_DIE_COUNTER)
                 ROWOW->PCDelDevotions(player);
                 ROWOW->PCDelSpiritBall(player, ROWOW->PCGetSpiritBall(player), 0);
+                ROWOW->PCSetDieCounter(player, ROWOW->GetIdentityVariable(*ROWOW->GetIdentity(player), ROWOW_PCDIECOUNTER_VAR) + 1);
             }
         }
         if (unit->IsCreature() == true)
         {
             ROWOW->MobDeadFindingOre(unit->ToCreature());
-            ROWOW->MobDeadExp(unit->ToCreature());
+            ROWOW->MobDeadExp(unit->ToCreature(), killer);
         }
         else if (unit->IsPlayer() == true)
             ROWOW->PCDeadPenalty(unit->ToPlayer());
@@ -560,6 +574,7 @@ public:
             { "warp",     HandleROWarpCommand,   SEC_PLAYER,     Console::No },
             { "makearrow", HandleROMakeArrowCommand, SEC_PLAYER, Console::No },
             { "autospell", HandleROAutospellCommand, SEC_PLAYER, Console::No },
+            { "feel",     HandleROFeelCommand,   SEC_PLAYER, Console::No },
             { "produce",  HandleROProduceCommand, SEC_PLAYER,    Console::No },
             { "repair",   HandleRORepairCommand, SEC_PLAYER,     Console::No },
             { "weaponrefine", HandleROWeaponRefineCommand, SEC_PLAYER, Console::No },
@@ -888,6 +903,16 @@ public:
         if (player == nullptr)
             return false;
         ROWOW->SkillAutospell(player, uint16(skillID));
+        return true;
+    }
+
+    static bool HandleROFeelCommand(ChatHandler* handler)
+    {
+        // The Star Gladiator confirming its place (clif_parse_FeelSaveOk), from the RO_Identity addon's ROWOWFEEL menu
+        Player* player = GetFormPlayer(handler);
+        if (player == nullptr)
+            return false;
+        ROWOW->ClifParseFeelSaveOk(player);
         return true;
     }
 
@@ -1496,9 +1521,10 @@ public:
             ROWOWSkill const* skill = ROWOW->GetSkill(skillID);
             uint16 level = uint16(std::clamp<uint32>(skillLevel.value_or(1), 1, skill->MaxLevel));
             int32 levelIndex = ROWOWSkill::GetLevelIndex(level);
-            print("skill id={} lv={} type={} ele={} cast_ms={} delay_ms={} sp={} heal={}", skillID, level, skill->AttackType, skill->Element[levelIndex],
+            // req_sp: what skill_get_requirement asks of the player (a spirit link's or Kaina's change), as the oracle's skill line
+            print("skill id={} lv={} type={} ele={} cast_ms={} delay_ms={} sp={} heal={} req_sp={}", skillID, level, skill->AttackType, skill->Element[levelIndex],
                 ROWOW->SkillCastFix(player, skillID, level), ROWOW->SkillDelayFix(player, skillID, level), skill->SPCost[levelIndex],
-                ROWOW->SkillCalcHeal(player, player, skillID, level, true));
+                ROWOW->SkillCalcHeal(player, player, skillID, level, true), ROWOW->SkillGetRequirement(player, skillID, level).SP);
             if (skill->AttackType == ROWOW_BF_WEAPON || skill->AttackType == ROWOW_BF_MAGIC || skill->AttackType == ROWOW_BF_MISC)
             {
                 runSwings("pcskill", player, creature, skill->AttackType, skillID, level);

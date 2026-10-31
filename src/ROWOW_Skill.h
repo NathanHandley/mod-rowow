@@ -232,6 +232,7 @@ enum ROWOWRequireState : uint8
 #define ROWOW_USESKILL_FAIL_NEED_ITEM               71
 #define ROWOW_USESKILL_FAIL_NEED_EQUIPMENT          72
 #define ROWOW_USESKILL_FAIL_SPIRITS                 74
+#define ROWOW_USESKILL_FAIL_COINS                   75
 #define ROWOW_USESKILL_FAIL_NEED_MORE_BULLET        84
 #define ROWOW_USESKILL_FAIL_NO_AMMO                 1000    // clif_arrow_fail(ARROWFAIL_NO_AMMO), sent the same way here
 #define ROWOW_USESKILL_FAIL_MAX                     1001    // No message
@@ -377,7 +378,17 @@ struct ROWOWSkillUnitData : public DataMap::Base
     int32 PotionHP = 0; // potion_hp and potion_sp: the heal its Slim Potion Pitcher gives each it lands on (rAthena's globals, kept per caster)
     int32 PotionSP = 0;
     std::vector<ObjectGuid> SummonGUIDs; // The monsters it summoned that answer to it (master_id): an Alchemist's plants and Marine Spheres
+    bool IsRunning = false; // state.running: a Taekwon's Sprint is moving it (unit_run)
 };
+
+// The Star Gladiator's places and hatreds, and the Taekwon's mission (pc.hpp): kept in character variables, as rAthena's
+#define ROWOW_MAX_PC_FEELHATE                       3       // MAX_PC_FEELHATE: the sun, the moon and the star
+#define ROWOW_AREA_SIZE                             14      // AREA_SIZE (battle_config.area_size): the cells a unit sees around it, as far as a run goes at once
+#define ROWOW_TKMISSIONID_VAR                       "TK_MISSION_ID"
+#define ROWOW_TKMISSIONCOUNT_VAR                    "TK_MISSION_COUNT"
+#define ROWOW_PCDIECOUNTER_VAR                      "PC_DIE_COUNTER"
+#define ROWOW_SG_FEEL_VARS                          { "PC_FEEL_SUN", "PC_FEEL_MOON", "PC_FEEL_STAR" }
+#define ROWOW_SG_HATE_VARS                          { "PC_HATE_MOB_SUN", "PC_HATE_MOB_MOON", "PC_HATE_MOB_STAR" }
 
 // A monster's special AI (e_mob_ai: special_state.ai): AI_NONE a monster of its own, AI_FLORA a summoned plant that attacks its master's
 // enemies, AI_SPHERE a summoned Marine Sphere that blows up when hit
@@ -993,5 +1004,8 @@ void AddROWOWSkillsAcolyte();
 void AddROWOWSkillsArcher();
 void AddROWOWSkillsMerchant();
 void AddROWOWSkillsThief();
+void AddROWOWSkillsTaekwon();
+void AddROWOWSkillsGunslinger();
+void AddROWOWSkillsNinja();
 
 #endif

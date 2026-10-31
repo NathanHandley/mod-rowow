@@ -682,6 +682,27 @@ uint8 ROWOWMod::PCIsEquip(Player* player, ROWOWIdentity const& identity, Item co
     ROWOWItem const* roItem = GetROItem(item);
     if (roItem == nullptr || roItem->Locations == 0)
         return ROWOW_EQUIP_ACK_FAIL;
+    if (identity.SpiritSkillID == ROWOW_SKILL_SL_SUPERNOVICE)
+    {
+        // Spirit of Super Novice equip bonuses. [Skotlex]
+        if (identity.BaseLevel >= 90 && (roItem->Locations & (ROWOW_EQUIP_POSITION_HEAD_TOP | ROWOW_EQUIP_POSITION_HEAD_MID | ROWOW_EQUIP_POSITION_HEAD_LOW)) != 0)
+            return ROWOW_EQUIP_ACK_OK; // Can equip all helms
+        if (identity.BaseLevel >= 96 && (roItem->Locations & ROWOW_EQUIP_POSITION_ARMS) != 0 && roItem->Type == ROWOW_ITEM_TYPE_WEAPON && roItem->WeaponLevel == 4)
+        {
+            switch (roItem->WeaponType)
+            {
+                // In weapons, the look determines type of weapon: all level 4 daggers, 1H swords, axes, maces and staves
+                case ROWOW_WEAPON_TYPE_DAGGER:
+                case ROWOW_WEAPON_TYPE_1HSWORD:
+                case ROWOW_WEAPON_TYPE_1HAXE:
+                case ROWOW_WEAPON_TYPE_2HAXE: // All level 4 - 2H Axes (works, but low ASPD)
+                case ROWOW_WEAPON_TYPE_MACE:
+                case ROWOW_WEAPON_TYPE_STAFF:
+                case ROWOW_WEAPON_TYPE_2HSTAFF:
+                    return ROWOW_EQUIP_ACK_OK;
+            }
+        }
+    }
     if (roItem->EquipLevelMin != 0 && identity.BaseLevel < roItem->EquipLevelMin)
         return ROWOW_EQUIP_ACK_FAIL_LEVEL;
     if (roItem->EquipLevelMax != 0 && identity.BaseLevel > roItem->EquipLevelMax)

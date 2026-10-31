@@ -616,7 +616,7 @@ void ROWOWMod::CalculateIdentityStatus(Player* player, ROWOWIdentity& identity) 
     }
 
     // ----- STATS CALCULATION -----
-    // Job bonuses, the passive skills, then the base stats.  (The Super Novice's +10 for never dying waits for a death count)
+    // Job bonuses, the passive skills, then the base stats.  If a Super Novice has never died and is at least joblv 70, he gets all stats +10
     if (job != nullptr && identity.JobLevel >= 1 && identity.JobLevel <= job->BonusStatsByJobLevel.size())
         for (uint8 statIndex = 0; statIndex < ROWOW_STAT_COUNT; statIndex++)
             status.JobBonusStats[statIndex] = job->BonusStatsByJobLevel[identity.JobLevel - 1][statIndex];
@@ -628,6 +628,9 @@ void ROWOWMod::CalculateIdentityStatus(Player* player, ROWOWIdentity& identity) 
         skillStats[ROWOW_STAT_INT] += (skill + 1) / 2; // +1 INT / 2 lv
     if ((skill = PCCheckSkill(identity, ROWOW_SKILL_AC_OWL)) > 0)
         skillStats[ROWOW_STAT_DEX] += skill;
+    if (identity.JobID == ROWOW_JOB_SUPER_NOVICE && identity.JobLevel >= 70 && GetIdentityVariable(identity, ROWOW_PCDIECOUNTER_VAR) == 0)
+        for (int32& skillStat : skillStats)
+            skillStat += 10;
     for (uint8 statIndex = 0; statIndex < ROWOW_STAT_COUNT; statIndex++)
         status.Stats[statIndex] = std::clamp<int32>(status.JobBonusStats[statIndex] + skillStats[statIndex] + int32(identity.Stats[statIndex]) +
             status.Bonus.ParamBonus[statIndex] + status.Bonus.ParamEquip[statIndex], 0, USHRT_MAX);
@@ -965,12 +968,23 @@ void ROWOWMod::StatusCalcRegen(Unit const* unit, ROWOWStatus& status) const
     if ((skill = PCCheckSkill(unit, ROWOW_SKILL_NJ_NINPOU)) > 0)
         value += skill * 3 + skill * int32(status.MaxSP) / 500;
     status.SkillRegenSP = std::clamp<int32>(value, 0, SHRT_MAX);
-    // Skill-related recovery (only when sit)
+    // Skill-related recovery (only when sit): Spiritual Cadence, and a Taekwon's Peaceful Break and Happy Break while resting with another
+    // (Kaina powers up the Enjoyable Rest)
+    ROWOWIdentity const* restIdentity = unit != nullptr && unit->IsPlayer() == true ? unit->ToPlayer()->CustomData.Get<ROWOWIdentity>("ROWOWIdentity") : nullptr;
+    bool isRest = restIdentity != nullptr && restIdentity->IsTaekwonRest == true;
     value = 0;
     if ((skill = PCCheckSkill(unit, ROWOW_SKILL_MO_SPIRITSRECOVERY)) > 0)
         value += skill * 4 + skill * int32(status.MaxHP) / 500;
+    if ((skill = PCCheckSkill(unit, ROWOW_SKILL_TK_HPTIME)) > 0 && isRest == true)
+        value += skill * 30 + skill * int32(status.MaxHP) / 500;
     status.SitSkillRegenHP = std::clamp<int32>(value, 0, SHRT_MAX);
     value = 0;
+    if ((skill = PCCheckSkill(unit, ROWOW_SKILL_TK_SPTIME)) > 0 && isRest == true)
+    {
+        value += skill * 3 + skill * int32(status.MaxSP) / 500;
+        if ((skill = PCCheckSkill(unit, ROWOW_SKILL_SL_KAINA)) > 0) // Power up Enjoyable Rest
+            value += (30 + 10 * skill) * value / 100;
+    }
     if ((skill = PCCheckSkill(unit, ROWOW_SKILL_MO_SPIRITSRECOVERY)) > 0)
         value += skill * 2 + skill * int32(status.MaxSP) / 500;
     status.SitSkillRegenSP = std::clamp<int32>(value, 0, SHRT_MAX);
@@ -1163,6 +1177,7 @@ bool ROWOWMod::PCCheckBaseLevelUp(Player* player)
         player->SetHealth(player->GetMaxHealth());
         player->SetPower(POWER_MANA, player->GetMaxPower(POWER_MANA));
     }
+    PCLevelUpAngel(player);
     CastLevelUpEffect(player, ROWOW_SPELL_BASE_LEVEL_UP);
     ChatHandler(player->GetSession()).PSendSysMessage("Base level up! You are now base level {}.", identity->BaseLevel);
     return true;
@@ -1282,7 +1297,7 @@ void ROWOWMod::MobLogDamage(Creature* creature, Unit* attacker, uint32 damage)
     damageLog->Entries.push_back(entry);
 }
 
-void ROWOWMod::MobDeadExp(Creature* creature)
+void ROWOWMod::MobDeadExp(Creature* creature, Unit* killer)
 {
     // The exp part of mob_dead: each attacker's share of the damage (exp_calc_type 0, Aegis's) of the monster's base and job exp, more
     // for each extra attacker (exp_bonus_attacker).  Attackers off the map don't count, and dead ones get nothing.  (Parties share their
@@ -1326,6 +1341,14 @@ void ROWOWMod::MobDeadExp(Creature* creature)
         players[i] = player;
     }
 
+    // Bonus on top of your share (common to all attackers): Rich Man Kim on the monster, and the killer's Star Gladiator blessing and Taekwon
+    // mission (mob_dead's sd)
+    int32 bonus = 100;
+    if (ROWOWStatusChangeEntry const* richManKim = GetSCE(creature, ROWOW_SC_RICHMANKIM))
+        bonus += richManKim->Val2;
+    if (Player* killerPlayer = killer != nullptr ? killer->ToPlayer() : nullptr; killerPlayer != nullptr && IsInROForm(killerPlayer) == true)
+        MobDeadSGTaekwon(creature, killerPlayer, bonus);
+
     // Apply first-attacker 200% exp share bonus
     if (BattleConfig.ExpCalcType == 2 && count > 1)
     {
@@ -1366,8 +1389,8 @@ void ROWOWMod::MobDeadExp(Creature* creature)
                 per += per * bonus.ExpAddClass[ROWOW_CLASS_ALL] / 100.;
         }
 
-        uint64 baseExp = mobBaseExp != 0 ? uint64(std::clamp(double(mobBaseExp) * per, 1.0, double(std::numeric_limits<uint32>::max()))) : 0;
-        uint64 jobExp = mobJobExp != 0 ? uint64(std::clamp(double(mobJobExp) * per, 1.0, double(std::numeric_limits<uint32>::max()))) : 0;
+        uint64 baseExp = mobBaseExp != 0 ? uint64(std::clamp(double(mobBaseExp) * per * bonus / 100., 1.0, double(std::numeric_limits<uint32>::max()))) : 0;
+        uint64 jobExp = mobJobExp != 0 ? uint64(std::clamp(double(mobJobExp) * per * bonus / 100., 1.0, double(std::numeric_limits<uint32>::max()))) : 0;
         PCGainExp(players[i], baseExp, jobExp);
     }
 }

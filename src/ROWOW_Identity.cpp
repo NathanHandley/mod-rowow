@@ -1025,6 +1025,12 @@ void ROWOWMod::GrantIdentitySkillSpells(Player* player, ROWOWIdentity& identity)
                 if (skill->SpellIDsByLevel[level - 1] != 0 && sSpellMgr->GetSpellInfo(skill->SpellIDsByLevel[level - 1]) != nullptr)
                     spellIDs.push_back(skill->SpellIDsByLevel[level - 1]);
         }
+        // The skills it has for now (a spirit link's), each level up to that one
+        for (auto const& levelBySkillID : identity.TempSkillLevelsByID)
+            if (ROWOWSkill const* tempSkill = GetSkill(levelBySkillID.first))
+                for (uint16 level = 1; level <= levelBySkillID.second && level <= tempSkill->SpellIDsByLevel.size(); level++)
+                    if (tempSkill->SpellIDsByLevel[level - 1] != 0 && sSpellMgr->GetSpellInfo(tempSkill->SpellIDsByLevel[level - 1]) != nullptr)
+                        spellIDs.push_back(tempSkill->SpellIDsByLevel[level - 1]);
         // The skill Plagiarism copied, each level up to the copied one
         if (ROWOWSkill const* cloneSkill = GetSkill(identity.CloneSkillID))
             for (uint16 level = 1; level <= identity.CloneSkillLevel && level <= cloneSkill->SpellIDsByLevel.size(); level++)

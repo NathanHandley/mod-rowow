@@ -850,10 +850,48 @@ bool ROWOWMod::StatusChangeStartPostDelay(Unit* src, Unit* bl, int32 type, int32
             }
             break;
         case ROWOW_SC_SPIRIT:
-            // (The Soul Linker's spirits come with the Soul Linker, R6.5)
+        {
+            // A spirit links only the job it's of (its second job, transcendent or not; Bard and Dancer share one).  The Spirit of Rebirth
+            // links a transcendent first job below base level 70
             if (sd == nullptr)
                 return false; // Status change is only applicable for players
+            ROWOWIdentity const* identity = GetIdentity(sd);
+            int32 jobID = identity->JobID;
+            int32 secondJobID = jobID >= ROWOW_JOB_UPPER_START && jobID <= ROWOW_JOB_UPPER_END ? jobID - ROWOW_JOB_UPPER_START + 1 : jobID; // MAPID_SECONDMASK
+            int32 targetClass = -1;
+            switch (val2)
+            {
+                case ROWOW_SKILL_SL_ALCHEMIST: targetClass = 18; break;
+                case ROWOW_SKILL_SL_ASSASIN: targetClass = 12; break;
+                case ROWOW_SKILL_SL_BARDDANCER: targetClass = secondJobID == ROWOW_JOB_DANCER ? ROWOW_JOB_DANCER : ROWOW_JOB_BARD; break; // MAPID_BARDDANCER
+                case ROWOW_SKILL_SL_BLACKSMITH: targetClass = 10; break;
+                case ROWOW_SKILL_SL_CRUSADER: targetClass = 14; break;
+                case ROWOW_SKILL_SL_HUNTER: targetClass = 11; break;
+                case ROWOW_SKILL_SL_KNIGHT: targetClass = 7; break;
+                case ROWOW_SKILL_SL_MONK: targetClass = ROWOW_JOB_MONK; break;
+                case ROWOW_SKILL_SL_PRIEST: targetClass = 8; break;
+                case ROWOW_SKILL_SL_ROGUE: targetClass = 17; break;
+                case ROWOW_SKILL_SL_SAGE: targetClass = 16; break;
+                case ROWOW_SKILL_SL_SOULLINKER: targetClass = ROWOW_JOB_SOUL_LINKER; break;
+                case ROWOW_SKILL_SL_STAR: targetClass = ROWOW_JOB_STAR_GLADIATOR; break;
+                case ROWOW_SKILL_SL_SUPERNOVICE: targetClass = ROWOW_JOB_SUPER_NOVICE; break;
+                case ROWOW_SKILL_SL_WIZARD: targetClass = 9; break;
+                case ROWOW_SKILL_SL_HIGH:
+                    if (identity->BaseLevel >= 70)
+                        return false;
+                    if (jobID < ROWOW_JOB_UPPER_START + 1 || jobID > ROWOW_JOB_UPPER_START + 6)
+                        return false; // Only the transcendent first jobs (Swordman_High to Thief_High) are allowed.
+                    secondJobID = jobID; // Set these to pass the check below.
+                    targetClass = jobID;
+                    break;
+                default:
+                    LOG_ERROR("module.ROWOW", "Unknown skill id {} for SC_SPIRIT.", val2);
+                    return false;
+            }
+            if (secondJobID != targetClass)
+                return false;
             break;
+        }
     }
 
     // Check for OPT1 stacking
@@ -903,6 +941,12 @@ bool ROWOWMod::StatusChangeStartPostDelay(Unit* src, Unit* bl, int32 type, int32
                     return true; // End Stone and do not give stat boost
                 }
             }
+            if (ROWOWStatusChangeEntry const* spirit = sc->GetSCE(ROWOW_SC_SPIRIT); spirit != nullptr && spirit->Val2 == ROWOW_SKILL_SL_HIGH)
+                StatusChangeEnd(bl, ROWOW_SC_SPIRIT);
+            break;
+        case ROWOW_SC_INCREASEAGI:
+            if (ROWOWStatusChangeEntry const* spirit = sc->GetSCE(ROWOW_SC_SPIRIT); spirit != nullptr && spirit->Val2 == ROWOW_SKILL_SL_HIGH)
+                StatusChangeEnd(bl, ROWOW_SC_SPIRIT);
             break;
         case ROWOW_SC_DELUGE:
             if (sc->HasSCE(ROWOW_SC_FOGWALL) == true && sc->HasSCE(ROWOW_SC_BLIND) == true)
@@ -1097,6 +1141,29 @@ bool ROWOWMod::StatusChangeStartPostDelay(Unit* src, Unit* bl, int32 type, int32
             break;
         case ROWOW_SC_MERC_SPUP:
             bl->SetPower(POWER_MANA, bl->GetMaxPower(POWER_MANA)); // Recover Full SP
+            break;
+        case ROWOW_SC_RUN:
+            GetSkillUnitData(bl)->IsRunning = UnitRun(bl);
+            break;
+        case ROWOW_SC_COMBO:
+            // A Taekwon's kick readied: its stance's look (clif_skill_nodamage)
+            switch (sc->GetSCE(type)->Val1)
+            {
+                case ROWOW_SKILL_TK_STORMKICK: ClifSkillNoDamage(bl, bl, ROWOW_SKILL_TK_READYSTORM, 1); break;
+                case ROWOW_SKILL_TK_DOWNKICK: ClifSkillNoDamage(bl, bl, ROWOW_SKILL_TK_READYDOWN, 1); break;
+                case ROWOW_SKILL_TK_TURNKICK: ClifSkillNoDamage(bl, bl, ROWOW_SKILL_TK_READYTURN, 1); break;
+                case ROWOW_SKILL_TK_COUNTER: ClifSkillNoDamage(bl, bl, ROWOW_SKILL_TK_READYCOUNTER, 1); break;
+            }
+            break;
+        case ROWOW_SC_SPIRIT:
+            // status_calc_pc's pc_calc_skilltree: the linked job's spirit skills (and a Bard's or Dancer's linked songs)
+            if (sd != nullptr)
+            {
+                ROWOWIdentity* identity = GetIdentity(sd);
+                identity->SpiritSkillID = uint16(val2);
+                RefreshIdentitySkills(sd, *identity);
+                SendSkillsToClient(sd, *identity, false);
+            }
             break;
     }
     return true;
@@ -1537,6 +1604,22 @@ bool ROWOWMod::StatusChangeStartValues(Unit* src, Unit* bl, int32 type, int32& v
             val4 |= std::clamp(getStat(ROWOW_STAT_LUK), 0, 0xFF);
             break;
         }
+        case ROWOW_SC_SPIRIT:
+            // 1st Transcendent Spirit works similar to Marionette Control: each stat raised to base level - 10 (50 at most)
+            if (sd != nullptr && val2 == ROWOW_SKILL_SL_HIGH)
+            {
+                ROWOWStatus const* status2 = GetROBaseStatus(bl);
+                int32 maxStat = std::min<int32>(int32(status2->Level) - 10, 50);
+                val3 = 0;
+                val4 = 0;
+                val3 |= std::clamp(std::max(0, maxStat - status2->Stats[ROWOW_STAT_STR]), 0, 0xFF) << 16;
+                val3 |= std::clamp(std::max(0, maxStat - status2->Stats[ROWOW_STAT_AGI]), 0, 0xFF) << 8;
+                val3 |= std::clamp(std::max(0, maxStat - status2->Stats[ROWOW_STAT_VIT]), 0, 0xFF);
+                val4 |= std::clamp(std::max(0, maxStat - status2->Stats[ROWOW_STAT_INT]), 0, 0xFF) << 16;
+                val4 |= std::clamp(std::max(0, maxStat - status2->Stats[ROWOW_STAT_DEX]), 0, 0xFF) << 8;
+                val4 |= std::clamp(std::max(0, maxStat - status2->Stats[ROWOW_STAT_LUK]), 0, 0xFF);
+            }
+            break;
         case ROWOW_SC_MARIONETTE2:
         {
             // Fetch caster information (val1 is the caster's low GUID, on the same map)
@@ -2002,15 +2085,36 @@ bool ROWOWMod::StatusChangeEnd(Unit* bl, int32 type, bool isTimer)
             break;
         case ROWOW_SC_RUN:
         {
-            // The Taekwon's Sprint ends in a Spurt when it ran for at most a second with empty hands
+            // The Taekwon's Sprint ends in a Spurt when it ran for at most a second with empty hands (not when it ran into something:
+            // unit_run_hit stops the running first)
+            ROWOWSkillUnitData* ud = GetSkillUnitData(bl);
+            bool beginSpurt = ud->IsRunning;
+            ud->IsRunning = false;
             bl->StopMoving();
             uint64 startTick = uint64(uint32(val3)) | (uint64(uint32(val4)) << 32);
             ROWOWStatus const* status = GetROStatus(bl);
-            if (val1 >= 7 && GetTick() - startTick <= 1000 && (sd == nullptr || (status != nullptr && status->RightWeaponType == ROWOW_WEAPON_TYPE_FIST &&
-                status->LeftWeaponType == ROWOW_WEAPON_TYPE_FIST)))
+            if (beginSpurt == true && val1 >= 7 && GetTick() - startTick <= 1000 && (sd == nullptr || (status != nullptr &&
+                status->RightWeaponType == ROWOW_WEAPON_TYPE_FIST && status->LeftWeaponType == ROWOW_WEAPON_TYPE_FIST)))
                 SCStart(bl, bl, ROWOW_SC_SPURT, 100, val1, SkillGetTime2(scdb->SkillID, uint16(val1)));
             break;
         }
+        case ROWOW_SC_WARM:
+            if (val4 != 0 && bl->IsInWorld() == true)
+            {
+                // Clear the group.
+                if (std::shared_ptr<ROWOWSkillUnitGroup> group = SkillID2Group(bl->GetMap(), val4)) // Might have been cleared before status ended, e.g. land protector
+                    SkillDelUnitGroup(bl->GetMap(), group);
+            }
+            break;
+        case ROWOW_SC_SPIRIT:
+            if (sd != nullptr)
+            {
+                ROWOWIdentity* identity = GetIdentity(sd);
+                identity->SpiritSkillID = 0;
+                RefreshIdentitySkills(sd, *identity);
+                SendSkillsToClient(sd, *identity, false);
+            }
+            break;
         case ROWOW_SC_AUTOBERSERK:
             if (ROWOWStatusChangeEntry const* provoke = sc->GetSCE(ROWOW_SC_PROVOKE); provoke != nullptr && provoke->Val4 == 1)
                 StatusChangeEnd(bl, ROWOW_SC_PROVOKE);

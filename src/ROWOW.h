@@ -203,6 +203,8 @@ struct ROWOWDataTable
 #define ROWOW_JOB_CLOWN                             4020
 #define ROWOW_JOB_GYPSY                             4021
 #define ROWOW_JOB_TAEKWON                           4046
+#define ROWOW_JOB_STAR_GLADIATOR                    4047
+#define ROWOW_JOB_SOUL_LINKER                       4049
 #define ROWOW_JOB_UPPER_START                       4001    // Novice_High, the first transcendent job
 #define ROWOW_JOB_UPPER_END                         4022    // Paladin2, the last
 
@@ -682,6 +684,11 @@ struct ROWOWBattleConfig
     int32 SkillAddHealRate = 487; // skill_add_heal_rate: the heal skills bHealPower raises (1 Heal, 2 Sanctuary, 4 Aid Potion, 8 Slim Potion Pitcher, 16 Apple of Idun...)
     int32 BackstabBowPenalty = 1; // backstab_bow_penalty: Back Stab with a bow does half its damage
     int32 SwitchRemoveEdp = 2; // switch_remove_edp: (pre-renewal &1) taking off the weapon ends Enchant Deadly Poison, which bare hands can't cast
+    int32 AllowEsMagicPC = 0; // allow_es_magic_player: the Soul Linker's Es spells work on players
+    int32 AllowSkillWithoutDay = 0; // allow_skill_without_day: the Star Gladiator's sun, moon and star skills work on any day
+    int32 SgMiracleSkillRatio = 1; // sg_miracle_skill_ratio: Miracle of the Sun, Moon and Stars' chance on a hit, in 20000 (lower with AGI over 46)
+    int32 SgMiracleSkillDuration = 3600000; // sg_miracle_skill_duration
+    int32 TaekwonMissionMobname = 0; // taekwon_mission_mobname: also count monsters of the mission's race (1, goblins...) or name (2)
 };
 
 // A skill of a job's skill tree (skill_tree.yml's s_skill_tree_entry)
@@ -864,7 +871,7 @@ struct ROWOWStatus
     int32 RegenRateSP = 100;
     int32 SkillRegenHP = 0; // The regen skills' HP and SP every natural_heal_skill_interval (sregen: Increase HP and SP Recovery)
     int32 SkillRegenSP = 0;
-    int32 SitSkillRegenHP = 0; // ... only while sitting (ssregen: Spiritual Cadence; the Taekwon's rests come with the Taekwon)
+    int32 SitSkillRegenHP = 0; // ... only while sitting (ssregen: Spiritual Cadence, and a Taekwon's Peaceful and Happy Break at rest)
     int32 SitSkillRegenSP = 0;
     bool IsRegenWalk = false; // regen_data's state.walk: HP regenerates while walking (Moving HP-Recovery), at half speed
     int32 Speed = ROWOW_DEFAULT_WALK_SPEED; // Walk speed, ms per cell
@@ -1019,6 +1026,12 @@ struct ROWOWIdentity : public DataMap::Base
     bool IsInvincibleSet = false; // The WoW state standing for it is set (immune to NPCs)
     bool IsSitting = false; // pc_issit as skill_sit last saw it (sitting down and standing up, from the player's update)
     bool IsGangsterParadise = false; // state.gangsterparadise: sitting by another sitting Rogue, monsters leave it alone
+    bool IsTaekwonRest = false; // state.rest: a Taekwon sitting with another (Peaceful Break, Happy Break's regen)
+    std::map<uint16, uint16> TempSkillLevelsByID; // SKILL_FLAG_TEMPORARY: skills it has for now, unsaved and not raised (a spirit link's, a Bard's or
+                                                  // Dancer's linked songs), worked out by pc_calc_skilltree
+    uint8 SuperNoviceCallFlag = 0; // state.snovice_call_flag: how far a Super Novice is in the Guardian Angel prayer (its lines said)
+    uint16 SpiritSkillID = 0; // The spirit linking it (its SC_SPIRIT's val2), which pc_calc_skilltree reads for the spirit skills
+    bool IsSuperNoviceDeadFlag = false; // state.snovice_dead_flag: its angel saved it from death, until its next base level
     bool IsSellingToShop = false; // A sell packet is being handled: its money gets Overcharge
     uint32 Option = 0; // status.option: the options kept with the identity (a Knight's or Crusader's Peco, ROWOW_OPTION_RIDING), saved with it
     std::array<ObjectGuid, ROWOW_MAX_DEVOTION> DevotionGUIDs; // devotion: the players its Devotion protects, by slot (a slot holds while that
@@ -1236,7 +1249,7 @@ public:
 
     // An RO monster's exp (mob.cpp): who hurt it how much (mob_log_damage), and its exp shared out to them when it dies (mob_dead)
     void MobLogDamage(Creature* creature, Unit* attacker, uint32 damage);
-    void MobDeadExp(Creature* creature);
+    void MobDeadExp(Creature* creature, Unit* killer);
 
     // RO natural HP and SP regen (status_natural_heal), in place of WoW's while in the form
     void UpdateNaturalRegen(Player* player, uint32 diff);
@@ -1400,8 +1413,10 @@ public:
         ROWOWSkillUnit const* dsrcUnit = nullptr); // skill_attack_blow
     static int32 SkillIsCombo(uint16 skillID); // skill_is_combo: 1 a combo skill, 2 one that auto-targets even with a target set, 0 none
     void SkillCombo(Unit* src, Unit* dsrc, Unit* bl, uint16 skillID, uint16 skillLevel, uint64 tick); // skill_combo: the combo window a hit opens
+    bool UnitCancelCombo(Unit* bl); // unit_cancel_combo: the combo window ended (a Taekwon kick, a wrong kick tried)
     int32 SkillBlown(Unit* src, Unit* target, int32 count, int8 dir, int32 flag, ROWOWSkillUnit const* srcUnit = nullptr); // skill_blown, in RO cells (from a unit's cell)
     bool UnitMovePos(Unit* bl, int32 x, int32 y); // skill_check_unit_movepos and unit_movepos: the unit slides onto an RO cell at once
+    bool UnitJumpPos(Unit* bl, int32 x, int32 y); // unit_movepos without its path check: the unit jumps onto an RO cell (Leap)
     void BattleConsumeAmmo(Player* sd, uint16 skillID, uint16 skillLevel); // battle_consume_ammo: a normal attack's or skill's ammo
     int32 SkillAdditionalEffect(Unit* src, Unit* bl, uint16 skillID, uint16 skillLevel, int32 attackType, uint8 dmgLv, uint64 tick); // skill_additional_effect
     int32 SkillCounterAdditionalEffect(Unit* src, Unit* bl, uint16 skillID, uint16 skillLevel, int32 attackType, uint64 tick); // skill_counter_additional_effect
@@ -1645,6 +1660,35 @@ public:
     void UpdateSkillSit(Player* sd); // skill_sit as the player sits down or stands up, from its update
     bool MobCanTarget(Creature const* md, Unit const* target) const; // mob_ai_sub_hard's target checks the WoW AI doesn't make (Gangster's Paradise)
     void ClifGraffiti(Map* map, ROWOWSkillUnitGroup& group); // clif_graffiti: Graffiti's message to the players it comes into view of
+
+    // The expanded jobs' supporting systems (ROWOW_SkillSupport.cpp): a Taekwon's running (unit_run), its mission and rests, the Star
+    // Gladiator's places and hatreds (character variables, the place confirmed through the RO_Identity addon's ROWOWFEEL menu), the Soul
+    // Linker's spirits (the linked jobs' spirit skills, pc_calc_skilltree's), the Super Novice's angel, and party_skill_check.  All of it runs in
+    // the map thread of the units involved
+    int32 MapCountOnCell(Unit* origin, int32 x, int32 y) const; // map_count_oncell (BL_PC | BL_NPC | BL_MOB): the RO combatants on a cell
+    bool MapSearchFreeCell(Unit* center, int32 range, int32& xOut, int32& yOut) const; // map_search_freecell: a random walkable cell around a unit
+    bool UnitRun(Unit* bl); // unit_run: a running unit (SC_RUN) moves on the way it runs, or bounces off what stops it (false)
+    void UnitRunHit(Unit* bl); // unit_run_hit: the run ends against something, knocked back a cell or more
+    void UpdateUnitRun(Unit* bl); // unit_walktoxy_timer's "keep trying to run", from the unit's update once a run's move ended
+    void StatusSetHP(Unit* bl, uint32 hp); // status_set_hp
+    uint32 PCGetFeelMap(ROWOWIdentity const& identity, int32 pos) const; // feel_map: the RO map of the sun, moon or star (0 none)
+    int32 PCGetHateMob(ROWOWIdentity const& identity, int32 pos) const; // hate_mob: the monster (or job) hated, -1 none
+    bool PCSetHateMob(Player* sd, int32 pos, Unit* bl); // pc_set_hate_mob
+    void ClifFeelReq(Player* sd, uint16 skillLevel); // clif_feel_req: the RO_Identity addon asks to confirm the place (ROWOWFEEL)
+    void ClifParseFeelSaveOk(Player* sd); // clif_parse_FeelSaveOk: the place confirmed (.ro feel)
+    void ClifFeelInfo(Player* sd, int32 pos, int32 type) const; // clif_feel_info (type 1: registered now, 0: shown)
+    void ClifHateInfo(Player* sd, int32 pos, int32 hateClass, int32 type) const; // clif_hate_info
+    void ClifMissionInfo(Player* sd, uint32 mobID, int32 progress) const; // clif_mission_info
+    void PCResetFeel(Player* sd); // pc_resetfeel
+    void PCResetHate(Player* sd); // pc_resethate
+    bool SGIsDay(int32 pos) const; // sg_info's day_func: is_day_of_sun, is_day_of_moon, is_day_of_star (or allow_skill_without_day)
+    void PCSetDieCounter(Player* sd, int64 value); // pc_setparam(SP_PCDIECOUNTER): a Super Novice that never died keeps its +10 stats
+    void MobDeadSGTaekwon(Creature* md, Player* sd, int32& bonus); // mob_dead's Star Gladiator's blessing (more exp) and the Taekwon mission's kill count
+    void PartySkillCheck(Player* sd, uint16 skillID, uint16 skillLevel); // party_skill_check: Star Gladiator's Friend on a party member's combo
+    bool StatusDamageRevive(Unit* bl); // status_damage's Kaizel and pc_dead's Super Novice angel: up again in place of dying
+    void PCSuperNoviceCall(Player* sd, std::string const& message); // The Guardian Angel prayer's lines (clif_parse_NoviceExplosionSpirits)
+    void PCLevelUpAngel(Player* sd); // pc_checkbaselevelup's Super Novice and Taekwon angels: their buffs at each base level
+    void SkillTaekwonRest(Player* sd, bool sitting); // skill_sit's flag 2: Taekwons sitting together rest (state.rest)
 
     // Merchant prices (pc_modifybuyvalue, pc_modifysellvalue)
     int32 PCModifyBuyValue(Player const* player, int32 origValue) const;

@@ -502,6 +502,7 @@ std::shared_ptr<ROWOWSkillUnitGroup> ROWOWMod::SkillUnitSetting(Unit* src, uint1
     int32 linkGroupID = 0;
     uint32 reqItem = 0;
     int32 activeFlag = 1;
+    int32 subunt = 0; // A unit id after the skill's own (Ground Drift's, by its element)
     ROWOWStatus const* status = GetROStatus(src);
     // A hidden trap (UF_HIDDENTRAP) is hidden by traps_setting: 2 everywhere, 1 on the PvP maps (none here)
     bool hidden = skill->UnitFlags[ROWOW_UF_HIDDENTRAP] == true && BattleConfig.TrapsSetting == 2;
@@ -657,6 +658,50 @@ std::shared_ptr<ROWOWSkillUnitGroup> ROWOWMod::SkillUnitSetting(Unit* src, uint1
         case ROWOW_SKILL_PR_SANCTUARY:
             val1 = skillLevel + 3; // The undead and demons it can still hit
             break;
+        case ROWOW_SKILL_NJ_KAENSIN:
+            SkillClearGroup(src, 1); // Delete previous Kaensins/Suitons
+            val2 = (skillLevel + 1) / 2 + 4;
+            break;
+        case ROWOW_SKILL_NJ_SUITON:
+            SkillClearGroup(src, 1);
+            break;
+        case ROWOW_SKILL_GS_GROUNDDRIFT:
+        {
+            // Ground Drift Element is decided when it's placed.
+            int32 ele = skill->Element[ROWOWSkill::GetLevelIndex(skillLevel)];
+            int32 const element[5] = { ROWOW_ELEMENT_WIND, ROWOW_ELEMENT_DARK, ROWOW_ELEMENT_POISON, ROWOW_ELEMENT_WATER, ROWOW_ELEMENT_FIRE };
+            if (ele == ROWOW_ELEMENT_RANDOM)
+                val1 = element[urand(0, 4)]; // Use random from available unit visual?
+            else if (ele == ROWOW_ELEMENT_ENDOWED)
+                val1 = StatusCalcAttackElement(sc, ROWOW_ELEMENT_NEUTRAL);
+            else if (ele == ROWOW_ELEMENT_WEAPON)
+            {
+                val1 = status->WeaponElement;
+                if (ROWOWStatusChangeEntry const* enchantArms = sc != nullptr ? sc->GetSCE(ROWOW_SC_ENCHANTARMS) : nullptr)
+                    val1 = enchantArms->Val1;
+            }
+            switch (val1)
+            {
+                case ROWOW_ELEMENT_FIRE:
+                    subunt++;
+                    [[fallthrough]];
+                case ROWOW_ELEMENT_WATER:
+                    subunt++;
+                    [[fallthrough]];
+                case ROWOW_ELEMENT_POISON:
+                    subunt++;
+                    [[fallthrough]];
+                case ROWOW_ELEMENT_DARK:
+                    subunt++;
+                    [[fallthrough]];
+                case ROWOW_ELEMENT_WIND:
+                    break;
+                default:
+                    subunt = int32(urand(0, 4));
+                    break;
+            }
+            break;
+        }
         case ROWOW_SKILL_HW_GRAVITATION:
             // The caster's own Gravitation status deletes the field with it
             if (ROWOWStatusChangeEntry const* gravitation = sc != nullptr ? sc->GetSCE(ROWOW_SC_GRAVITATION) : nullptr; gravitation != nullptr &&
@@ -667,8 +712,8 @@ std::shared_ptr<ROWOWSkillUnitGroup> ROWOWMod::SkillUnitSetting(Unit* src, uint1
     }
 
     // Init skill unit group
-    std::shared_ptr<ROWOWSkillUnitGroup> group = SkillInitUnitGroup(src, int32(layout->Cells.size()), skillID, skillLevel, ((flag & 1) != 0 ? skill->UnitTypeID2 : skill->UnitTypeID),
-        limit, interval);
+    std::shared_ptr<ROWOWSkillUnitGroup> group = SkillInitUnitGroup(src, int32(layout->Cells.size()), skillID, skillLevel,
+        uint16(((flag & 1) != 0 ? skill->UnitTypeID2 : skill->UnitTypeID) + subunt), limit, interval);
     if (group == nullptr)
         return nullptr;
     group->Val1 = val1;
@@ -754,6 +799,27 @@ std::shared_ptr<ROWOWSkillUnitGroup> ROWOWMod::SkillUnitSetting(Unit* src, uint1
             case ROWOW_SKILL_NJ_KAENSIN:
                 unitVal2 = group->Val2;
                 break;
+            case ROWOW_SKILL_GS_DESPERADO:
+            {
+                // Each cell's chance (in 100) to hit what's on it: 36 next to the middle falling by 12 a cell along the cross, less on the diagonals
+                unitVal1 = std::abs(layout->Cells[i].first);
+                unitVal2 = std::abs(layout->Cells[i].second);
+                if (unitVal1 < 2 || unitVal2 < 2)
+                {
+                    // Nearby cross, linear decrease with no diagonals
+                    if (unitVal2 > unitVal1)
+                        unitVal1 = unitVal2;
+                    if (unitVal1 != 0)
+                        unitVal1--;
+                    unitVal1 = 36 - 12 * unitVal1;
+                }
+                else // Diagonal edges
+                    unitVal1 = 28 - 4 * unitVal1 - 4 * unitVal2;
+                if (unitVal1 < 1)
+                    unitVal1 = 1;
+                unitVal2 = 0;
+                break;
+            }
             case ROWOW_SKILL_CR_GRANDCROSS:
             case ROWOW_SKILL_NPC_GRANDDARKNESS:
                 unitVal1 = int32(SkillGetTime(skillID, skillLevel) / std::max(1, interval)); // Default: 950/300 = 3 hits
@@ -830,6 +896,10 @@ std::shared_ptr<ROWOWSkillUnitGroup> ROWOWMod::SkillUnitSetting(Unit* src, uint1
         SkillDelUnitGroup(map, group);
         return nullptr;
     }
+
+    // success, unit created.
+    if (skillID == ROWOW_SKILL_NJ_TATAMIGAESHI)
+        group->Val1 = group->AliveCount; // Store number of tiles.
 
     // The whole group's look, when its cells don't show one by one (over the layout and the units' reach)
     if (skill->UnitSpellIDsByLevel.size() > size_t(levelIndex) && skill->UnitSpellIDsByLevel[levelIndex] != 0 && skill->IsUnitSpellPerCellByLevel[levelIndex] == false)
@@ -970,6 +1040,19 @@ void ROWOWMod::SkillDelUnitGroup(Map* map, std::shared_ptr<ROWOWSkillUnitGroup> 
                 {
                     dancing->Val2 = 0; // This prevents status_change_end attempting to redelete the group. [Skotlex]
                     StatusChangeEnd(src, ROWOW_SC_DANCING);
+                }
+            }
+        }
+
+        // Warmth's area going ends the Star Gladiator's status (which then has no group to delete)
+        if (group->SkillID == ROWOW_SKILL_SG_SUN_WARM || group->SkillID == ROWOW_SKILL_SG_MOON_WARM || group->SkillID == ROWOW_SKILL_SG_STAR_WARM)
+        {
+            if (ROWOWStatusChange* sc = GetStatusChange(src))
+            {
+                if (ROWOWStatusChangeEntry* warm = sc->GetSCE(ROWOW_SC_WARM))
+                {
+                    warm->Val4 = 0;
+                    StatusChangeEnd(src, ROWOW_SC_WARM);
                 }
             }
         }
@@ -1179,6 +1262,12 @@ int32 ROWOWMod::SkillUnitOnPlace(Map* map, ROWOWSkillUnitGroup& group, int32 ind
                 SCStart4(ss, bl, type, 100, group.SkillLevel, 0, ROWOW_BCT_ENEMY, group.GroupID, group.Limit);
             break;
 
+        case ROWOW_UNT_SUITON:
+            // Slower everyone in it; the Ninja's enemies (val2 1) lose AGI too
+            if (GetSCE(bl, ROWOW_SC_SUITON) == nullptr)
+                SCStart4(ss, bl, ROWOW_SC_SUITON, 100, group.SkillLevel, BattleCheckTargetSkillUnit(group, map, bl, ROWOW_BCT_ENEMY) > 0 ? 1 : 0, 0, 0, group.Limit);
+            break;
+
         case ROWOW_UNT_SAFETYWALL:
             if (sce == nullptr)
                 SCStart4(ss, bl, type, 100, group.SkillLevel, group.SkillID, group.GroupID, 0, group.Limit);
@@ -1336,9 +1425,30 @@ int32 ROWOWMod::SkillUnitOnPlaceTimer(Map* map, ROWOWSkillUnitGroup& group, int3
             SkillAttack(skill->AttackType, ss, ss, bl, skillID, group.SkillLevel, tick, 0, &unit);
             break;
 
+        case ROWOW_UNT_TATAMIGAESHI:
         case ROWOW_UNT_DEMONSTRATION:
             SkillAttack(ROWOW_BF_WEAPON, ss, ss, bl, skillID, group.SkillLevel, tick, 0, &unit);
             break;
+
+        case ROWOW_UNT_GROUNDDRIFT_WIND:
+        case ROWOW_UNT_GROUNDDRIFT_DARK:
+        case ROWOW_UNT_GROUNDDRIFT_POISON:
+        case ROWOW_UNT_GROUNDDRIFT_WATER:
+        case ROWOW_UNT_GROUNDDRIFT_FIRE:
+        {
+            // The grenade goes off on everything around its cell (skill_trap_splash), then stays a used trap for 1.5 s
+            int32 splashRange = SkillGetSplash(group.SkillID, group.SkillLevel);
+            ROWOWSkillUnitGroup& trapGroup = group;
+            MapForEachInCellArea(map, bl->GetPhaseMask(), unit.X - splashRange, unit.Y - splashRange, unit.X + splashRange, unit.Y + splashRange,
+                [this, map, &trapGroup, index, tick](Unit* target)
+            {
+                return SkillTrapSplash(map, target, trapGroup, index, tick);
+            });
+            ClifChangeTrapLook(map, group, index, bl);
+            group.UnitID = ROWOW_UNT_USED_TRAPS;
+            group.Limit = int64(tick - group.Tick) + ROWOW_TRAP_USED_LIMIT;
+            break;
+        }
 
         case ROWOW_UNT_VENOMDUST:
             // Poison on whoever stands in the dust and isn't poisoned yet
@@ -1348,8 +1458,43 @@ int32 ROWOWMod::SkillUnitOnPlaceTimer(Map* map, ROWOWSkillUnitGroup& group, int3
             break;
 
         case ROWOW_UNT_DUMMYSKILL:
-            // (Star Gladiator's warmth, Desperado and the NPC skills come with their jobs.)  A Grand Cross cell hits as many times as its val1
-            // (its caster too), and the unit timer takes the spent cell away
+            // A Grand Cross cell hits as many times as its val1 (its caster too), and the unit timer takes the spent cell away.  (The NPC
+            // skills come with the monster skills)
+            if (skillID == ROWOW_SKILL_SG_SUN_WARM || skillID == ROWOW_SKILL_SG_MOON_WARM || skillID == ROWOW_SKILL_SG_STAR_WARM)
+            {
+                // SG skills [Komurka]: a player in it loses SP; a monster is knocked back, at 2 SP of the Star Gladiator's a hit.  If target
+                // isn't knocked back it should hit every "interval" ms [Playtester]
+                int32 count = 0;
+                ROWOWSkillUnitData* bud = GetSkillUnitData(bl);
+                uint64 blownTick = bud->SkillBlownTick;
+                do
+                {
+                    if (bl->IsPlayer() == true)
+                        StatusZap(bl, 0, 10); // sp damage to players
+                    else
+                    {
+                        // Bosses trigger the effect only 1 out of 5 times
+                        if (GetROStatus(bl)->Class == ROWOW_CLASS_BOSS && urand(0, 4) != 0)
+                            continue;
+                        // costs 2 SP per hit
+                        if (StatusCharge(ss, 0, 2) == false)
+                        {
+                            // should end when out of sp.
+                            group.Limit = int64(tick - group.Tick);
+                            break;
+                        }
+                        SkillAttack(ROWOW_BF_WEAPON, ss, ss, bl, skillID, group.SkillLevel, tick + uint64(count) * uint64(group.Interval), 0, &unit);
+                    }
+                } while (group.Interval > 0 && bud->SkillBlownTick == blownTick && ++count < ROWOW_SKILLUNITTIMER_INTERVAL / group.Interval && bl->IsAlive() == true);
+                break;
+            }
+            if (skillID == ROWOW_SKILL_GS_DESPERADO)
+            {
+                // Each cell hits what's on it at its own chance
+                if (int32(urand(0, 99)) < unit.Val1)
+                    SkillAttack(ROWOW_BF_WEAPON, ss, ss, bl, skillID, group.SkillLevel, tick, 0, &unit);
+                break;
+            }
             if (skillID == ROWOW_SKILL_WZ_STORMGUST)
             {
                 // SG counter does not reset per stormgust. IE: One hit from a SG and two hits from another will freeze you.
@@ -1737,6 +1882,10 @@ int32 ROWOWMod::SkillUnitOnLeft(uint16 skillID, Unit* bl, uint64 tick)
             if (sce != nullptr)
                 StatusChangeEnd(bl, type);
             break;
+        case ROWOW_SKILL_NJ_SUITON:
+            if (sce != nullptr)
+                StatusChangeEnd(bl, type);
+            break;
         case ROWOW_SKILL_BD_LULLABY:
         case ROWOW_SKILL_BD_RICHMANKIM:
         case ROWOW_SKILL_BD_ETERNALCHAOS:
@@ -2013,6 +2162,16 @@ void ROWOWMod::SkillUnitTimer(Map* map, uint32 /*diff*/)
                 });
                 if (unit.Range == -1) // Unit disabled, but it should not be deleted yet.
                     group->UnitID = ROWOW_UNT_USED_TRAPS;
+                else if (group->UnitID == ROWOW_UNT_TATAMIGAESHI)
+                {
+                    unit.Range = -1; // Disable processed cell.
+                    if (--group->Val1 <= 0)
+                    {
+                        // number of live cells.  All tiles were processed, disable skill.
+                        group->TargetFlag = ROWOW_BCT_NOONE;
+                        group->BLFlag = 0;
+                    }
+                }
                 else if (group->UnitID == ROWOW_UNT_SANCTUARY && group->Val1 <= 0)
                     SkillDelUnitGroup(map, group); // Its hits on the undead are spent
                 else if (group->SkillID == ROWOW_SKILL_WZ_METEOR || ((group->SkillID == ROWOW_SKILL_CR_GRANDCROSS || group->SkillID == ROWOW_SKILL_NPC_GRANDDARKNESS) &&
@@ -2171,6 +2330,8 @@ void ROWOWMod::UpdateSkillUnitMove(Unit* unit)
     // A performer's song or dance goes along with it (map_moveblock)
     if (ROWOWStatusChangeEntry const* dancing = GetSCE(unit, ROWOW_SC_DANCING))
         SkillUnitMoveUnitGroup(unit->GetMap(), SkillID2Group(unit->GetMap(), dancing->Val2), dx, dy);
+    else if (ROWOWStatusChangeEntry const* warm = GetSCE(unit, ROWOW_SC_WARM))
+        SkillUnitMoveUnitGroup(unit->GetMap(), SkillID2Group(unit->GetMap(), warm->Val4), dx, dy);
     if (Player* sd = unit->ToPlayer()) // unit_walktoxy_timer's step
         PCCellBasilica(sd);
 }
@@ -2485,6 +2646,26 @@ int32 ROWOWMod::SkillTrapSplash(Map* map, Unit* bl, ROWOWSkillUnitGroup& group, 
     {
         case ROWOW_UNT_SANDMAN:
             SkillAdditionalEffect(ss, bl, group.SkillID, group.SkillLevel, ROWOW_BF_MISC, ROWOW_ATK_DEF, tick);
+            break;
+        case ROWOW_UNT_GROUNDDRIFT_WIND:
+            if (SkillAttack(skill->AttackType, ss, ss, bl, group.SkillID, group.SkillLevel, tick, group.Val1, &unit) != 0)
+                SCStart(ss, bl, ROWOW_SC_STUN, 50, group.SkillLevel, SkillGetTime2(group.SkillID, 1));
+            break;
+        case ROWOW_UNT_GROUNDDRIFT_DARK:
+            if (SkillAttack(skill->AttackType, ss, ss, bl, group.SkillID, group.SkillLevel, tick, group.Val1, &unit) != 0)
+                SCStart(ss, bl, ROWOW_SC_BLIND, 50, group.SkillLevel, SkillGetTime2(group.SkillID, 2));
+            break;
+        case ROWOW_UNT_GROUNDDRIFT_POISON:
+            if (SkillAttack(skill->AttackType, ss, ss, bl, group.SkillID, group.SkillLevel, tick, group.Val1, &unit) != 0)
+                SCStart2(ss, bl, ROWOW_SC_POISON, 50, group.SkillLevel, int32(ss->GetGUID().GetCounter()), SkillGetTime2(group.SkillID, 3));
+            break;
+        case ROWOW_UNT_GROUNDDRIFT_WATER:
+            if (SkillAttack(skill->AttackType, ss, ss, bl, group.SkillID, group.SkillLevel, tick, group.Val1, &unit) != 0)
+                SCStart(ss, bl, ROWOW_SC_FREEZE, 50, group.SkillLevel, SkillGetTime2(group.SkillID, 4));
+            break;
+        case ROWOW_UNT_GROUNDDRIFT_FIRE:
+            if (SkillAttack(skill->AttackType, ss, ss, bl, group.SkillID, group.SkillLevel, tick, group.Val1, &unit) != 0)
+                SkillBlown(ss, bl, skill->Knockback[ROWOWSkill::GetLevelIndex(group.SkillLevel)], -1, ROWOW_BLOWN_NONE, &unit);
             break;
         default:
         {

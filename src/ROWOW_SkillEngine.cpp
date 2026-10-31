@@ -108,6 +108,7 @@ namespace
             case ROWOW_USESKILL_FAIL_CART: return "A Pushcart is required.";
             case ROWOW_USESKILL_FAIL_NEED_EQUIPMENT: return "The required equipment isn't worn.";
             case ROWOW_USESKILL_FAIL_SPIRITS: return "Spirit Spheres required.";
+            case ROWOW_USESKILL_FAIL_COINS: return "Coins required.";
             case ROWOW_USESKILL_FAIL_NEED_MORE_BULLET: return "More ammunition is required.";
             case ROWOW_USESKILL_FAIL_NO_AMMO: return "Please equip the proper ammunition first.";
             default: return "Skill has failed.";
@@ -899,6 +900,10 @@ int32 ROWOWMod::UnitSkillCastTimeFix(Unit* src, Unit* target, uint16 skillID, ui
             if (sc != nullptr && sc->HasSCE(ROWOW_SC_CHASEWALK) == true)
                 casttime = -1; // Coming out of Chase Walk is at once
             break;
+        case ROWOW_SKILL_TK_RUN:
+            if (sc != nullptr && sc->HasSCE(ROWOW_SC_RUN) == true)
+                casttime = -1; // Stopping a run is at once
+            break;
         case ROWOW_SKILL_KN_CHARGEATK:
         {
             // Range 0-3: 500ms, Range 4-6: 1000ms, Range 7+: 1500ms (distance_math_bl: the straight distance in cells)
@@ -1150,6 +1155,15 @@ void ROWOWMod::SkillCastEnd(Unit* src, Unit* target, WorldLocation const* dest, 
     }
     // (unit_set_walkdelay: WoW's movement isn't held after a cast)
 
+    // A Flying Side Kick while running ends the run and kicks with the running formula (its flag 1, the attack's miscflag)
+    int32 castFlag = 0;
+    if (ud->IsRunning == true && skillID == ROWOW_SKILL_TK_JUMPKICK)
+    {
+        ud->IsRunning = false;
+        StatusChangeEnd(src, ROWOW_SC_RUN);
+        castFlag = 1;
+    }
+
     if (skillID == ROWOW_SKILL_PF_SPIDERWEB)
     {
         // These should become skill_castend_pos: Spider Web goes on a random cell its splash away from the target (its own cell when none)
@@ -1178,9 +1192,9 @@ void ROWOWMod::SkillCastEnd(Unit* src, Unit* target, WorldLocation const* dest, 
         SkillCastendPos2(src, x, y, skillID, skillLevel, tick, 0);
     }
     else if (SkillGetCastType(skillID) == ROWOW_CAST_NODAMAGE)
-        SkillCastendNoDamageID(src, target, skillID, skillLevel, tick, 0);
+        SkillCastendNoDamageID(src, target, skillID, skillLevel, tick, castFlag);
     else
-        SkillCastendDamageID(src, target, skillID, skillLevel, tick, 0);
+        SkillCastendDamageID(src, target, skillID, skillLevel, tick, castFlag);
 
     // A song started while performing keeps Adaptation from ending it for 3 seconds (skill_blockpc_start)
     if (sd != nullptr && skill->Inf2[ROWOW_INF2_ISSONG] == true && GetSCE(src, ROWOW_SC_DANCING) != nullptr)
@@ -1330,6 +1344,23 @@ ROWOWSkillCondition ROWOWMod::SkillGetRequirement(Player* sd, uint16 skillID, ui
             if (sc != nullptr && sc->HasSCE(ROWOW_SC_EXPLOSIONSPIRITS) == true)
                 req.SpiritBall = 0;
             break;
+        case ROWOW_SKILL_SL_SMA:
+        case ROWOW_SKILL_SL_STUN:
+        case ROWOW_SKILL_SL_STIN:
+        {
+            // Kaina makes the Es spells cheaper from base level 70 (3%, 5% from 80, 7% from 90 a level of Kaina)
+            int32 kainaLevel = PCCheckSkill(sd, ROWOW_SKILL_SL_KAINA);
+            uint32 baseLevel = GetROStatus(sd)->Level;
+            if (kainaLevel == 0 || baseLevel < 70)
+                break;
+            if (baseLevel >= 90)
+                req.SP -= req.SP * 7 * kainaLevel / 100;
+            else if (baseLevel >= 80)
+                req.SP -= req.SP * 5 * kainaLevel / 100;
+            else
+                req.SP -= req.SP * 3 * kainaLevel / 100;
+            break;
+        }
         case ROWOW_SKILL_MO_EXTREMITYFIST:
             if (sc != nullptr)
             {
@@ -1643,6 +1674,113 @@ bool ROWOWMod::SkillCheckConditionCastBegin(Player* sd, uint16 skillID, uint16 s
                 return false;
             }
             break;
+        case ROWOW_SKILL_GS_FLING:
+            // As many coins as it has, up to the level's (the attack and SC_FLING count them)
+            if (PCGetSpiritBall(sd) > 0 && PCGetSpiritBall(sd) < require.SpiritBall)
+                ud->SpiritBallOld = require.SpiritBall = PCGetSpiritBall(sd);
+            else
+                ud->SpiritBallOld = require.SpiritBall;
+            break;
+        case ROWOW_SKILL_TK_MISSION:
+            if (identity->JobID != ROWOW_JOB_TAEKWON)
+            {
+                // Cannot be used by Non-Taekwon classes
+                ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_LEVEL);
+                return false;
+            }
+            break;
+        case ROWOW_SKILL_TK_READYCOUNTER:
+        case ROWOW_SKILL_TK_READYDOWN:
+        case ROWOW_SKILL_TK_READYSTORM:
+        case ROWOW_SKILL_TK_READYTURN:
+        case ROWOW_SKILL_TK_JUMPKICK:
+            if (identity->JobID == ROWOW_JOB_SOUL_LINKER)
+            {
+                // Soul Linkers cannot use this skill
+                ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_LEVEL);
+                return false;
+            }
+            break;
+        case ROWOW_SKILL_TK_TURNKICK:
+        case ROWOW_SKILL_TK_STORMKICK:
+        case ROWOW_SKILL_TK_DOWNKICK:
+        case ROWOW_SKILL_TK_COUNTER:
+        {
+            if (identity->JobID == ROWOW_JOB_SOUL_LINKER)
+                return false; // Anti-Soul Linker check in case you job-changed with Stances active.
+            ROWOWStatusChange const* sc = GetStatusChange(static_cast<Unit const*>(sd));
+            ROWOWStatusChangeEntry const* combo = sc != nullptr ? sc->GetSCE(ROWOW_SC_COMBO) : nullptr;
+            if (combo == nullptr || combo->Val1 == ROWOW_SKILL_TK_JUMPKICK)
+                return false; // Combo needs to be ready
+            if (combo->Val3 != 0)
+            {
+                // Kick chain (a Taekwon ranker's, never here).  Do not repeat a kick.
+                if (combo->Val3 != skillID)
+                    break;
+                StatusChangeEnd(sd, ROWOW_SC_COMBO);
+                return false;
+            }
+            if (combo->Val1 != skillID)
+            {
+                // Cancel combo wait.  (No Taekwon ranking here: a ranker could kick any of them)
+                UnitCancelCombo(sd);
+                return false;
+            }
+            break; // Combo ready.
+        }
+        case ROWOW_SKILL_SL_SMA:
+            // Only in the opening another Es spell or a spirit gave
+            if (GetSCE(sd, ROWOW_SC_SMA) == nullptr)
+                return false;
+            break;
+        case ROWOW_SKILL_SG_SUN_COMFORT:
+        case ROWOW_SKILL_SG_MOON_COMFORT:
+        case ROWOW_SKILL_SG_STAR_COMFORT:
+        {
+            // Only on the place of its sun, moon or star, on its day (or anywhere with Miracle)
+            if (GetSCE(sd, ROWOW_SC_MIRACLE) != nullptr)
+                break;
+            int32 i = skillID - ROWOW_SKILL_SG_SUN_COMFORT;
+            if (sd->GetMapId() == PCGetFeelMap(*identity, i) && SGIsDay(i) == true)
+                break;
+            ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_LEVEL);
+            return false;
+        }
+        case ROWOW_SKILL_SG_FUSION:
+            // Only with the Star Gladiator spirit.  Auron insists we should implement SP consumption when you are not Soul Linked. [Skotlex]
+            // Only invoke on skill begin cast (instant cast skill). [Kevin]
+            if (ROWOWStatusChangeEntry const* spirit = GetSCE(sd, ROWOW_SC_SPIRIT); spirit != nullptr && spirit->Val2 == ROWOW_SKILL_SL_STAR)
+                break;
+            if (require.SP > 0)
+            {
+                if (int32(sd->GetPower(POWER_MANA)) < require.SP)
+                    ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_SP_INSUFFICIENT);
+                else
+                    StatusZap(sd, 0, uint32(require.SP));
+            }
+            return false;
+        case ROWOW_SKILL_GS_GLITTERING:
+            if (PCGetSpiritBall(sd) >= 10)
+            {
+                ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_LEVEL);
+                return false;
+            }
+            break;
+        case ROWOW_SKILL_NJ_ISSEN:
+            if (sd->GetHealth() < 2)
+            {
+                ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_LEVEL);
+                return false;
+            }
+            [[fallthrough]];
+        case ROWOW_SKILL_NJ_BUNSINJYUTSU:
+            // Only out of Soul
+            if (GetSCE(sd, ROWOW_SC_NEN) == nullptr)
+            {
+                ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_LEVEL);
+                return false;
+            }
+            break;
     }
 
     // check state required
@@ -1735,8 +1873,8 @@ bool ROWOWMod::SkillCheckConditionCastBegin(Player* sd, uint16 skillID, uint16 s
     }
     if (require.SpiritBall > 0 && PCGetSpiritBall(sd) < require.SpiritBall)
     {
-        // Skills that require spirit spheres
-        ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_SPIRITS, require.SpiritBall);
+        // Skills that require spirit/coin spheres.
+        ClifSkillFail(sd, skillID, identity->JobID == ROWOW_JOB_GUNSLINGER ? ROWOW_USESKILL_FAIL_COINS : ROWOW_USESKILL_FAIL_SPIRITS, require.SpiritBall);
         return false;
     }
     return true;
@@ -1876,7 +2014,7 @@ void ROWOWMod::SkillConsumeRequirement(Player* sd, uint16 skillID, uint16 skillL
             sd->SetPower(POWER_MANA, sd->GetPower(POWER_MANA) > uint32(require.SP) ? sd->GetPower(POWER_MANA) - uint32(require.SP) : 0);
         if (require.SpiritBall > 0) // Skills that require spirit spheres to use
             PCDelSpiritBall(sd, require.SpiritBall, 0);
-        if (require.Zeny > 0)
+        if (require.Zeny > 0 && skillID != ROWOW_SKILL_NJ_ZENYNAGE) // Zeny is reduced on skill_attack.
             sd->ModifyMoney(-std::min<int32>(require.Zeny, int32(std::min<uint32>(sd->GetMoney(), INT32_MAX))));
     }
     if ((type & 2) != 0)
@@ -2275,6 +2413,21 @@ int64 ROWOWMod::SkillAttack(int32 attackType, Unit* src, Unit* dsrc, Unit* bl, u
     if (tsc != nullptr && tsc->IsEmpty() == true)
         tsc = nullptr;
 
+    switch (skillID)
+    {
+        case ROWOW_SKILL_TK_COUNTER:
+            // bonus from SG_FRIEND [Komurka]
+            if (Player* sd = src->ToPlayer(); sd != nullptr && PCCheckSkill(sd, ROWOW_SKILL_SG_FRIEND) > 0)
+                PartySkillCheck(sd, ROWOW_SKILL_TK_COUNTER, uint16(PCCheckSkill(sd, ROWOW_SKILL_SG_FRIEND)));
+            break;
+        case ROWOW_SKILL_SL_STIN:
+        case ROWOW_SKILL_SL_STUN:
+            // From level 7 Estin and Estun open Esma
+            if (skillLevel >= 7 && GetSCE(src, ROWOW_SC_SMA) == nullptr)
+                SCStart(src, src, ROWOW_SC_SMA, 100, skillLevel, SkillGetTime(ROWOW_SKILL_SL_SMA, skillLevel));
+            break;
+    }
+
     // Only copy skill that copyable [Cydh].  Cannot copy skills if the blow will kill you. [Skotlex]
     if (bl->IsPlayer() == true && skill != nullptr && skill->CopyOption != 0 && (dmg.Flag & ROWOW_BF_SKILL) != 0 && dmg.Damage + dmg.Damage2 > 0 &&
         damage < int64(bl->GetHealth()))
@@ -2597,16 +2750,58 @@ bool ROWOWMod::UnitMovePos(Unit* bl, int32 x, int32 y)
     return true;
 }
 
+bool ROWOWMod::UnitJumpPos(Unit* bl, int32 x, int32 y)
+{
+    // unit_movepos(bl, x, y, 1, 0): the unit goes at once onto an RO cell with ground, whatever lies between (Leap's jump, clif_skill_nodamage
+    // with the jump look)
+    float cellX = 0, cellY = 0;
+    GetCellWorldPosition(bl->GetMapId(), x, y, cellX, cellY);
+    Map* map = bl->GetMap();
+    if (MapGetCellIceWall(map, x, y) == true)
+        return false; // An Ice Wall's cell can't be stood on
+    float z = map->GetHeight(bl->GetPhaseMask(), cellX, cellY, bl->GetPositionZ() + ROWOW_SKILL_CELL_GROUND_SEARCH_HEIGHT, true, ROWOW_SKILL_CELL_GROUND_SEARCH_DISTANCE);
+    if (z <= INVALID_HEIGHT)
+        return false;
+    bl->StopMoving();
+    bl->GetMotionMaster()->MoveJump(cellX, cellY, z, KnockbackSpeed, 8.0f);
+    return true;
+}
+
 int32 ROWOWMod::SkillAdditionalEffect(Unit* src, Unit* bl, uint16 skillID, uint16 skillLevel, int32 attackType, uint8 dmgLv, uint64 tick)
 {
     // skill_additional_effect: what a hit does past its damage: the statuses the attacker's items give (bAddEff, bAddEffOnSkill, which go
     // through even when the damage was blocked), the skill's own, Enchant Poison's and Enchant Deadly Poison's on a normal attack, equipment
-    // breaking, the autospells and a falcon's Blitz Beat.  (Gank's normal attack trigger and the Taekwon stances come with their jobs)
+    // breaking, the autospells, a falcon's Blitz Beat, Gank and the Taekwon stances' kicks
     if (skillID > 0 && skillLevel == 0)
         return 0; // don't forget auto attacks! - celest
     if (dmgLv < ROWOW_ATK_BLOCK) // Don't apply effect if miss.
         return 0;
     ROWOWStatus const* sstatus = GetROStatus(src);
+
+    // Taekwon combos activate on traps, so we need to check them even for targets that don't have status.  A normal attack in a stance may
+    // ready its kick (15%, Counter Kick 20% and more with Friend's bonus), for 2 s less 4 ms an AGI and 2 a DEX
+    if (src->IsPlayer() == true && skillID == 0 && (attackType & ROWOW_BF_SKILL) == 0 && sstatus != nullptr)
+    {
+        // Chance to trigger Taekwon kicks
+        int32 comboTime = 2000 - 4 * sstatus->Stats[ROWOW_STAT_AGI] - 2 * sstatus->Stats[ROWOW_STAT_DEX];
+        if (GetSCE(src, ROWOW_SC_READYSTORM) != nullptr && SCStart4(src, src, ROWOW_SC_COMBO, 15, ROWOW_SKILL_TK_STORMKICK, 0, 2, 0, comboTime) == true)
+            ; // Stance triggered
+        else if (GetSCE(src, ROWOW_SC_READYDOWN) != nullptr && SCStart4(src, src, ROWOW_SC_COMBO, 15, ROWOW_SKILL_TK_DOWNKICK, 0, 2, 0, comboTime) == true)
+            ; // Stance triggered
+        else if (GetSCE(src, ROWOW_SC_READYTURN) != nullptr && SCStart4(src, src, ROWOW_SC_COMBO, 15, ROWOW_SKILL_TK_TURNKICK, 0, 2, 0, comboTime) == true)
+            ; // Stance triggered
+        else if (GetSCE(src, ROWOW_SC_READYCOUNTER) != nullptr)
+        {
+            // additional chance from SG_FRIEND [Komurka]
+            int32 rate = 20;
+            if (ROWOWStatusChangeEntry const* skillRateUp = GetSCE(src, ROWOW_SC_SKILLRATE_UP); skillRateUp != nullptr && skillRateUp->Val1 == ROWOW_SKILL_TK_COUNTER)
+            {
+                rate += rate * skillRateUp->Val2 / 100;
+                StatusChangeEnd(src, ROWOW_SC_SKILLRATE_UP);
+            }
+            SCStart4(src, src, ROWOW_SC_COMBO, rate, ROWOW_SKILL_TK_COUNTER, 0, 2, 0, comboTime); // Stance triggered
+        }
+    }
     if (sstatus == nullptr || GetROStatus(bl) == nullptr)
         return 0; // skill additional effect is about adding effects to the target...  So if the target can't be inflicted with statuses, this is pointless.
     ROWOWStatusChange const* sc = GetStatusChange(static_cast<Unit const*>(src));
@@ -2775,8 +2970,17 @@ int32 ROWOWMod::SkillCounterAdditionalEffect(Unit* src, Unit* bl, uint16 skillID
     if (ROWOWSkillImpl const* impl = GetSkillImpl(skillID))
         impl->ApplyCounterAdditionalEffects(src, bl, skillLevel, tick, attackType);
 
-    // Soul Drain should only work on targetted spells [Skotlex]: a magic skill's kill gives SP back by the monster's level
+    // SG_MIRACLE [Komurka]: a Star Gladiator's hit may bring Miracle of the Sun, Moon and Stars (0.005% per sg_miracle_skill_ratio, less with
+    // AGI over 46).  (No RO map has nosunmoonstarmiracle)
     Player* sd = src->ToPlayer();
+    if (sd != nullptr && GetIdentity(sd)->JobID == ROWOW_JOB_STAR_GLADIATOR)
+    {
+        int32 agi = GetROStatus(sd)->Stats[ROWOW_STAT_AGI];
+        if (int32(urand(0, 19999)) < BattleConfig.SgMiracleSkillRatio && (agi <= 46 || int32(urand(0, uint32(agi - 1))) < 46))
+            SCStart(src, src, ROWOW_SC_MIRACLE, 100, 1, BattleConfig.SgMiracleSkillDuration);
+    }
+
+    // Soul Drain should only work on targetted spells [Skotlex]: a magic skill's kill gives SP back by the monster's level
     ROWOWSkill const* skill = GetSkill(skillID);
     int32 rate = 0;
     if (sd != nullptr && skill != nullptr && (attackType & ROWOW_BF_MAGIC) != 0 && bl->IsAlive() == false &&
@@ -3210,19 +3414,44 @@ int32 ROWOWMod::SkillIsCombo(uint16 skillID)
     return 0;
 }
 
-void ROWOWMod::SkillCombo(Unit* src, Unit* dsrc, Unit* bl, uint16 skillID, uint16 /*skillLevel*/, uint64 tick)
+bool ROWOWMod::UnitCancelCombo(Unit* bl)
+{
+    // unit_cancel_combo: the combo window ends, and the unit can't swing again until its attack motion passed (WoW's swing timer)
+    if (StatusChangeEnd(bl, ROWOW_SC_COMBO) == false)
+        return false; // Combo wasn't active.
+    if (ROWOWStatus const* status = GetROStatus(bl); status != nullptr && bl->IsPlayer() == true)
+        bl->ToPlayer()->setAttackTimer(BASE_ATTACK, std::max<uint32>(bl->getAttackTimer(BASE_ATTACK), uint32(status->AttackMotion)));
+    return true;
+}
+
+void ROWOWMod::SkillCombo(Unit* src, Unit* dsrc, Unit* bl, uint16 skillID, uint16 skillLevel, uint64 tick)
 {
     // skill_combo: a skill hit ends the combo it was used in (but a ground skill's unit's), then a Monk's or Champion's skill opens the next
     // window when the next skill is learned and the spheres it needs are there: SC_COMBO from the after-cast delay's end (canact_tick, never
     // less than the attack motion), val1 the skill, val2 0 (the next skill auto-targets).  The window's 300 ms are SC_COMBO's own.  A Hunter's
-    // Double Strafe opens Beast Strafing for 2 seconds.  (The Taekwon kicks' combos come with the Taekwon)
+    // Double Strafe opens Beast Strafing for 2 seconds.  A Taekwon's kick ends the window its stance opened (unit_cancel_combo; a Taekwon
+    // ranker's would go on, but there's no ranking here)
     int64 duration = 0; // Set to duration the user can use a combo skill or 1 for aftercast delay of pre-skill
     int32 nodelay = 0; // Set to 1 for no walk/attack delay, set to 2 for no walk delay
     int32 targetID = int32(bl->GetGUID().GetCounter()); // Set to 0 if combo skill should not autotarget
 
     // End previous combo state after skill is invoked
-    if (GetSCE(src, ROWOW_SC_COMBO) != nullptr && src == dsrc) // Ground skills are exceptions. [Inkfish]
-        StatusChangeEnd(src, ROWOW_SC_COMBO);
+    if (GetSCE(src, ROWOW_SC_COMBO) != nullptr)
+    {
+        switch (skillID)
+        {
+            case ROWOW_SKILL_TK_TURNKICK:
+            case ROWOW_SKILL_TK_STORMKICK:
+            case ROWOW_SKILL_TK_DOWNKICK:
+            case ROWOW_SKILL_TK_COUNTER:
+                UnitCancelCombo(src); // Cancel combo wait
+                break;
+            default:
+                if (src == dsrc) // Ground skills are exceptions. [Inkfish]
+                    StatusChangeEnd(src, ROWOW_SC_COMBO);
+                break;
+        }
+    }
 
     // start new combo
     if (Player* sd = src->ToPlayer())
@@ -3247,6 +3476,7 @@ void ROWOWMod::SkillCombo(Unit* src, Unit* dsrc, Unit* bl, uint16 skillID, uint1
                 }
                 break;
             case ROWOW_SKILL_MO_COMBOFINISH:
+                PartySkillCheck(sd, skillID, skillLevel); // bonus from SG_FRIEND [Komurka]
                 if (PCCheckSkill(sd, ROWOW_SKILL_CH_TIGERFIST) > 0 && spheres >= 1)
                 {
                     duration = 1;

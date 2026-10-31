@@ -825,6 +825,9 @@ int32 ROWOWMod::BattleRangeType(Unit const* src, Unit const* target, uint16 skil
             if (src->IsCreature() == true)
                 return ROWOW_BF_SHORT;
             break;
+        case ROWOW_SKILL_NJ_KIRIKAGE:
+            // Cast range mimics NJ_SHADOWJUMP but damage is considered melee
+            return ROWOW_BF_SHORT;
     }
 
     // Skill Range Criteria: based on distance between src/target [Skotlex], or on the used skill's range
@@ -953,7 +956,17 @@ ROWOWDamage ROWOWMod::BattleCalcWeaponAttack(Unit* src, Unit* target, uint16 ski
 
     BattleCalcElementDamage(wd, src, target, skillID, skillLevel);
 
-    // (The Taekwon kicks' additions come with the Taekwon, R6.5)
+    // The Taekwon's kicks with bare hands: 10 a level of Running
+    switch (skillID)
+    {
+        case ROWOW_SKILL_TK_DOWNKICK:
+        case ROWOW_SKILL_TK_STORMKICK:
+        case ROWOW_SKILL_TK_TURNKICK:
+        case ROWOW_SKILL_TK_COUNTER:
+            if (sd != nullptr && sstatus->RightWeaponType == ROWOW_WEAPON_TYPE_FIST && sstatus->LeftWeaponType == ROWOW_WEAPON_TYPE_FIST)
+                AttackAdd(wd, isLeftHanded, 10 * PCCheckSkill(sd, ROWOW_SKILL_TK_RUN), 10 * PCCheckSkill(sd, ROWOW_SKILL_TK_RUN));
+            break;
+    }
     if (sd != nullptr)
     {
         int32 skill = 0;
@@ -1917,6 +1930,11 @@ void ROWOWMod::BattleCalcSkillBaseDamage(ROWOWDamage& wd, Unit* src, Unit* targe
     // Calc base damage according to skill
     switch (skillID)
     {
+        case ROWOW_SKILL_NJ_ISSEN:
+            // Final Strike: 40 a point of STR and 8% a level of the HP the Ninja has
+            wd.Damage = 40 * sstatus->Stats[ROWOW_STAT_STR] + int64(src->GetHealth()) * 8 * skillLevel / 100;
+            wd.Damage2 = 0;
+            return;
         case ROWOW_SKILL_PA_SACRIFICE:
             wd.Damage = sstatus->MaxHP * 9 / 100;
             wd.Damage2 = 0;
@@ -2018,10 +2036,17 @@ void ROWOWMod::BattleCalcSkillBaseDamage(ROWOWDamage& wd, Unit* src, Unit* targe
             LOG_ERROR("module.ROWOW", "ROWOWMod::BattleCalcSkillBaseDamage: 0 enemies targeted by {}, divide per 0 avoided!", skillID);
     }
 
-    // Add any bonuses that modify the base atk (pre-skills): +crit damage bonuses in pre-renewal mode.  (The party bonus of Taekwon's
-    // Running comes with the Taekwon, R6.5)
+    // Add any bonuses that modify the base atk (pre-skills): +crit damage bonuses in pre-renewal mode, and Taekwon Mastery's 2% a level for
+    // each other party member on the map
     if (sd != nullptr && (bflag & ROWOW_BDMG_CRIT) != 0 && sstatus->Bonus.CritAtkRate > 0)
         AttackAddRate(wd, isLeftHanded, sstatus->Bonus.CritAtkRate);
+    if (int32 skill = sd != nullptr && sd->GetGroup() != nullptr ? PCCheckSkill(sd, ROWOW_SKILL_TK_POWER) : 0; skill > 0)
+    {
+        // party_foreachsamemap(party_sub_count): exclude the player himself [Inkfish].  Reduce count by one (self) [Tydus1]
+        int32 i = PartyForEachSameMap(sd, 0, [](Unit* member) { return member->IsPlayer() == true && member->IsAlive() == true ? 1 : 0; });
+        if (i > 1)
+            AttackAddRate(wd, isLeftHanded, 2 * skill * (i - 1));
+    }
 
     // Acid Terror ignores DEF but will substract VIT from base attack value instead
     if (skillID == ROWOW_SKILL_AM_ACIDTERROR)
@@ -3028,14 +3053,50 @@ int32 ROWOWMod::BattleGetAtkPercent(Unit const* bl, uint16 skillID, ROWOWStatusC
     return std::clamp<int32>(atkpercent, 0, USHRT_MAX);
 }
 
-void ROWOWMod::BattleAttackSCBonus(ROWOWDamage& wd, Unit* src, Unit* /*target*/, uint16 skillID, uint16 /*skillLevel*/) const
+void ROWOWMod::BattleAttackSCBonus(ROWOWDamage& wd, Unit* src, Unit* target, uint16 skillID, uint16 /*skillLevel*/) const
 {
-    // battle_attack_sc_bonus: the final attack bonuses that aren't affected by cards, applied on top of current damage and stackable.  (The
-    // Star Gladiator's Anger at its hated monsters, which Miracle extends to all, comes with the Star Gladiator, R6.5; the third jobs'
-    // statuses and spirit charms are left out, and there's no War of Emperium)
+    // battle_attack_sc_bonus: the final attack bonuses that aren't affected by cards, applied on top of current damage and stackable, then
+    // the Star Gladiator's Anger of the Sun, Moon or Star at its hated monster (Miracle makes every monster a star's): base level + DEX + LUK
+    // (+ STR for the star) percent, divided by 12 - 3 a level below level 4.  (The third jobs' statuses and spirit charms are left out, and
+    // there's no War of Emperium)
     ROWOWStatusChange const* sc = GetStatusChange(static_cast<Unit const*>(src));
+    auto applyAnger = [this, &wd, src, target, skillID, sc]()
+    {
+        static uint16 const angerSkillIDs[ROWOW_MAX_PC_FEELHATE] = { ROWOW_SKILL_SG_SUN_ANGER, ROWOW_SKILL_SG_MOON_ANGER, ROWOW_SKILL_SG_STAR_ANGER };
+        Player* sd = src->ToPlayer();
+        if (sd == nullptr)
+            return;
+        ROWOWIdentity const* identity = sd->CustomData.Get<ROWOWIdentity>("ROWOWIdentity");
+        if (identity == nullptr)
+            return;
+        int32 angerID = 0;
+        if (sc != nullptr && sc->HasSCE(ROWOW_SC_MIRACLE) == true)
+            angerID = 2; // Always treat all monsters as star flagged monster when in miracle state
+        else
+        {
+            int32 targetClass = target->IsCreature() == true ? int32(GetROMobID(target->ToCreature())) :
+                (target->IsPlayer() == true && target->CustomData.Get<ROWOWIdentity>("ROWOWIdentity") != nullptr ?
+                int32(target->CustomData.Get<ROWOWIdentity>("ROWOWIdentity")->JobID) : -2);
+            for (; angerID < ROWOW_MAX_PC_FEELHATE; angerID++)
+                if (targetClass == PCGetHateMob(*identity, angerID))
+                    break;
+        }
+        int32 angerLevel = angerID < ROWOW_MAX_PC_FEELHATE ? PCCheckSkill(sd, angerSkillIDs[angerID]) : 0;
+        if (angerLevel <= 0)
+            return;
+        ROWOWStatus const* sstatus = GetROStatus(src);
+        int32 skillratio = int32(identity->BaseLevel) + sstatus->Stats[ROWOW_STAT_DEX] + sstatus->Stats[ROWOW_STAT_LUK];
+        if (angerID == 2)
+            skillratio += sstatus->Stats[ROWOW_STAT_STR]; // SG_STAR_ANGER additionally has STR added in its formula.
+        if (angerLevel < 4)
+            skillratio /= 12 - 3 * angerLevel;
+        AttackAddRate(wd, IsAttackLeftHanded(src, skillID), skillratio);
+    };
     if (sc == nullptr)
+    {
+        applyAnger();
         return;
+    }
     bool isLeftHanded = IsAttackLeftHanded(src, skillID);
 
     // ATK percent modifier (in pre-renewal, it's applied multiplicatively after the skill ratio)
@@ -3048,6 +3109,7 @@ void ROWOWMod::BattleAttackSCBonus(ROWOWDamage& wd, Unit* src, Unit* /*target*/,
         else if (skillID == ROWOW_SKILL_CR_SHIELDBOOMERANG && sce->Val2 == ROWOW_SKILL_SL_CRUSADER)
             AttackAddRate(wd, isLeftHanded, 100);
     }
+    applyAnger();
 }
 
 void ROWOWMod::BattleMinDamage(ROWOWDamage& wd, Unit const* src, uint16 skillID, int64 minimum) const
