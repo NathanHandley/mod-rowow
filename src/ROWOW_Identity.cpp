@@ -1025,7 +1025,13 @@ void ROWOWMod::GrantIdentitySkillSpells(Player* player, ROWOWIdentity& identity)
                 if (skill->SpellIDsByLevel[level - 1] != 0 && sSpellMgr->GetSpellInfo(skill->SpellIDsByLevel[level - 1]) != nullptr)
                     spellIDs.push_back(skill->SpellIDsByLevel[level - 1]);
         }
+        // The skill Plagiarism copied, each level up to the copied one
+        if (ROWOWSkill const* cloneSkill = GetSkill(identity.CloneSkillID))
+            for (uint16 level = 1; level <= identity.CloneSkillLevel && level <= cloneSkill->SpellIDsByLevel.size(); level++)
+                if (cloneSkill->SpellIDsByLevel[level - 1] != 0 && sSpellMgr->GetSpellInfo(cloneSkill->SpellIDsByLevel[level - 1]) != nullptr)
+                    spellIDs.push_back(cloneSkill->SpellIDsByLevel[level - 1]);
         std::sort(spellIDs.begin(), spellIDs.end());
+        spellIDs.erase(std::unique(spellIDs.begin(), spellIDs.end()), spellIDs.end());
     }
     for (uint32 spellID : identity.SkillSpellIDs)
     {

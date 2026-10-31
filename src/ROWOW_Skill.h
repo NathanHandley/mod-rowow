@@ -219,6 +219,7 @@ enum ROWOWRequireState : uint8
 #define ROWOW_USESKILL_FAIL_LEVEL                   0
 #define ROWOW_USESKILL_FAIL_SP_INSUFFICIENT         1
 #define ROWOW_USESKILL_FAIL_HP_INSUFFICIENT         2
+#define ROWOW_USESKILL_FAIL_STUFF_INSUFFICIENT      3
 #define ROWOW_USESKILL_FAIL_SKILLINTERVAL           4
 #define ROWOW_USESKILL_FAIL_MONEY                   5
 #define ROWOW_USESKILL_FAIL_THIS_WEAPON             6
@@ -243,6 +244,14 @@ enum ROWOWRequireState : uint8
 #define ROWOW_BLOWN_MD_KNOCKBACK_IMMUNE             0x08
 #define ROWOW_BLOWN_TARGET_NO_KNOCKBACK             0x10
 #define ROWOW_BLOWN_TARGET_BASILICA                 0x20
+
+// e_skill_copy: who can copy a skill (CopyFlags' Skill)
+#define ROWOW_SKILL_COPY_PLAGIARISM                 0x1
+#define ROWOW_SKILL_COPY_REPRODUCE                  0x2
+
+// The character variables (char_reg_num) Plagiarism keeps its copy in (SKILL_VAR_PLAGIARISM, SKILL_VAR_PLAGIARISM_LV)
+#define ROWOW_SKILL_VAR_PLAGIARISM                  "CLONE_SKILL"
+#define ROWOW_SKILL_VAR_PLAGIARISM_LV               "CLONE_SKILL_LV"
 
 #define ROWOW_SECURITY_CASTTIME                     100     // SECURITY_CASTTIME: kept on canact_tick between cast begin and cast end
 #define ROWOW_SKILL_NOCONSUME_REQ                   0x10000000 // SKILL_NOCONSUME_REQ: the castend already used up the requirements
@@ -445,6 +454,7 @@ struct ROWOWSkillUnitGroup
     uint32 InstanceID = 0;
     std::vector<ROWOWSkillUnit> Units;
     ObjectGuid VisualGUID; // The dynamic object that shows the whole group, when its cells don't show one by one
+    std::vector<ObjectGuid> ViewerGUIDs; // The players Graffiti's message was shown to as it came into their view (clif_graffiti)
 };
 
 // A map's ground skill unit groups (rAthena's skillunit_group_db and the BL_SKILL blocks of the map), kept on the map as
@@ -505,6 +515,7 @@ struct ROWOWSkill
     int32 CastDefenseReduction = 0;
     int32 ActiveInstance = 0; // skill_get_maxcount, by level below
     int32 StatusID = ROWOW_SC_NONE; // skill_get_sc: the status the skill gives (Status)
+    uint8 CopyOption = 0; // copyable.option: ROWOW_SKILL_COPY_* (CopyFlags' Skill), who can copy it (Plagiarism)
 
     // Per level (skill_get_range, skill_get_num, skill_get_ele, skill_get_splash, skill_get_blewcount, skill_get_cast, skill_get_delay,
     // skill_get_walkdelay, skill_get_cooldown, skill_get_time, skill_get_time2, skill_get_maxcount)

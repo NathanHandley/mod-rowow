@@ -1411,7 +1411,10 @@ int64 ROWOWMod::BattleCalcCardFix(int32 attackType, Unit* src, Unit* target, std
                         cardfixLeft = cardfixLeft * (100 + bonus.LeftWeapon.AddSize[tstatus->Size] + bonus.LeftWeapon.AddSize[ROWOW_SIZE_ALL]) / 100;
                         cardfixLeft = cardfixLeft * (100 + bonus.LeftWeapon.AddClass[tstatus->Class] + bonus.LeftWeapon.AddClass[ROWOW_CLASS_ALL]) / 100;
                     }
-                    // (Advanced Katar Mastery comes with the Assassin Cross, which isn't a pre-renewal job here)
+                    // Adv. Katar Mastery functions similar to a +%ATK card on official [helvetica]
+                    int32 skill = PCCheckSkill(src, ROWOW_SKILL_ASC_KATAR);
+                    if (sstatus->WeaponType == ROWOW_WEAPON_TYPE_KATAR && skill > 0)
+                        cardfix = cardfix * (100 + (10 + 2 * skill)) / 100;
                 }
                 for (auto const& addDamage : bonus.RightWeapon.AddDamageClass)
                 {

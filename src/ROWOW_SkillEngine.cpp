@@ -97,6 +97,7 @@ namespace
         {
             case ROWOW_USESKILL_FAIL_SP_INSUFFICIENT: return "SP Insufficient";
             case ROWOW_USESKILL_FAIL_HP_INSUFFICIENT: return "HP Insufficient";
+            case ROWOW_USESKILL_FAIL_STUFF_INSUFFICIENT: return "Insufficient materials.";
             case ROWOW_USESKILL_FAIL_SKILLINTERVAL: return "You can't use skills right after another (after-cast delay).";
             case ROWOW_USESKILL_FAIL_MONEY: return "Insufficient Zeny";
             case ROWOW_USESKILL_FAIL_THIS_WEAPON: return "This skill can't be used with this weapon.";
@@ -894,6 +895,10 @@ int32 ROWOWMod::UnitSkillCastTimeFix(Unit* src, Unit* target, uint16 skillID, ui
             if (sc != nullptr && sc->HasSCE(ROWOW_SC_BASILICA) == true)
                 casttime = -1; // No Casting time on basilica cancel
             break;
+        case ROWOW_SKILL_ST_CHASEWALK:
+            if (sc != nullptr && sc->HasSCE(ROWOW_SC_CHASEWALK) == true)
+                casttime = -1; // Coming out of Chase Walk is at once
+            break;
         case ROWOW_SKILL_KN_CHARGEATK:
         {
             // Range 0-3: 500ms, Range 4-6: 1000ms, Range 7+: 1500ms (distance_math_bl: the straight distance in cells)
@@ -1018,6 +1023,18 @@ SpellCastResult ROWOWMod::SkillCastEndCheck(Unit* src, Unit* target, WorldLocati
                 if (target->IsPlayer() == false)
                     return fail(ROWOW_USESKILL_FAIL_LEVEL);
                 break;
+            case ROWOW_SKILL_RG_BACKSTAP:
+            {
+                // From behind only (the target faces the way the Rogue looks at it: map_calc_dir and map_check_dir), and not from its own cell
+                int32 srcX = 0, srcY = 0, targetX = 0, targetY = 0;
+                GetUnitCell(src, srcX, srcY);
+                GetUnitCell(target, targetX, targetY);
+                if (MapCheckDir(GetRODirection(float(targetX - srcX), float(targetY - srcY)), UnitGetDir(target)) != 0)
+                    return fail(ROWOW_USESKILL_FAIL_MAX);
+                if (DistanceBL(src, target) == 0)
+                    return fail(ROWOW_USESKILL_FAIL_MAX);
+                break;
+            }
             case ROWOW_SKILL_PR_TURNUNDEAD:
             {
                 ROWOWStatus const* tstatus = GetROStatus(target);
@@ -1604,6 +1621,28 @@ bool ROWOWMod::SkillCheckConditionCastBegin(Player* sd, uint16 skillID, uint16 s
                 }
             }
             break;
+        case ROWOW_SKILL_RG_GRAFFITI:
+        {
+            // If a previous Graffiti exists skill fails to cast (map_foreachinmap(skill_graffitiremover): anyone's, on the map)
+            ROWOWMapSkillUnits const* mapUnits = GetMapSkillUnits(sd->GetMap(), false);
+            if (mapUnits != nullptr && std::any_of(mapUnits->GroupsByID.begin(), mapUnits->GroupsByID.end(), [](auto const& groupByID)
+            {
+                return groupByID.second->UnitID == ROWOW_UNT_GRAFFITI && groupByID.second->AliveCount > 0;
+            }) == true)
+            {
+                ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_LEVEL);
+                return false;
+            }
+            break;
+        }
+        case ROWOW_SKILL_ASC_EDP:
+            // Bare hands can't enchant (switch_remove_edp&1, pre-renewal's bit)
+            if (GetROStatus(sd)->RightWeaponType == ROWOW_WEAPON_TYPE_FIST && (BattleConfig.SwitchRemoveEdp & 1) != 0)
+            {
+                ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_THIS_WEAPON);
+                return false;
+            }
+            break;
     }
 
     // check state required
@@ -2165,8 +2204,8 @@ int64 ROWOWMod::SkillAttack(int32 attackType, Unit* src, Unit* dsrc, Unit* bl, u
     // then the knockback.  flag&0xFFF goes to battle_calc_attack (the targets of a split skill, Magnum Break's distance), flag&4 skips the
     // knockback, and the SD_ flags are how the hit shows.  A ground skill's unit (dsrcUnit) is the damage's source as rAthena's BL_SKILL dsrc:
     // its hits aren't delayed and knock back from its cell.  A devoted target's Crusader takes the hit, Magic Rod takes in a spell, a Monk's
-    // hit opens its combo (skill_combo), and Double Casting may cast a bolt again.  (Magic reflection, Kaite and the other statuses that turn a
-    // hit, Plagiarism's copy and the other jobs' post-damage skills of its switches come with them)
+    // hit opens its combo (skill_combo), a Rogue hit by a skill may copy it (Plagiarism), Intimidate may warp both, and Double Casting may cast
+    // a bolt again.  (Magic reflection, Kaite and the other statuses that turn a hit come with them)
     if (skillID > 0 && skillLevel == 0)
         return 0;
     ROWOWStatus const* tstatus = GetROStatus(bl);
@@ -2236,6 +2275,11 @@ int64 ROWOWMod::SkillAttack(int32 attackType, Unit* src, Unit* dsrc, Unit* bl, u
     if (tsc != nullptr && tsc->IsEmpty() == true)
         tsc = nullptr;
 
+    // Only copy skill that copyable [Cydh].  Cannot copy skills if the blow will kill you. [Skotlex]
+    if (bl->IsPlayer() == true && skill != nullptr && skill->CopyOption != 0 && (dmg.Flag & ROWOW_BF_SKILL) != 0 && dmg.Damage + dmg.Damage2 > 0 &&
+        damage < int64(bl->GetHealth()))
+        SkillDoCopy(src, bl, skillID, skillLevel);
+
     // combo handling
     SkillCombo(src, isUnitSource == true ? nullptr : dsrc, bl, skillID, skillLevel, tick);
 
@@ -2275,6 +2319,16 @@ int64 ROWOWMod::SkillAttack(int32 attackType, Unit* src, Unit* dsrc, Unit* bl, u
             if (dmg.AMotion == 0)
                 BattleDamage(src, bl, damage, dmg.Div, skillLevel, skillID, dmg.DmgLv, dmg.Flag, false, tick, isCritical);
         }
+    }
+
+    // Intimidate: a hit may warp the caster and the target together 800 ms later (50% + 5% a level + the level difference), not a status
+    // immune target
+    if (damage > 0 && (tstatus->Mode & ROWOW_MODE_STATUS_IMMUNE) == 0 && skillID == ROWOW_SKILL_RG_INTIMIDATE)
+    {
+        int32 rate = 50 + skillLevel * 5;
+        rate = rate + (int32(GetROStatus(src)->Level) - int32(tstatus->Level));
+        if (int32(urand(0, 99)) < rate)
+            SkillAddTimerSkill(src, tick + 800, bl->GetGUID(), 0, 0, skillID, skillLevel, 0, flag);
     }
 
     // Post-damage effects
@@ -2611,7 +2665,7 @@ int32 ROWOWMod::SkillAdditionalEffect(Unit* src, Unit* bl, uint16 skillID, uint1
     {
         // Automatic trigger of Blitz Beat: a Hunter with its falcon and a bow, LUK/3 in 100 (+0.1), at the level its job level allows (1 a
         // ten levels), its damage split among the targets (SD_LEVEL).  Its look is the skill's own (clif_skill_damage), the falcon flying
-        // at the target.  (Gank's steal comes with the Rogue)
+        // at the target.  Gank: a Rogue's hit on a monster (not with a bow) may steal from it, at Steal's level
         if (Player* sd = src->ToPlayer())
         {
             int32 skill = PCCheckSkill(sd, ROWOW_SKILL_HT_BLITZBEAT);
@@ -2621,6 +2675,15 @@ int32 ROWOWMod::SkillAdditionalEffect(Unit* src, Unit* bl, uint16 skillID, uint1
                 uint16 blitzLevel = uint16(skill < rate ? skill : rate);
                 ClifSkillNoDamage(src, bl, ROWOW_SKILL_HT_BLITZBEAT, blitzLevel);
                 SkillCastendDamageID(src, bl, ROWOW_SKILL_HT_BLITZBEAT, blitzLevel, tick, ROWOW_SD_LEVEL);
+            }
+            // Gank
+            if (bl->IsCreature() == true && sstatus->WeaponType != ROWOW_WEAPON_TYPE_BOW && (skill = PCCheckSkill(sd, ROWOW_SKILL_RG_SNATCHER)) > 0 &&
+                (skill * 15 + 55) + PCCheckSkill(sd, ROWOW_SKILL_TF_STEAL) * 10 > int32(urand(0, 999)))
+            {
+                if (PCStealItem(sd, bl, uint16(PCCheckSkill(sd, ROWOW_SKILL_TF_STEAL))) == true)
+                    ClifSkillNoDamage(src, bl, ROWOW_SKILL_TF_STEAL, uint16(skill));
+                else
+                    ClifSkillFail(sd, ROWOW_SKILL_RG_SNATCHER, ROWOW_USESKILL_FAIL_LEVEL);
             }
         }
     }
@@ -3023,15 +3086,26 @@ void ROWOWMod::SkillTimerSkill(Unit* src, uint32 timerSkillID)
     if (src->IsInWorld() == false || skl.TargetGUID.IsEmpty() == true)
         return; // Source not on Map
     Unit* target = ObjectAccessor::GetUnit(*src, skl.TargetGUID);
+    if (skl.SkillID == ROWOW_SKILL_RG_INTIMIDATE && (target == nullptr || target->IsInWorld() == false || src->GetMap() != target->GetMap() ||
+        DistanceBL(src, target) > BattleConfig.AreaSize))
+        target = src; // Required since it has to warp.
     if (target == nullptr || target->IsInWorld() == false || src->GetMap() != target->GetMap())
         return; // Target offline, not on Map, or on another map
     if (src->IsAlive() == false)
         return; // Caster is Dead
-    if (target->IsAlive() == false && skl.SkillID != ROWOW_SKILL_WZ_WATERBALL)
+    if (target->IsAlive() == false && skl.SkillID != ROWOW_SKILL_RG_INTIMIDATE && skl.SkillID != ROWOW_SKILL_WZ_WATERBALL)
         return;
     uint64 tick = GetTick();
     switch (skl.SkillID)
     {
+        case ROWOW_SKILL_RG_INTIMIDATE:
+        {
+            // The caster to a random spot of the map, and the target (alive, and not the caster) onto a free cell beside it
+            Position dest;
+            if (UnitWarpRandom(src, dest) == true && target != src && target->IsAlive() == true)
+                UnitWarpNear(target, dest);
+            break;
+        }
         case ROWOW_SKILL_WZ_WATERBALL:
         case ROWOW_SKILL_WZ_JUPITEL:
         {

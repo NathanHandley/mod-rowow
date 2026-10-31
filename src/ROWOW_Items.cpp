@@ -240,7 +240,7 @@ void ROWOWMod::LoadItemScriptData()
         }
     }
 
-    // The map flags the item rules read, by any of the maps' RO names
+    // The map flags the item and skill rules read (monster_noteleport: Intimidate's warp), by any of the maps' RO names
     if (ROWOWDataTable const* mapFlagTable = GetDataTable(ROWOW_DATA_TABLE_MAP_FLAG))
     {
         int32 mapColumnIndex = mapFlagTable->GetColumnIndex("Map");
@@ -249,7 +249,7 @@ void ROWOWMod::LoadItemScriptData()
         for (size_t rowIndex = 0; rowIndex < mapFlagTable->Rows.size(); rowIndex++)
         {
             std::string const& flag = mapFlagTable->GetCell(rowIndex, flagColumnIndex);
-            if (flag != "noteleport" && flag != "noreturn" && flag != "nobranch")
+            if (flag != "noteleport" && flag != "noreturn" && flag != "nobranch" && flag != "monster_noteleport")
                 continue;
             uint32 mapID = GetMapIDByMapName(mapFlagTable->GetCell(rowIndex, mapColumnIndex));
             if (mapID == 0)
@@ -747,6 +747,20 @@ bool ROWOWMod::PCEquipItem(Player* player, Item* item, int32 reqPos)
     if ((pos & reqPos) == 0 || GetIdentityEquipPosition(*identity, item->GetGUID().GetCounter()) != 0)
         return false;
 
+    // pc_isequip's statuses: a stripped place can't be dressed again until its strip ends.  (Not in PCIsEquip, which PCCheckItem asks too:
+    // rAthena's pc_checkitem doesn't take off what these forbid, so Brandish Spear's own SC_STRIPWEAPON leaves the spear in hand)
+    if (ROWOWStatusChange const* sc = GetStatusChange(static_cast<Unit const*>(player)))
+    {
+        if (((roItem->Locations & ROWOW_EQUIP_POSITION_ARMS) != 0 && roItem->IsWeapon == true && sc->HasSCE(ROWOW_SC_STRIPWEAPON) == true) || // Also works with left-hand weapons [DracoRPG]
+            ((roItem->Locations & ROWOW_EQUIP_POSITION_HAND_L) != 0 && roItem->IsArmor == true && sc->HasSCE(ROWOW_SC_STRIPSHIELD) == true) ||
+            ((roItem->Locations & ROWOW_EQUIP_POSITION_ARMOR) != 0 && sc->HasSCE(ROWOW_SC_STRIPARMOR) == true) ||
+            ((roItem->Locations & ROWOW_EQUIP_POSITION_HEAD_TOP) != 0 && sc->HasSCE(ROWOW_SC_STRIPHELM) == true))
+        {
+            SendItemMessage(player, "You can't put this item on.");
+            return false;
+        }
+    }
+
     // Accessories go in one of the two positions, and a weapon either hand can hold in the one asked for (or the free one)
     if (pos == ROWOW_EQUIP_POSITION_ACC)
     {
@@ -839,6 +853,9 @@ bool ROWOWMod::PCUnequipItem(Player* player, uint32 equipPosition, int32 flag)
                 break;
         }
     }
+    // Taking off the weapon ends Enchant Deadly Poison (switch_remove_edp&1, pre-renewal's bit)
+    if ((pos & ROWOW_EQUIP_POSITION_HAND_R) != 0 && (BattleConfig.SwitchRemoveEdp & 1) != 0)
+        StatusChangeEnd(player, ROWOW_SC_EDP);
     if ((flag & 1) != 0)
         RefreshROForm(player);
     return true;
@@ -1168,21 +1185,30 @@ void ROWOWMod::SkillIdentify(Player* player, Item* item)
 
 void ROWOWMod::TeleportToRandomSpot(Player* player)
 {
-    // RO's random teleport lands on a free cell anywhere on the map; one of the map's monsters' homes is a spot known to be walkable
-    Map* map = player->GetMap();
+    // RO's random teleport lands on a free cell anywhere on the map
+    Position position;
+    if (MapSearchRandomSpot(player->GetMap(), position) == true)
+        player->NearTeleportTo(position.GetPositionX(), position.GetPositionY(), position.GetPositionZ(), player->GetOrientation());
+}
+
+bool ROWOWMod::MapSearchRandomSpot(Map* map, Position& positionOut) const
+{
+    // map_search_freecell over the whole map: one of the map's monsters' homes is a spot known to be walkable (a little above the ground, so
+    // arriving there never starts under it)
     if (map == nullptr || map->Instanceable() == true)
-        return;
+        return false;
     Map::CreatureBySpawnIdContainer const& creaturesBySpawnID = map->GetCreatureBySpawnIdStore();
     if (creaturesBySpawnID.empty() == true)
-        return;
+        return false;
     uint32 index = urand(0, uint32(creaturesBySpawnID.size() - 1));
     Map::CreatureBySpawnIdContainer::const_iterator creatureIter = creaturesBySpawnID.begin();
     std::advance(creatureIter, index);
     Creature* creature = creatureIter->second;
     if (creature == nullptr)
-        return;
+        return false;
     Position const& homePosition = creature->GetHomePosition();
-    player->NearTeleportTo(homePosition.GetPositionX(), homePosition.GetPositionY(), homePosition.GetPositionZ() + 0.5f, player->GetOrientation());
+    positionOut.Relocate(homePosition.GetPositionX(), homePosition.GetPositionY(), homePosition.GetPositionZ() + 0.5f);
+    return true;
 }
 
 void ROWOWMod::TeleportToSavePoint(Player* player)

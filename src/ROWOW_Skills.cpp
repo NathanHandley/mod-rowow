@@ -482,6 +482,9 @@ void ROWOWMod::LoadSkillRow(ROWOWDataTable const& skillTable, size_t rowIndex, R
     skill.CastDefenseReduction = int32(strtol(cell("CastDefenseReduction").c_str(), nullptr, 10));
     std::string const& status = cell("Status");
     skill.StatusID = status.empty() == true ? ROWOW_SC_NONE : GetStatusIDByName(status);
+    for (auto const& copyFlag : ROWOWDataTable::ParseMap(cell("CopyFlags_Skill")))
+        if (copyFlag.second == "true")
+            skill.CopyOption |= copyFlag.first == "Plagiarism" ? ROWOW_SKILL_COPY_PLAGIARISM : (copyFlag.first == "Reproduce" ? ROWOW_SKILL_COPY_REPRODUCE : 0);
 
     ReadSkillLevelValues(cell("Range"), skill.Range);
     ReadSkillLevelValues(cell("HitCount"), skill.HitCount);
@@ -654,7 +657,10 @@ int32 ROWOWMod::PCCheckSkill(Unit const* unit, uint16 skillID) const
 
 int32 ROWOWMod::PCCheckSkill(ROWOWIdentity const& identity, uint16 skillID) const
 {
-    // pc_checkskill: a skill counts while it's on the tree the identity may use (pc_calc_skilltree gave it its id)
+    // pc_checkskill: a skill counts while it's on the tree the identity may use (pc_calc_skilltree gave it its id), and the skill Plagiarism
+    // copied at its copied level
+    if (skillID != 0 && skillID == identity.CloneSkillID)
+        return identity.CloneSkillLevel;
     if (identity.TreeSkillIDs.find(skillID) == identity.TreeSkillIDs.end())
         return 0;
     auto levelIter = identity.SkillLevelsByID.find(skillID);
@@ -724,6 +730,8 @@ void ROWOWMod::PCCalcSkillTree(ROWOWIdentity& identity) const
     // pc_calc_skilltree: the skills of the (normalized) job's tree it may learn or use now, those whose needed skills it learned and
     // whose base and job levels it reached, found again until no more are added.  Quest, wedding and spirit skills only once learned
     identity.TreeSkillIDs.clear();
+    identity.CloneSkillID = 0;
+    identity.CloneSkillLevel = 0;
     uint16 jobID = PCCalcSkillTreeNormalizeJob(identity);
     auto treeIter = SkillTreesByJobID.find(jobID);
     if (treeIter == SkillTreesByJobID.end())
@@ -768,6 +776,16 @@ void ROWOWMod::PCCalcSkillTree(ROWOWIdentity& identity) const
             identity.TreeSkillIDs.insert(skillID);
             isChanged = true;
         }
+    }
+
+    // pc_reg_received: the skill Plagiarism copied (CLONE_SKILL), at most at the level of Plagiarism it knows now.  A skill of its own tree is
+    // never a copy (skill_isCopyable)
+    int32 plagiarismLevel = PCCheckSkill(identity, ROWOW_SKILL_RG_PLAGIARISM);
+    uint16 cloneSkillID = uint16(GetIdentityVariable(identity, ROWOW_SKILL_VAR_PLAGIARISM));
+    if (plagiarismLevel > 0 && GetSkill(cloneSkillID) != nullptr && identity.TreeSkillIDs.find(cloneSkillID) == identity.TreeSkillIDs.end())
+    {
+        identity.CloneSkillID = cloneSkillID;
+        identity.CloneSkillLevel = uint16(std::clamp<int64>(GetIdentityVariable(identity, ROWOW_SKILL_VAR_PLAGIARISM_LV), 0, plagiarismLevel));
     }
 }
 
@@ -815,6 +833,8 @@ void ROWOWMod::PCJobChange(Player* player, uint16 jobID)
         return;
     if (job->FirstJobID >= 0 && (oldJob == nullptr || oldJob->FirstJobID < 0))
         SetIdentityVariable(*identity, JobChange2ndVariable, identity->JobLevel);
+    if (identity->CloneSkillID != 0)
+        PCSkillPlagiarismReset(player);
     identity->JobID = jobID;
     identity->JobLevel = 1;
     identity->JobExp = 0;
@@ -884,7 +904,7 @@ void ROWOWMod::RefreshIdentitySkills(Player* player, ROWOWIdentity& identity)
 void ROWOWMod::SendSkillsToClient(Player* player, ROWOWIdentity& identity, bool isForced)
 {
     // ROWOWSKILLS: the skill window's tree, in parts the client puts back together.  "B\t<skill points>\t<job>:<job name>,..." (its tabs), then the skills of
-    // the job's tree and any others learned, "S\t<skill>:<level>:<max level>:<1 when it can be learned or raised now>,...", then "E"
+    // the job's tree and any others learned, "S\t<skill>:<level>:<max level>:<1 when it can be learned or raised now>[:1 for Plagiarism's copy],...", then "E"
     std::vector<std::string> messages;
     std::string jobIDsText;
     for (uint16 jobID : GetSkillTreeJobIDs(identity.JobID))
@@ -900,6 +920,8 @@ void ROWOWMod::SendSkillsToClient(Player* player, ROWOWIdentity& identity, bool 
             skillIDs.insert(entryBySkillID.first);
     for (auto const& levelBySkillID : identity.SkillLevelsByID)
         skillIDs.insert(levelBySkillID.first);
+    if (identity.CloneSkillID != 0)
+        skillIDs.insert(identity.CloneSkillID);
     std::string skillsText;
     for (uint16 skillID : skillIDs)
     {
@@ -907,6 +929,8 @@ void ROWOWMod::SendSkillsToClient(Player* player, ROWOWIdentity& identity, bool 
         uint16 level = levelIter != identity.SkillLevelsByID.end() ? levelIter->second : 0;
         bool isOnTree = identity.TreeSkillIDs.find(skillID) != identity.TreeSkillIDs.end();
         std::string skillText = fmt::format("{}:{}:{}:{}", skillID, level, SkillTreeGetMax(skillID, identity.JobID), isOnTree == true ? 1 : 0);
+        if (skillID == identity.CloneSkillID)
+            skillText = fmt::format("{}:{}:{}:1:1", skillID, identity.CloneSkillLevel, identity.CloneSkillLevel);
         if (skillsText.empty() == false && skillsText.size() + 1 + skillText.size() > SkillMessageChunkLength)
         {
             messages.push_back("ROWOWSKILLS\tS\t" + skillsText);

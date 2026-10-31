@@ -1561,6 +1561,37 @@ bool ROWOWMod::StatusChangeStartValues(Unit* src, Unit* bl, int32 type, int32& v
             val3 = 3; // Reflections
             tick = ROWOW_INFINITE_TICK;
             break;
+        case ROWOW_SC_CLOSECONFINE2:
+        {
+            // val2 is the Rogue holding it (its GUID's counter), who is held in place too for a second longer
+            Unit* src2 = val2 != 0 ? MapID2BL(bl, val2) : nullptr;
+            if (src2 == nullptr)
+                return false; // Status failed.
+            ROWOWStatusChange* sc2 = GetStatusChange(src2);
+            ROWOWStatusChangeEntry* sce2 = sc2 != nullptr ? sc2->GetSCE(ROWOW_SC_CLOSECONFINE) : nullptr;
+            if (sce2 == nullptr)
+            {
+                // Start lock on caster.
+                val3 = 10; // Flee increase
+                SCStart4(src2, src2, ROWOW_SC_CLOSECONFINE, 100, val1, 1, val3, 0, int64(tick) + 1000);
+            }
+            else
+            {
+                // Increase count of locked enemies and refresh time.
+                sce2->Val2++;
+                sce2->TimerTime = GetTick() + uint64(tick) + 1000;
+                sce2->EndTime = sce2->TimerTime;
+                if (ROWOWStatusChangeDB const* scdb2 = GetStatusChangeDB(ROWOW_SC_CLOSECONFINE))
+                    ShowStatusChangeIcon(src2, *scdb2, *sce2);
+            }
+            break;
+        }
+        case ROWOW_SC_SPLASHER:
+            // The blast comes when val4's countdown (the skill's Duration1) runs out, half a second at a time after the first second; the icon
+            // shows the whole wait (rAthena's countdown message is commented out)
+            tickTime = tick;
+            tick = tick + val4 - 500;
+            break;
         case ROWOW_SC_MEMORIZE:
             val2 = 5; // Memorized casts.
             tick = ROWOW_INFINITE_TICK;
@@ -2095,6 +2126,37 @@ bool ROWOWMod::StatusChangeEnd(Unit* bl, int32 type, bool isTimer)
                     SkillDelUnitGroup(bl->GetMap(), group);
             }
             break;
+        case ROWOW_SC_SPLASHER:
+            // The countdown ran out: the caster's Venom Splasher goes off on the target and around it
+            if (isTimer == true && bl->IsInWorld() == true)
+                if (Unit* src = MapID2BL(bl, val3))
+                    SkillCastendDamageID(src, bl, uint16(val2), uint16(val1), GetTick(), ROWOW_SD_LEVEL);
+            break;
+        case ROWOW_SC_CLOSECONFINE2:
+            if (val2 != 0 && bl->IsInWorld() == true)
+            {
+                // If status was already ended, do nothing.  Decrease count (rAthena counts the holder's val1, its level, down: one hold frees it)
+                Unit* src = MapID2BL(bl, val2);
+                ROWOWStatusChange* sc2 = src != nullptr ? GetStatusChange(src) : nullptr;
+                if (ROWOWStatusChangeEntry* sce2 = sc2 != nullptr ? sc2->GetSCE(ROWOW_SC_CLOSECONFINE) : nullptr; sce2 != nullptr && --sce2->Val1 <= 0)
+                    StatusChangeEnd(src, ROWOW_SC_CLOSECONFINE); // No more holds, free him up.
+            }
+            [[fallthrough]];
+        case ROWOW_SC_CLOSECONFINE:
+            if (val2 > 0 && bl->IsInWorld() == true)
+            {
+                // Caster has been unlocked... nearby chars need to be unlocked (in reach of the skill and of a Back Slide out of it)
+                int32 range = 1 + SkillGetRange2(bl, scdb->SkillID, uint16(val1), true) + SkillGetRange2(bl, ROWOW_SKILL_TF_BACKSLIDING, 1, true);
+                int32 x = 0, y = 0;
+                GetUnitCell(bl, x, y);
+                uint64 tick = GetTick();
+                MapForEachInArea(bl, x - range, y - range, x + range, y + range, [this, bl, type, tick](Unit* target)
+                {
+                    StatusChangeTimerSub(target, bl, nullptr, type, tick);
+                    return 0;
+                });
+            }
+            break;
         case ROWOW_SC_BLADESTOP:
             if (val4 != 0 && bl->IsInWorld() == true)
             {
@@ -2525,6 +2587,15 @@ void ROWOWMod::StatusChangeTimer(Unit* bl, int32 type, uint64 tick)
             }
             break;
 
+        case ROWOW_SC_SPLASHER:
+            // Venom Splasher's countdown
+            if ((sce->Val4 -= 500) > 0)
+            {
+                scTimerNext(500 + tick);
+                return;
+            }
+            break;
+
         case ROWOW_SC_STOMACHACHE:
             if (--(sce->Val4) >= 0)
             {
@@ -2552,12 +2623,21 @@ void ROWOWMod::StatusChangeTimer(Unit* bl, int32 type, uint64 tick)
 
 void ROWOWMod::StatusChangeTimerSub(Unit* bl, Unit* src, ROWOWStatusChangeEntry const* sce, int32 type, uint64 tick)
 {
-    // status_change_timer_sub: what Sight, Ruwach and Sight Blaster do to each unit around (revealing the hidden)
+    // status_change_timer_sub: what Sight, Ruwach and Sight Blaster do to each unit around (revealing the hidden), and a Close Confine holder
+    // letting go of those it held
     if (bl->IsAlive() == false)
         return;
-    ROWOWStatusChange const* tsc = GetStatusChange(bl);
+    ROWOWStatusChange* tsc = GetStatusChange(bl);
     switch (type)
     {
+        case ROWOW_SC_CLOSECONFINE:
+            // Lock char has released the hold on everyone...
+            if (ROWOWStatusChangeEntry* sce2 = tsc != nullptr ? tsc->GetSCE(ROWOW_SC_CLOSECONFINE2) : nullptr; sce2 != nullptr && sce2->Val2 == int32(src->GetGUID().GetCounter()))
+            {
+                sce2->Val2 = 0;
+                StatusChangeEnd(bl, ROWOW_SC_CLOSECONFINE2);
+            }
+            break;
         case ROWOW_SC_SIGHT: // Reveal hidden ennemy on 3*3 range
         case ROWOW_SC_CONCENTRATE:
             StatusChangeEnd(bl, ROWOW_SC_HIDING);

@@ -463,6 +463,12 @@ public:
                 summon->IsSelfDestructPending = true;
         }
 
+        bool CanAIAttack(Unit const* target) const override
+        {
+            // The RO target rules the WoW threat list doesn't know (a Rogue in Gangster's Paradise): a target that fails them is dropped
+            return ROWOW->IsEnabled == false || ROWOW->MobCanTarget(me, target) == true;
+        }
+
         void JustEngagedWith(Unit* who) override
         {
             ScriptedAI::JustEngagedWith(who);

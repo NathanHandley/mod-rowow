@@ -48,6 +48,7 @@ class SpellInfo;
 class Unit;
 class WorldLocation;
 struct CalcDamageInfo;
+struct Position;
 struct ROWOWScript;
 struct ROWOWScriptContext;
 
@@ -184,6 +185,7 @@ struct ROWOWDataTable
 #define ROWOW_ITEMID_HOLY_WATER                     523
 #define ROWOW_ITEMID_EMPTY_BOTTLE                   713
 #define ROWOW_ITEMID_STONE                          7049
+#define ROWOW_ITEMID_POISON_BOTTLE                  678     // ITEMID_POISON_BOTTLE: what Create Deadly Poison makes and Enchant Deadly Poison uses
 
 // rAthena's job IDs (e_job in mmo.hpp)
 #define ROWOW_JOB_NOVICE                            0
@@ -678,6 +680,8 @@ struct ROWOWBattleConfig
     int32 AlchemistSummonReward = 1; // alchemist_summon_reward: 1 Marine Spheres drop their items, 2 the plants too
     int32 FirstAttackLootBonus = 30; // first_attack_loot_bonus: the percent of all the damage the first attacker adds for the loot priority
     int32 SkillAddHealRate = 487; // skill_add_heal_rate: the heal skills bHealPower raises (1 Heal, 2 Sanctuary, 4 Aid Potion, 8 Slim Potion Pitcher, 16 Apple of Idun...)
+    int32 BackstabBowPenalty = 1; // backstab_bow_penalty: Back Stab with a bow does half its damage
+    int32 SwitchRemoveEdp = 2; // switch_remove_edp: (pre-renewal &1) taking off the weapon ends Enchant Deadly Poison, which bare hands can't cast
 };
 
 // A skill of a job's skill tree (skill_tree.yml's s_skill_tree_entry)
@@ -985,6 +989,8 @@ struct ROWOWIdentity : public DataMap::Base
     std::map<uint16, uint16> SkillLevelsByID; // The skills learned (mod_rowow_identity_skill), and their levels
     bool AreSkillsChanged = false;
     std::set<uint16> TreeSkillIDs; // The skills of the tree it may use and raise now, learned or not (pc_calc_skilltree sets their id)
+    uint16 CloneSkillID = 0; // cloneskill_idx: the skill Plagiarism copied (SKILL_FLAG_PLAGIARIZED, from CLONE_SKILL while it knows Plagiarism)
+    uint16 CloneSkillLevel = 0; // ... and its level (CLONE_SKILL_LV, at most Plagiarism's)
     std::vector<uint32> SkillSpellIDs; // The learned skills' spells, which the character knows while in the form
     std::string SentSkillsMessage; // What the client's RO interface was last told of the skills
     std::map<std::string, int64> Variables; // Its character variables (rAthena's char_reg_num, mod_rowow_identity_variable), like jobchange_level
@@ -1011,6 +1017,8 @@ struct ROWOWIdentity : public DataMap::Base
     float InvinciblePositionX = 0; // Where it stood when it got it, which moving away from ends it
     float InvinciblePositionY = 0;
     bool IsInvincibleSet = false; // The WoW state standing for it is set (immune to NPCs)
+    bool IsSitting = false; // pc_issit as skill_sit last saw it (sitting down and standing up, from the player's update)
+    bool IsGangsterParadise = false; // state.gangsterparadise: sitting by another sitting Rogue, monsters leave it alone
     bool IsSellingToShop = false; // A sell packet is being handled: its money gets Overcharge
     uint32 Option = 0; // status.option: the options kept with the identity (a Knight's or Crusader's Peco, ROWOW_OPTION_RIDING), saved with it
     std::array<ObjectGuid, ROWOW_MAX_DEVOTION> DevotionGUIDs; // devotion: the players its Devotion protects, by slot (a slot holds while that
@@ -1142,6 +1150,7 @@ public:
 
     // RO's direction from one cell to another (rAthena's map_calc_dir_xy), east when they're the same cell
     static uint8 GetRODirection(float deltaX, float deltaY);
+    static int32 MapCheckDir(int32 sDir, int32 tDir); // map_check_dir: 0 when tDir is sDir or one of its two neighbours, 1 otherwise
 
     // RO illusions: while one is the player's transform, the player shows its display for the weapon and shield held
     ROWOWIllusion const* GetActiveIllusion(Player* player) const;
@@ -1301,6 +1310,7 @@ public:
     void SkillIdentify(Player* player, Item* item); // skill_identify
     void SendItemIdentifyList(Player* player); // clif_item_identify_list
     void TeleportToRandomSpot(Player* player); // A random spot on the map (AL_TELEPORT level 1), at one of its monsters' homes
+    bool MapSearchRandomSpot(Map* map, Position& positionOut) const; // map_search_freecell over the whole map: one of its monsters' homes
     void TeleportToSavePoint(Player* player); // The identity's save point (AL_TELEPORT level 2 and up)
 
     // RO bonuses and cards (ROWOW_Bonus.cpp): the port of rAthena's pc_bonus..pc_bonus5 and the item part of status_calc_pc_sub, the
@@ -1620,6 +1630,21 @@ public:
     void UpdateMobSummon(Creature* md); // A summoned monster's own AI: a plant's search for its master's enemies, a hit Marine Sphere's blast
     int32 PCSkillHealBonus(Unit const* unit, uint16 skillID) const; // pc_skillheal_bonus: bHealPower (by skill_add_heal_rate) and bSkillHeal
     int32 PCSkillHeal2Bonus(Unit const* unit, uint16 skillID) const; // pc_skillheal2_bonus: bHealPower2 and bSkillHeal2
+
+    // The Thief line's supporting systems (ROWOW_SkillSupport.cpp): Plagiarism's copy (skill_isCopyable, skill_do_copy, kept in the CLONE_SKILL
+    // variables), the strip skills (skill_strip_equip), Intimidate's warp (unit_warp to a random cell), Gangster's Paradise (skill_sit) and
+    // Graffiti's message.  All of it runs in the map thread of the units involved
+    int8 SkillIsCopyable(Player* sd, uint16 skillID) const; // skill_isCopyable: 1 Plagiarism can copy it, 0 not
+    void SkillDoCopy(Unit* src, Unit* bl, uint16 skillID, uint16 skillLevel); // skill_do_copy: the skill that hit a Rogue becomes its copy
+    void PCSkillPlagiarismReset(Player* sd); // pc_skill_plagiarism_reset (Plagiarism's): the copy forgotten
+    bool SkillStripEquip(Unit* src, Unit* target, uint16 skillID, uint16 skillLevel); // skill_strip_equip
+    bool IsUnitWarpForbidden(Unit const* bl) const; // unit_warp's map flags (noteleport, monster_noteleport)
+    bool UnitWarpRandom(Unit* bl, Position& destOut); // unit_warp(bl, -1, -1, -1, CLR_TELEPORT): to a random spot of its map (where it goes)
+    bool UnitWarpNear(Unit* bl, Position const& center); // unit_warp to a free cell next to a spot of its map (map_search_freecell 1 x 1)
+    void SkillSit(Player* sd, bool sitting); // skill_sit: Gangster's Paradise for the Rogues sitting together
+    void UpdateSkillSit(Player* sd); // skill_sit as the player sits down or stands up, from its update
+    bool MobCanTarget(Creature const* md, Unit const* target) const; // mob_ai_sub_hard's target checks the WoW AI doesn't make (Gangster's Paradise)
+    void ClifGraffiti(Map* map, ROWOWSkillUnitGroup& group); // clif_graffiti: Graffiti's message to the players it comes into view of
 
     // Merchant prices (pc_modifybuyvalue, pc_modifysellvalue)
     int32 PCModifyBuyValue(Player const* player, int32 origValue) const;

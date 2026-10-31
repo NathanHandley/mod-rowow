@@ -90,6 +90,7 @@ public:
         ROWOW->UpdateInvincibleTimer(player);
         ROWOW->UpdateAutoBonuses(player);
         ROWOW->UpdateSpiritBalls(player);
+        ROWOW->UpdateSkillSit(player);
 
         // A vendor stays sitting by its shop: standing up or walking away closes it
         ROWOWIdentity* identity = ROWOW->GetIdentity(player);
@@ -587,6 +588,7 @@ public:
             { "song",     HandleROSongCommand,   SEC_GAMEMASTER, Console::No },
             { "scend",    HandleROStatusChangeEndCommand, SEC_GAMEMASTER, Console::No },
             { "scrate",   HandleROStatusChangeRateCommand, SEC_GAMEMASTER, Console::No },
+            { "striprate", HandleROStripRateCommand, SEC_GAMEMASTER, Console::No },
             { "identity", identityCommandTable },
         };
 
@@ -1668,6 +1670,53 @@ public:
             100.0 * landed / runCount, landed != 0 ? tickMin : 0, tickMax, landed != 0 ? double(tickTotal) / landed : 0.0);
         handler->SendSysMessage(line);
         LOG_INFO("module.ROWOW", ".ro scrate: {}", line);
+        return true;
+    }
+
+    static bool HandleROStripRateCommand(ChatHandler* handler, std::string skillName, uint32 skillLevel, Optional<uint32> runs)
+    {
+        // How often a strip skill (its skill_db name or id) strips the selected RO monster from the player (for comparing with the oracle's
+        // @oraclestrip): skill_strip_equip runs times, the strip statuses ended after each, and the count and the time the first strip got
+        Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
+        Creature* creature = handler->getSelectedCreature();
+        uint16 skillID = ROWOW->GetSkillIDByName(skillName);
+        if (skillID == 0 && std::all_of(skillName.begin(), skillName.end(), ::isdigit) == true)
+            skillID = uint16(strtoul(skillName.c_str(), nullptr, 10));
+        if (player == nullptr || creature == nullptr || ROWOW->GetROStatus(creature) == nullptr || ROWOW->IsInROForm(player) == false || ROWOW->GetSkill(skillID) == nullptr)
+        {
+            handler->SendSysMessage("Select an RO monster, in the Ragnarok Online world, and name a strip skill.");
+            return false;
+        }
+        int32 const strips[4] = { ROWOW_SC_STRIPWEAPON, ROWOW_SC_STRIPSHIELD, ROWOW_SC_STRIPARMOR, ROWOW_SC_STRIPHELM };
+        uint32 runCount = std::clamp<uint32>(runs.value_or(1000), 1, 100000);
+        uint32 landed = 0;
+        int64 tickMin = std::numeric_limits<int64>::max(), tickMax = 0, tickTotal = 0;
+        uint64 now = ROWOW->GetTick();
+        for (uint32 run = 0; run < runCount; run++)
+        {
+            if (ROWOW->SkillStripEquip(player, creature, skillID, uint16(skillLevel)) == false)
+                continue;
+            landed++;
+            bool isTimed = false;
+            for (int32 strip : strips)
+            {
+                ROWOWStatusChangeEntry const* sce = ROWOW->GetSCE(creature, strip);
+                if (sce != nullptr && isTimed == false)
+                {
+                    int64 tick = sce->EndTime > now ? int64(sce->EndTime - now) : 0;
+                    tickMin = std::min(tickMin, tick);
+                    tickMax = std::max(tickMax, tick);
+                    tickTotal += tick;
+                    isTimed = true;
+                }
+                ROWOW->StatusChangeEnd(creature, strip);
+            }
+        }
+        std::string line = fmt::format("striprate skill={} lv={} runs={} ok={} pct={:.2f} tick_min={} tick_max={} tick_avg={:.1f} pc_dex={} mob_dex={}", skillID, skillLevel,
+            runCount, landed, 100.0 * landed / runCount, landed != 0 ? tickMin : 0, tickMax, landed != 0 ? double(tickTotal) / landed : 0.0,
+            ROWOW->GetROStatus(player)->Stats[ROWOW_STAT_DEX], ROWOW->GetROStatus(creature)->Stats[ROWOW_STAT_DEX]);
+        handler->SendSysMessage(line);
+        LOG_INFO("module.ROWOW", ".ro striprate: {}", line);
         return true;
     }
 

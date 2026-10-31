@@ -43,9 +43,10 @@ using namespace std;
 // links (sd->devotion and the devoted's SC_DEVOTION), the Merchant's prices (pc_modifybuyvalue, pc_modifysellvalue), the Mage line's systems
 // (Abracadabra's abra_db, Hindsight's menu, the Elemental Converter list, Sense's window, Mystical Amplification's toggle, the elemental
 // fields, the cells Ice Wall and Land Protector change), the Acolyte line's (a Monk's Spirit Spheres, reviving, a Priest's partners), the
-// Archer line's (a Hunter's falcon, the traps given back and revealed, an ensemble's partner) and the Merchant line's (an Alchemist's summoned
-// plants and Marine Spheres, Ore Discovery).  All of it runs in the player's own map thread, a Devotion link's or an ensemble's two players
-// being on one map whenever either reads the other
+// Archer line's (a Hunter's falcon, the traps given back and revealed, an ensemble's partner), the Merchant line's (an Alchemist's summoned
+// plants and Marine Spheres, Ore Discovery) and the Thief line's (Plagiarism's copy, the strips, Intimidate's warp, Gangster's Paradise,
+// Graffiti's message).  All of it runs in the player's own map thread, a Devotion link's or an ensemble's two players, or the Rogues sitting
+// together, being on one map whenever either reads the other
 
 namespace
 {
@@ -1472,4 +1473,265 @@ void ROWOWMod::UpdateMobSummon(Creature* md)
     // A WoW creature fights what it has threat on (its victim is picked from its threat list)
     md->AddThreat(target, 1.0f);
     md->AI()->AttackStart(target);
+}
+
+int8 ROWOWMod::SkillIsCopyable(Player* sd, uint16 skillID) const
+{
+    // skill_isCopyable: a skill the Rogue doesn't have on its tree (its own copy aside, which is never on it), copyable by Plagiarism, while it
+    // knows Plagiarism and Preserve isn't on.  (Reproduce is a third job's)
+    ROWOWIdentity const* identity = sd->CustomData.Get<ROWOWIdentity>("ROWOWIdentity");
+    ROWOWSkill const* skill = GetSkill(skillID);
+    if (identity == nullptr || skill == nullptr)
+        return 0;
+    // Only copy skill that player doesn't have or the skill is old clone
+    if (identity->TreeSkillIDs.find(skillID) != identity->TreeSkillIDs.end())
+        return 0;
+    // Plagiarism only able to copy skill while SC_PRESERVE is not active and skill is copyable by Plagiarism
+    if ((skill->CopyOption & ROWOW_SKILL_COPY_PLAGIARISM) != 0 && PCCheckSkill(sd, ROWOW_SKILL_RG_PLAGIARISM) > 0 && GetSCE(sd, ROWOW_SC_PRESERVE) == nullptr)
+        return 1;
+    return 0;
+}
+
+void ROWOWMod::SkillDoCopy(Unit* /*src*/, Unit* bl, uint16 skillID, uint16 skillLevel)
+{
+    // skill_do_copy: a Rogue hit by a skill it can copy keeps it in place of its last copy, at the hit's level up to its Plagiarism level, in
+    // the CLONE_SKILL variables (saved with the identity); the skill's spells and the skill window follow (clif_addskill).  (Reproduce and
+    // the third jobs' dummy skills, skill_dummy2skill_id, are left out)
+    Player* tsd = bl->ToPlayer();
+    if (tsd == nullptr || PCCheckSkill(tsd, ROWOW_SKILL_RG_PLAGIARISM) == 0)
+        return;
+    // If SC_PRESERVE is active, nothing to do
+    if (GetSCE(tsd, ROWOW_SC_PRESERVE) != nullptr)
+        return;
+    if (SkillIsCopyable(tsd, skillID) != 1)
+        return;
+    ROWOWIdentity* identity = GetIdentity(tsd);
+    PCSkillPlagiarismReset(tsd);
+    // Cap level to RG_PLAGIARISM level
+    int32 level = std::min<int32>(skillLevel, PCCheckSkill(tsd, ROWOW_SKILL_RG_PLAGIARISM));
+    SetIdentityVariable(*identity, ROWOW_SKILL_VAR_PLAGIARISM, skillID);
+    SetIdentityVariable(*identity, ROWOW_SKILL_VAR_PLAGIARISM_LV, level);
+    RefreshIdentitySkills(tsd, *identity);
+    SendSkillsToClient(tsd, *identity, false);
+}
+
+void ROWOWMod::PCSkillPlagiarismReset(Player* sd)
+{
+    // pc_skill_plagiarism_reset (Plagiarism's): the copied skill and its spells go (clif_deleteskill), and its variables
+    ROWOWIdentity* identity = GetIdentity(sd);
+    if (identity->CloneSkillID == 0)
+        return;
+    identity->CloneSkillID = 0;
+    identity->CloneSkillLevel = 0;
+    SetIdentityVariable(*identity, ROWOW_SKILL_VAR_PLAGIARISM, 0);
+    SetIdentityVariable(*identity, ROWOW_SKILL_VAR_PLAGIARISM_LV, 0);
+    GrantIdentitySkillSpells(sd, *identity);
+}
+
+bool ROWOWMod::SkillStripEquip(Unit* src, Unit* target, uint16 skillID, uint16 skillLevel)
+{
+    // skill_strip_equip: the chance (in 1000, by the DEX difference), the time (a monster's 15 seconds longer), then the strip status of each
+    // place Chemical Protection doesn't cover; true when one landed (the status takes the player's item off, or fails when nothing is worn
+    // there).  (Mado Gear, the accessories and the shadow equipment are the third jobs')
+    ROWOWStatus const* sstatus = GetROStatus(src);
+    ROWOWStatus const* tstatus = GetROStatus(target);
+    if (sstatus == nullptr || tstatus == nullptr)
+        return false;
+    int32 const scAtk[4] = { ROWOW_SC_STRIPWEAPON, ROWOW_SC_STRIPSHIELD, ROWOW_SC_STRIPARMOR, ROWOW_SC_STRIPHELM };
+    int32 const scDef[4] = { ROWOW_SC_CP_WEAPON, ROWOW_SC_CP_SHIELD, ROWOW_SC_CP_ARMOR, ROWOW_SC_CP_HELM };
+    int32 dexDifference = sstatus->Stats[ROWOW_STAT_DEX] - tstatus->Stats[ROWOW_STAT_DEX];
+    int32 rate = 0;
+    int32 mod = 100;
+    switch (skillID) // Rate
+    {
+        case ROWOW_SKILL_RG_STRIPWEAPON:
+        case ROWOW_SKILL_RG_STRIPARMOR:
+        case ROWOW_SKILL_RG_STRIPSHIELD:
+        case ROWOW_SKILL_RG_STRIPHELM:
+            rate = 50 * (skillLevel + 1) + 2 * dexDifference;
+            mod = 1000;
+            break;
+        case ROWOW_SKILL_ST_FULLSTRIP:
+        {
+            int32 minRate = 50 + 20 * skillLevel;
+            rate = std::max(minRate, minRate + 2 * dexDifference);
+            mod = 1000;
+            break;
+        }
+        default:
+            return false;
+    }
+    if (int32(urand(0, uint32(mod - 1))) >= rate)
+        return false;
+
+    // Duration
+    int64 time = SkillGetTime(skillID, skillLevel);
+    if (target->IsPlayer() == true)
+        time += std::max(1, skillLevel + 500 * dexDifference);
+    else
+    {
+        time += 15000;
+        time += std::max(1, skillLevel + 500 * dexDifference);
+    }
+
+    // Location: EQP_WEAPON, EQP_SHIELD, EQP_ARMOR, EQP_HELM as the bits of scAtk's order
+    int32 location = 0;
+    switch (skillID)
+    {
+        case ROWOW_SKILL_RG_STRIPWEAPON: location = 0x1; break;
+        case ROWOW_SKILL_RG_STRIPSHIELD: location = 0x2; break;
+        case ROWOW_SKILL_RG_STRIPARMOR: location = 0x4; break;
+        case ROWOW_SKILL_RG_STRIPHELM: location = 0x8; break;
+        case ROWOW_SKILL_ST_FULLSTRIP: location = 0xF; break;
+    }
+    for (int32 i = 0; i < 4; i++)
+        if ((location & (1 << i)) != 0 && GetSCE(target, scDef[i]) != nullptr)
+            location &= ~(1 << i);
+    if (location == 0)
+        return false;
+    for (int32 i = 0; i < 4; i++)
+        if ((location & (1 << i)) != 0 && SCStart(src, target, scAtk[i], 100, skillLevel, time) == false)
+            location &= ~(1 << i);
+    return location != 0;
+}
+
+bool ROWOWMod::IsUnitWarpForbidden(Unit const* bl) const
+{
+    // unit_warp's map flags: noteleport for a player, monster_noteleport for a monster no one summoned
+    auto isMapFlagged = [this, bl](char const* flag)
+    {
+        auto mapIDsIter = MapIDsByMapFlag.find(flag);
+        return mapIDsIter != MapIDsByMapFlag.end() && mapIDsIter->second.find(bl->GetMapId()) != mapIDsIter->second.end();
+    };
+    if (bl->IsPlayer() == true)
+        return isMapFlagged("noteleport");
+    ROWOWMobSummon const* summon = bl->CustomData.Get<ROWOWMobSummon>("ROWOWMobSummon");
+    return isMapFlagged("monster_noteleport") == true && (summon == nullptr || summon->MasterGUID.IsEmpty() == true);
+}
+
+bool ROWOWMod::UnitWarpRandom(Unit* bl, Position& destOut)
+{
+    // unit_warp(bl, -1, -1, -1, CLR_TELEPORT): to a random spot of its map, unless the map forbids it.  A player's teleport lands once its
+    // client answers, so where it goes is given back for those warped next to it
+    if (IsUnitWarpForbidden(bl) == true || MapSearchRandomSpot(bl->GetMap(), destOut) == false)
+        return false;
+    bl->NearTeleportTo(destOut.GetPositionX(), destOut.GetPositionY(), destOut.GetPositionZ(), bl->GetOrientation());
+    return true;
+}
+
+bool ROWOWMod::UnitWarpNear(Unit* bl, Position const& center)
+{
+    // unit_warp to map_search_freecell(center, 0, x, y, 1, 1, 0): a random cell within one of the spot's cell with ground near its height
+    // (the spot itself when none is found), unless the map forbids it
+    if (IsUnitWarpForbidden(bl) == true)
+        return false;
+    Map* map = bl->GetMap();
+    int32 centerX = 0, centerY = 0;
+    GetWorldCell(bl->GetMapId(), center.GetPositionX(), center.GetPositionY(), centerX, centerY);
+    float x = center.GetPositionX();
+    float y = center.GetPositionY();
+    float z = center.GetPositionZ();
+    for (int32 tries = 0; tries < 9; tries++)
+    {
+        float cellX = 0, cellY = 0;
+        GetCellWorldPosition(bl->GetMapId(), centerX + int32(urand(0, 2)) - 1, centerY + int32(urand(0, 2)) - 1, cellX, cellY);
+        float cellZ = map->GetHeight(bl->GetPhaseMask(), cellX, cellY, center.GetPositionZ() + ROWOW_SKILL_CELL_GROUND_SEARCH_HEIGHT, true, ROWOW_SKILL_CELL_GROUND_SEARCH_DISTANCE);
+        if (cellZ <= INVALID_HEIGHT || std::fabs(cellZ - center.GetPositionZ()) > ROWOW_SKILL_CELL_GROUND_SEARCH_HEIGHT)
+            continue;
+        x = cellX;
+        y = cellY;
+        z = cellZ + 0.5f;
+        break;
+    }
+    bl->NearTeleportTo(x, y, z, bl->GetOrientation());
+    return true;
+}
+
+void ROWOWMod::SkillSit(Player* sd, bool sitting)
+{
+    // skill_sit: a Rogue (Gangster's Paradise) sitting down beside another sitting one (its splash around it) puts every such Rogue there in
+    // Gangster's Paradise; standing up takes it off those who no longer have two sitting together around them.  (The Taekwon's rests, flag
+    // 2, come with the Taekwon)
+    int32 level = PCCheckSkill(sd, ROWOW_SKILL_RG_GANGSTER);
+    if (level <= 0)
+        return; // No need to count area if no skills are learned.
+    int32 range = SkillGetSplash(ROWOW_SKILL_RG_GANGSTER, uint16(level));
+    // skill_sit_count: the sitting players around who know Gangster's Paradise
+    auto sitCount = [this, range](Player* center)
+    {
+        return MapForEachInRange(center, range, [this](Unit* bl)
+        {
+            Player* tsd = bl->ToPlayer();
+            return (tsd != nullptr && tsd->IsSitState() == true && PCCheckSkill(tsd, ROWOW_SKILL_RG_GANGSTER) > 0) ? 1 : 0;
+        });
+    };
+    if (sitting == true)
+    {
+        if (sitCount(sd) <= 1)
+            return;
+        // skill_sit_in
+        MapForEachInRange(sd, range, [this](Unit* bl)
+        {
+            Player* tsd = bl->ToPlayer();
+            if (tsd != nullptr && tsd->IsSitState() == true && PCCheckSkill(tsd, ROWOW_SKILL_RG_GANGSTER) > 0)
+                GetIdentity(tsd)->IsGangsterParadise = true;
+            return 0;
+        });
+        return;
+    }
+    // skill_sit_out
+    MapForEachInRange(sd, range, [this, &sitCount](Unit* bl)
+    {
+        Player* tsd = bl->ToPlayer();
+        if (tsd == nullptr || sitCount(tsd) > 1)
+            return 0;
+        GetIdentity(tsd)->IsGangsterParadise = false;
+        return 0;
+    });
+}
+
+void ROWOWMod::UpdateSkillSit(Player* sd)
+{
+    // clif_parse_ActionRequest's sit and stand (and the other ways a player sits or stands: a vendor, a hit, death), from the player's update
+    ROWOWIdentity* identity = GetIdentity(sd);
+    bool sitting = sd->IsSitState();
+    if (sitting == identity->IsSitting)
+        return;
+    identity->IsSitting = sitting;
+    SkillSit(sd, sitting);
+}
+
+bool ROWOWMod::MobCanTarget(Creature const* md, Unit const* target) const
+{
+    // mob_ai_sub_hard_activesearch and mob_ai_sub_hard's target checks: a Rogue in Gangster's Paradise isn't a target for a monster that isn't
+    // status immune
+    ROWOWStatus const* status = GetROStatus(md);
+    if (status == nullptr || target == nullptr || target->IsPlayer() == false)
+        return true;
+    ROWOWIdentity const* identity = target->ToPlayer()->CustomData.Get<ROWOWIdentity>("ROWOWIdentity");
+    if (identity != nullptr && identity->IsInForm == true && identity->IsGangsterParadise == true && (status->Mode & ROWOW_MODE_STATUS_IMMUNE) == 0)
+        return false; // Gangster paradise protection.
+    return true;
+}
+
+void ROWOWMod::ClifGraffiti(Map* map, ROWOWSkillUnitGroup& group)
+{
+    // clif_graffiti: RO writes the message on the ground, which the WoW client can't, so each player gets it as a message once the Graffiti
+    // comes into its view (area_size cells around it), and again when it comes back into view
+    if (group.Units.empty() == true || group.Units[0].IsAlive == false)
+        return;
+    ROWOWSkillUnit const& unit = group.Units[0];
+    std::vector<ObjectGuid> viewerGUIDs;
+    MapForEachInCellArea(map, PHASEMASK_NORMAL, unit.X - BattleConfig.AreaSize, unit.Y - BattleConfig.AreaSize, unit.X + BattleConfig.AreaSize,
+        unit.Y + BattleConfig.AreaSize, [&group, &viewerGUIDs](Unit* bl)
+    {
+        Player* sd = bl->ToPlayer();
+        if (sd == nullptr)
+            return 0;
+        viewerGUIDs.push_back(sd->GetGUID());
+        if (std::find(group.ViewerGUIDs.begin(), group.ViewerGUIDs.end(), sd->GetGUID()) == group.ViewerGUIDs.end())
+            ChatHandler(sd->GetSession()).PSendSysMessage("Graffiti: {}", group.ValStr);
+        return 0;
+    });
+    group.ViewerGUIDs = viewerGUIDs;
 }

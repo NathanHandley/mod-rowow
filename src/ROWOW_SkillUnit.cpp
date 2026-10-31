@@ -1340,6 +1340,13 @@ int32 ROWOWMod::SkillUnitOnPlaceTimer(Map* map, ROWOWSkillUnitGroup& group, int3
             SkillAttack(ROWOW_BF_WEAPON, ss, ss, bl, skillID, group.SkillLevel, tick, 0, &unit);
             break;
 
+        case ROWOW_UNT_VENOMDUST:
+            // Poison on whoever stands in the dust and isn't poisoned yet
+            if (GetSCE(bl, skill->StatusID) == nullptr)
+                StatusChangeStart(ss, bl, skill->StatusID, 10000, group.SkillLevel, int32(ss->GetGUID().GetCounter()), 0, 0,
+                    SkillGetTime2(skillID, group.SkillLevel), ROWOW_SCSTART_NONE);
+            break;
+
         case ROWOW_UNT_DUMMYSKILL:
             // (Star Gladiator's warmth, Desperado and the NPC skills come with their jobs.)  A Grand Cross cell hits as many times as its val1
             // (its caster too), and the unit timer takes the spent cell away
@@ -1863,6 +1870,9 @@ void ROWOWMod::SkillUnitTimer(Map* map, uint32 /*diff*/)
             SkillDelUnitGroup(map, group);
             continue;
         }
+        // clif_getareachar_skillunit: a Graffiti shows its message to the players it comes into view of
+        if (group->UnitID == ROWOW_UNT_GRAFFITI)
+            ClifGraffiti(map, *group);
         for (int32 index = 0; index < int32(group->Units.size()); index++)
         {
             if (mapUnits->GroupsByID.find(group->GroupID) == mapUnits->GroupsByID.end())

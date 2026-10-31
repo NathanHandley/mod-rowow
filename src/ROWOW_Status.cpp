@@ -328,6 +328,8 @@ void ROWOWMod::LoadStatusData()
         readValue("alchemist_summon_reward", BattleConfig.AlchemistSummonReward);
         readValue("skill_add_heal_rate", BattleConfig.SkillAddHealRate);
         readValue("first_attack_loot_bonus", BattleConfig.FirstAttackLootBonus);
+        readValue("backstab_bow_penalty", BattleConfig.BackstabBowPenalty);
+        readValue("switch_remove_edp", BattleConfig.SwitchRemoveEdp);
         BattleConfig.MultiLevelUp = multiLevelUp != 0;
         BattleConfig.MaxAspdAmotion = (2000 - maxAspd * 10) * 2; // As battle.cpp converts it after loading
     }

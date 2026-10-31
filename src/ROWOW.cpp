@@ -200,6 +200,13 @@ uint8 ROWOWMod::GetRODirection(float deltaX, float deltaY)
     return 1;
 }
 
+int32 ROWOWMod::MapCheckDir(int32 sDir, int32 tDir)
+{
+    // map_check_dir: whether tDir is off sDir by more than one of the eight directions (each direction's two neighbours count as it)
+    int32 difference = ((tDir - sDir) % ROWOW_RO_DIRECTION_COUNT + ROWOW_RO_DIRECTION_COUNT) % ROWOW_RO_DIRECTION_COUNT;
+    return (difference == 0 || difference == 1 || difference == ROWOW_RO_DIRECTION_COUNT - 1) ? 0 : 1;
+}
+
 ROWOWCreatureTemplate const* ROWOWMod::GetCreatureTemplate(uint32 creatureEntry) const
 {
     auto creatureTemplateIter = CreatureTemplatesByEntry.find(creatureEntry);
