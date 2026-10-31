@@ -1151,6 +1151,9 @@ void ROWOWMod::SkillCastEnd(Unit* src, Unit* target, WorldLocation const* dest, 
                     SCStart(src, src, ROWOW_SC_ANKLE, 100, 0, time);
                 break;
             }
+            case ROWOW_SKILL_GS_DESPERADO:
+                GetIdentity(sd)->CanEquipTick = tick + uint64(std::max<int64>(0, SkillGetTime(skillID, skillLevel)));
+                break;
         }
     }
     // (unit_set_walkdelay: WoW's movement isn't held after a cast)
@@ -1441,7 +1444,7 @@ bool ROWOWMod::SkillCheckConditionCastBegin(Player* sd, uint16 skillID, uint16 s
                 PartyForEachSameMap(sd, 0, [this, neededJobID, &isInParty](Unit* member)
                 {
                     Player* memberPlayer = member->ToPlayer();
-                    if (memberPlayer != nullptr && IsInROForm(memberPlayer) == true && GetIdentity(memberPlayer)->JobID == neededJobID)
+                    if (memberPlayer != nullptr && IsInROForm(memberPlayer) == true && GetNonBabyJobID(GetIdentity(memberPlayer)->JobID) == neededJobID)
                         isInParty = true;
                     return 0;
                 });

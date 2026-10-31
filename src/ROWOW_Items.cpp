@@ -307,7 +307,12 @@ void ROWOWMod::LoadItemScriptData()
     registerParameter("BaseExp", [](Player*, ROWOWIdentity& identity) { return int64(identity.BaseExp); });
     registerParameter("JobExp", [](Player*, ROWOWIdentity& identity) { return int64(identity.JobExp); });
     registerParameter("Class", [](Player*, ROWOWIdentity& identity) { return int64(identity.JobID); });
-    registerParameter("Upper", [this](Player*, ROWOWIdentity& identity) { ROWOWJob const* job = GetJob(identity.JobID); return int64(job != nullptr && job->IsUpper == true ? 1 : 0); });
+    registerParameter("Upper", [this](Player*, ROWOWIdentity& identity)
+    {
+        // 1 transcendent, 2 Baby
+        ROWOWJob const* job = GetJob(identity.JobID);
+        return int64(job == nullptr ? 0 : (job->IsUpper == true ? 1 : (job->IsBaby == true ? 2 : 0)));
+    });
     registerParameter("Sex", [](Player* player, ROWOWIdentity&) { return int64(player->getGender() == GENDER_MALE ? ROWOW_GENDER_MALE : ROWOW_GENDER_FEMALE); });
     registerParameter("Zeny", [](Player* player, ROWOWIdentity&) { return int64(player->GetMoney()); });
     registerParameter("Hp", [](Player* player, ROWOWIdentity&) { return int64(player->GetHealth()); });
@@ -728,7 +733,7 @@ uint8 ROWOWMod::PCIsEquip(Player* player, ROWOWIdentity const& identity, Item co
     ROWOWJob const* job = GetJob(identity.JobID);
     if (job == nullptr || job->ItemJobIndex < 0 || (roItem->JobMask & (uint64(1) << job->ItemJobIndex)) == 0)
         return ROWOW_EQUIP_ACK_FAIL;
-    if ((roItem->ClassMask & (job->IsUpper == true ? ROWOW_ITEM_CLASS_UPPER : ROWOW_ITEM_CLASS_NORMAL)) == 0)
+    if ((roItem->ClassMask & GetItemClassMask(*job)) == 0)
         return ROWOW_EQUIP_ACK_FAIL;
     return ROWOW_EQUIP_ACK_OK;
 }
@@ -767,6 +772,11 @@ bool ROWOWMod::PCEquipItem(Player* player, Item* item, int32 reqPos)
     }
     if ((pos & reqPos) == 0 || GetIdentityEquipPosition(*identity, item->GetGUID().GetCounter()) != 0)
         return false;
+    if (identity->CanEquipTick > GetTick())
+    {
+        SendItemMessage(player, "You can't put this item on.");
+        return false;
+    }
 
     // pc_isequip's statuses: a stripped place can't be dressed again until its strip ends.  (Not in PCIsEquip, which PCCheckItem asks too:
     // rAthena's pc_checkitem doesn't take off what these forbid, so Brandish Spear's own SC_STRIPWEAPON leaves the spear in hand)
@@ -815,6 +825,7 @@ bool ROWOWMod::PCEquipItem(Player* player, Item* item, int32 reqPos)
     }
 
     RefreshROForm(player);
+    PCCheckAllowSkill(player); // Check if status changes should be halted (with the new weapon's status)
 
     // The item's EquipScript, then its cards'
     RunItemScript(player, roItem->EquipScript.get(), item);
@@ -878,8 +889,45 @@ bool ROWOWMod::PCUnequipItem(Player* player, uint32 equipPosition, int32 flag)
     if ((pos & ROWOW_EQUIP_POSITION_HAND_R) != 0 && (BattleConfig.SwitchRemoveEdp & 1) != 0)
         StatusChangeEnd(player, ROWOW_SC_EDP);
     if ((flag & 1) != 0)
+    {
         RefreshROForm(player);
+        if ((flag & 4) == 0)
+            PCCheckAllowSkill(player); // With the status the item no longer gives
+    }
     return true;
+}
+
+void ROWOWMod::PCCheckAllowSkill(Player* player)
+{
+    // pc_checkallowskill: the statuses of skills needing a weapon type (a dance needs its instrument or whip, with dancing_weaponswitch_fix),
+    // no weapon, or a shield end when the equipment no longer has it.  Defender only needs a shield on a Crusader
+    ROWOWStatusChange const* sc = GetStatusChange(static_cast<Unit const*>(player));
+    ROWOWStatus const* status = GetROStatus(player);
+    if (sc == nullptr || sc->IsEmpty() == true || status == nullptr)
+        return;
+    ROWOWItem const* shield = GetROItem(GetIdentityEquippedItem(player, ROWOW_EQUIP_POSITION_HAND_L));
+    bool hasShield = shield != nullptr && shield->IsArmor == true;
+    ROWOWJob const* job = GetJob(GetIdentity(player)->JobID);
+    bool isCrusader = job != nullptr && strcmp(job->ItemJobIndex >= 0 ? ROWOWItemJobNames[job->ItemJobIndex] : "", "Crusader") == 0; // MAPID_CRUSADER
+    std::vector<int32> types;
+    for (auto const& statusByType : StatusChangeDBsByType)
+    {
+        ROWOWStatusChangeDB const& scdb = statusByType.second;
+        if (sc->HasSCE(scdb.Type) == false)
+            continue;
+        if (scdb.Flag.test(ROWOW_SCF_REQUIREWEAPON) == true && (scdb.Type != ROWOW_SC_DANCING || BattleConfig.DancingWeaponSwitchFix != 0))
+        {
+            ROWOWSkill const* skill = GetSkill(scdb.SkillID);
+            if (skill != nullptr && skill->RequiredWeapons != 0 && PCCheckWeaponType(player, skill->RequiredWeapons) == false)
+                types.push_back(scdb.Type);
+        }
+        if (scdb.Flag.test(ROWOW_SCF_REQUIRENOWEAPON) == true && status->RightWeaponType != ROWOW_WEAPON_TYPE_FIST)
+            types.push_back(scdb.Type);
+        if (scdb.Flag.test(ROWOW_SCF_REQUIRESHIELD) == true && (scdb.Type != ROWOW_SC_DEFENDER || isCrusader == true) && hasShield == false)
+            types.push_back(scdb.Type);
+    }
+    for (int32 type : types)
+        StatusChangeEnd(player, type);
 }
 
 bool ROWOWMod::PCCheckItem(Player* player, ROWOWIdentity& identity)
@@ -976,7 +1024,7 @@ bool ROWOWMod::PCIsUseItem(Player* player, Item const* item, bool isReporting)
     ROWOWJob const* job = GetJob(identity->JobID);
     if ((roItem->Gender != ROWOW_GENDER_BOTH && roItem->Gender != gender) || (roItem->EquipLevelMin != 0 && identity->BaseLevel < roItem->EquipLevelMin)
         || (roItem->EquipLevelMax != 0 && identity->BaseLevel > roItem->EquipLevelMax) || job == nullptr || job->ItemJobIndex < 0
-        || (roItem->JobMask & (uint64(1) << job->ItemJobIndex)) == 0 || (roItem->ClassMask & (job->IsUpper == true ? ROWOW_ITEM_CLASS_UPPER : ROWOW_ITEM_CLASS_NORMAL)) == 0)
+        || (roItem->JobMask & (uint64(1) << job->ItemJobIndex)) == 0 || (roItem->ClassMask & GetItemClassMask(*job)) == 0)
     {
         if (isReporting == true)
             SendItemMessage(player, "You can't use this item.");

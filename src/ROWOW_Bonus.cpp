@@ -164,11 +164,13 @@ namespace
         return index >= 0 && index < maxIndex;
     }
 
-    // The first job of a job's line (BaseClass) and the job without its transcendence (BaseJob)
+    // The first job of a job's line (BaseClass) and the job without its transcendence or Baby (BaseJob)
     uint16 GetBaseJobID(uint16 jobID)
     {
         if (jobID >= ROWOW_JOB_UPPER_START && jobID <= ROWOW_JOB_UPPER_END)
             return uint16(jobID - ROWOW_JOB_UPPER_START);
+        if (jobID >= ROWOW_JOB_BABY && jobID <= ROWOW_JOB_SUPER_BABY)
+            return ROWOW->GetNonBabyJobID(jobID);
         if (jobID == 4048) // Star_Gladiator2
             return 4047;
         return jobID;

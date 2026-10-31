@@ -45,6 +45,10 @@ class ROWOW_SkillSpellScript : public SpellScript
         ROWOWSkillUnitData const* ud = casterOut->CustomData.Get<ROWOWSkillUnitData>("ROWOWSkillUnitData");
         if (ud != nullptr && ud->IsSkillLookCast == true)
             return false;
+        // A player's passive skill is known, never used: WoW casts a passive spell on its player when it's learned (its aura), which isn't the
+        // skill.  (Double Attack, Chain Action and Triple Attack have a weapon attack for monsters, which aimed at its own caster hit the player)
+        if (GetSpellInfo()->IsPassive() == true && casterOut->IsPlayer() == true)
+            return false;
         ROWOWSkill const* skill = ROWOW->GetSkill(skillIDOut);
         targetOut = GetExplTargetUnit();
         Unit* pickedTarget = targetOut;

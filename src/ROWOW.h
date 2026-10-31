@@ -207,6 +207,12 @@ struct ROWOWDataTable
 #define ROWOW_JOB_SOUL_LINKER                       4049
 #define ROWOW_JOB_UPPER_START                       4001    // Novice_High, the first transcendent job
 #define ROWOW_JOB_UPPER_END                         4022    // Paladin2, the last
+#define ROWOW_JOB_BABY                              4023    // The Baby Novice
+#define ROWOW_JOB_BABY_ACOLYTE                      4027
+#define ROWOW_JOB_BABY_MONK                         4038
+#define ROWOW_JOB_BABY_BARD                         4042
+#define ROWOW_JOB_BABY_DANCER                       4043
+#define ROWOW_JOB_SUPER_BABY                        4045
 
 // RO equipment positions (rAthena's EQP_* bits, which item_db's Locations and start_items_pre use)
 #define ROWOW_EQUIP_POSITION_HEAD_LOW               0x0001
@@ -405,6 +411,8 @@ struct ROWOWJob
     std::string Name; // rAthena's (like Swordman_High), the job database's key
     std::string IllusionJobKey; // The RO illusion of the job (mod_rowow_illusion JobKey, like swordman)
     bool IsUpper = false; // Transcendent (rAthena's JOBL_UPPER)
+    bool IsBaby = false; // A Baby job (rAthena's JOBL_BABY)
+    uint16 NormalJobID = 0; // A Baby job's job (its class_ less JOBL_BABY: Baby_Monk's Monk), the job itself for the others
     uint32 MaxBaseLevel = 99;
     uint32 MaxJobLevel = 10;
     std::vector<uint32> BaseHPByLevel; // Index is the base level less 1
@@ -569,6 +577,8 @@ struct ROWOWBattleConfig
     int32 MaxAspdAmotion = 200; // max_aspd as rAthena keeps it once loaded: the shortest attack delay (2000 - max_aspd * 10) * 2
     int32 MaxParameter = 99;
     int32 MaxTransParameter = 99;
+    int32 MaxBabyParameter = 80;
+    int32 DancingWeaponSwitchFix = 1;
     int32 MaxDef = 99;
     int32 OverDefBonus = 0;
     int32 WeaponDefenseType = 0;
@@ -991,6 +1001,7 @@ struct ROWOWIdentity : public DataMap::Base
     std::string SentCardsMessage; // ... and of the cards in the bags' items
     uint32 EquipmentCheckTimer = 0;
     uint32 CanUseItemTime = 0; // canuseitem_tick: when the next item can be used (game time, milliseconds)
+    uint64 CanEquipTick = 0; // canequip_tick: no equipment goes on before it (Desperado), in the skill engine's ticks
     std::unordered_map<uint32, uint32> ItemDelayEndTimes; // By item_db Id: when each item with a reuse delay can be used again
     bool IsIdentifyMenuOpen = false; // A Magnifier's list of items to appraise is up (menuskill_id MC_IDENTIFY)
     std::map<uint16, uint16> SkillLevelsByID; // The skills learned (mod_rowow_identity_skill), and their levels
@@ -1023,7 +1034,6 @@ struct ROWOWIdentity : public DataMap::Base
     uint64 InvincibleEndTime = 0; // invincible_timer: no monster or skill targets it until then (after arriving on a map or reviving), 0 for none
     float InvinciblePositionX = 0; // Where it stood when it got it, which moving away from ends it
     float InvinciblePositionY = 0;
-    bool IsInvincibleSet = false; // The WoW state standing for it is set (immune to NPCs)
     bool IsSitting = false; // pc_issit as skill_sit last saw it (sitting down and standing up, from the player's update)
     bool IsGangsterParadise = false; // state.gangsterparadise: sitting by another sitting Rogue, monsters leave it alone
     bool IsTaekwonRest = false; // state.rest: a Taekwon sitting with another (Peaceful Break, Happy Break's regen)
@@ -1196,6 +1206,9 @@ public:
     static uint64 GetIllusionJobKey(std::string const& jobKey, bool isMale);
     static std::string GetJobNameKey(std::string const& jobName); // A job name as rAthena matches it (Super_Novice is also Supernovice)
     ROWOWJob const* GetJob(uint16 jobID) const;
+    uint16 GetNonBabyJobID(uint16 jobID) const; // The job less JOBL_BABY (Baby_Monk's Monk, the job itself for the others)
+    uint16 GetBabyJobID(uint16 normalJobID) const; // The Baby job of a normal job (Monk's Baby_Monk), 0 for none
+    static uint8 GetItemClassMask(ROWOWJob const& job); // pc_isItemClass's class_upper bit of a job (ROWOW_ITEM_CLASS_*)
     uint32 GetMapIDByMapName(std::string const& mapName) const;
     bool IsROItemTemplate(uint32 itemTemplateID) const { return ItemTemplateIDs.find(itemTemplateID) != ItemTemplateIDs.end(); }
 
@@ -1397,6 +1410,7 @@ public:
     int32 SkillAreaSub(Unit* bl, Unit* src, uint16 skillID, uint16 skillLevel, uint64 tick, int32 flag, ROWOWSkillAreaFunc func); // skill_area_sub
     int32 PartyForEachSameMap(Player* sd, int32 range, std::function<int32(Unit*)> const& func) const; // party_foreachsamemap (ROWOW_Skills.cpp)
     bool PCCheckWeaponType(Unit const* unit, uint32 weapons) const; // pc_check_weapontype: whether the player holds one of the weapon types
+    void PCCheckAllowSkill(Player* player); // pc_checkallowskill: ends the statuses the equipment worn no longer allows
     ROWOWSkillCondition SkillGetRequirement(Player* sd, uint16 skillID, uint16 skillLevel) const; // skill_get_requirement
     bool SkillCheckConditionCastBegin(Player* sd, uint16 skillID, uint16 skillLevel); // skill_check_condition_castbegin
     bool SkillCheckConditionCastEnd(Player* sd, uint16 skillID, uint16 skillLevel); // skill_check_condition_castend

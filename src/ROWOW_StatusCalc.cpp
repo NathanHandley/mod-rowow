@@ -945,7 +945,7 @@ void ROWOWMod::StatusCalcRegenRate(Player const* sd, ROWOWStatusChange const* sc
     // No natural SP regen: a Monk's (or Champion's) Fury and Asura Strike stop it, but with the Monk spirit
     ROWOWStatusChangeEntry const* spirit = sc->GetSCE(ROWOW_SC_SPIRIT);
     ROWOWIdentity const* identity = sd != nullptr ? sd->CustomData.Get<ROWOWIdentity>("ROWOWIdentity") : nullptr;
-    bool isMonk = identity != nullptr && (identity->JobID == ROWOW_JOB_MONK || identity->JobID == ROWOW_JOB_CHAMPION);
+    bool isMonk = identity != nullptr && (GetNonBabyJobID(identity->JobID) == ROWOW_JOB_MONK || identity->JobID == ROWOW_JOB_CHAMPION);
     if (sc->HasSCE(ROWOW_SC_DANCING) == true || sc->HasSCE(ROWOW_SC_MAXIMIZEPOWER) == true ||
         (isMonk == true && (sc->HasSCE(ROWOW_SC_EXTREMITYFIST) == true || sc->HasSCE(ROWOW_SC_EXPLOSIONSPIRITS) == true) &&
         (spirit == nullptr || spirit->Val2 != ROWOW_SKILL_SL_MONK)) ||

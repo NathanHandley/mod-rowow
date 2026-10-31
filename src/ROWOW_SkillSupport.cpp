@@ -327,11 +327,7 @@ void ROWOWMod::PCSetInvincibleTimer(Player* player)
     identity->InvincibleEndTime = GetTick() + uint64(BattleConfig.PCInvincibleTime);
     identity->InvinciblePositionX = player->GetPositionX();
     identity->InvinciblePositionY = player->GetPositionY();
-    if (player->IsImmuneToNPC() == false)
-    {
-        player->SetImmuneToNPC(true);
-        identity->IsInvincibleSet = true;
-    }
+    player->SetImmuneToNPC(true); // Nothing else makes a player in the form immune to NPCs, so its end always takes it off
 }
 
 void ROWOWMod::PCDelInvincibleTimer(Player* player)
@@ -341,11 +337,7 @@ void ROWOWMod::PCDelInvincibleTimer(Player* player)
     if (identity == nullptr || identity->InvincibleEndTime == 0)
         return;
     identity->InvincibleEndTime = 0;
-    if (identity->IsInvincibleSet == true)
-    {
-        player->SetImmuneToNPC(false);
-        identity->IsInvincibleSet = false;
-    }
+    player->SetImmuneToNPC(false);
     std::vector<uint16> skillUnitCell;
     int32 x = 0, y = 0;
     GetUnitCell(player, x, y);
@@ -1184,7 +1176,7 @@ int32 ROWOWMod::SkillCheckPCPartner(Player* sd, uint16 skillID, uint16& skillLev
             uint8 dir = GetRODirection(float(tsdX - sdX), float(tsdY - sdY));
             dir = (UnitGetDir(sd) + dir) % ROWOW_RO_DIRECTION_COUNT; // This adjusts dir to account for the direction the sd is facing.
             ROWOWJob const* job = GetJob(GetIdentity(tsd)->JobID);
-            bool isAcolyte = job != nullptr && (job->JobID == ROWOW_JOB_ACOLYTE || job->JobID == ROWOW_JOB_ACOLYTE_HIGH || job->FirstJobID == ROWOW_JOB_ACOLYTE);
+            bool isAcolyte = job != nullptr && (job->NormalJobID == ROWOW_JOB_ACOLYTE || job->JobID == ROWOW_JOB_ACOLYTE_HIGH || job->FirstJobID == ROWOW_JOB_ACOLYTE);
             if (isAcolyte == true && (dir == 2 || dir == 6) && sd->GetPower(POWER_MANA) >= 10) // Must be standing to the left/right of Priest.
                 ud->PartnerGUIDs.push_back(tsd->GetGUID());
             return 1;
@@ -1210,7 +1202,7 @@ int32 ROWOWMod::SkillCheckPCPartner(Player* sd, uint16 skillID, uint16& skillLev
 
 bool ROWOWMod::PCIsBardDancer(Unit const* unit) const
 {
-    // (class_&MAPID_SECONDMASK) == MAPID_BARDDANCER: a Bard or Dancer, normal or transcendent (Clown, Gypsy)
+    // (class_&MAPID_SECONDMASK) == MAPID_BARDDANCER: a Bard or Dancer, normal, transcendent (Clown, Gypsy) or Baby
     if (unit == nullptr || unit->IsPlayer() == false)
         return false;
     ROWOWIdentity const* identity = unit->ToPlayer()->CustomData.Get<ROWOWIdentity>("ROWOWIdentity");
@@ -1222,6 +1214,8 @@ bool ROWOWMod::PCIsBardDancer(Unit const* unit) const
         case ROWOW_JOB_DANCER:
         case ROWOW_JOB_CLOWN:
         case ROWOW_JOB_GYPSY:
+        case ROWOW_JOB_BABY_BARD:
+        case ROWOW_JOB_BABY_DANCER:
             return true;
     }
     return false;
@@ -2016,7 +2010,7 @@ void ROWOWMod::PCSetDieCounter(Player* sd, int64 value)
     if (GetIdentityVariable(identity, ROWOW_PCDIECOUNTER_VAR) == value)
         return;
     SetIdentityVariable(identity, ROWOW_PCDIECOUNTER_VAR, value);
-    if (identity.JobID == ROWOW_JOB_SUPER_NOVICE && identity.IsInForm == true)
+    if (GetNonBabyJobID(identity.JobID) == ROWOW_JOB_SUPER_NOVICE && identity.IsInForm == true)
         RefreshROForm(sd);
 }
 
@@ -2070,7 +2064,7 @@ void ROWOWMod::PartySkillCheck(Player* sd, uint16 skillID, uint16 skillLevel)
         switch (skillID)
         {
             case ROWOW_SKILL_TK_COUNTER: // Increase Triple Attack rate of Monks.
-                if ((jobID == ROWOW_JOB_MONK || jobID == ROWOW_JOB_CHAMPION) && PCCheckSkill(pSD, ROWOW_SKILL_MO_TRIPLEATTACK) > 0)
+                if ((jobID == ROWOW_JOB_MONK || jobID == ROWOW_JOB_CHAMPION || jobID == ROWOW_JOB_BABY_MONK) && PCCheckSkill(pSD, ROWOW_SKILL_MO_TRIPLEATTACK) > 0)
                     SCStart4(pSD, pSD, ROWOW_SC_SKILLRATE_UP, 100, ROWOW_SKILL_MO_TRIPLEATTACK, 50 + 50 * skillLevel, 0, 0, SkillGetTime(ROWOW_SKILL_SG_FRIEND, 1)); // +100/150/200% rate
                 break;
             case ROWOW_SKILL_MO_COMBOFINISH: // Increase Counter rate of Star Gladiators
@@ -2109,7 +2103,7 @@ bool ROWOWMod::StatusDamageRevive(Unit* bl)
         return true;
     }
     // Activate Steel body if a super novice dies at 99+% exp [celest]
-    if (identity->IsSuperNoviceDeadFlag == false && identity->JobID == ROWOW_JOB_SUPER_NOVICE)
+    if (identity->IsSuperNoviceDeadFlag == false && GetNonBabyJobID(identity->JobID) == ROWOW_JOB_SUPER_NOVICE)
     {
         uint64 exp = PCNextBaseExp(*identity);
         if (exp != 0 && identity->BaseExp * 100 / exp >= 99)
@@ -2135,7 +2129,7 @@ void ROWOWMod::PCSuperNoviceCall(Player* sd, std::string const& message)
     // Please~ T_T" in turn (the client's own msgstringtable lines, which it turns into CZ_CHOPOKGI); at a round 10% of its base exp the angel
     // answers with Fury (clif_parse_NoviceExplosionSpirits: SC_EXPLOSIONSPIRITS at 17, +50 critical)
     ROWOWIdentity* identity = GetIdentity(sd);
-    if (identity->IsInForm == false || identity->JobID != ROWOW_JOB_SUPER_NOVICE)
+    if (identity->IsInForm == false || GetNonBabyJobID(identity->JobID) != ROWOW_JOB_SUPER_NOVICE)
         return;
     switch (identity->SuperNoviceCallFlag)
     {
@@ -2170,7 +2164,7 @@ void ROWOWMod::PCLevelUpAngel(Player* sd)
     // level 10 for 10 minutes
     ROWOWIdentity* identity = GetIdentity(sd);
     ROWOWJob const* job = GetJob(identity->JobID);
-    bool isSuperNovice = identity->JobID == ROWOW_JOB_SUPER_NOVICE;
+    bool isSuperNovice = GetNonBabyJobID(identity->JobID) == ROWOW_JOB_SUPER_NOVICE;
     bool isTaekwon = job != nullptr && (job->JobID == ROWOW_JOB_TAEKWON || job->FirstJobID == ROWOW_JOB_TAEKWON);
     if (isSuperNovice == false && isTaekwon == false)
         return;

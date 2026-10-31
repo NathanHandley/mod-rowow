@@ -724,9 +724,11 @@ uint16 ROWOWMod::PCCalcSkillTreeNormalizeJob(ROWOWIdentity const& identity) cons
     if (normalizedJobID == identity.JobID)
         return identity.JobID;
 
-    // The special masks: a transcendent job's tree stays transcendent where there is one
+    // The special masks: a transcendent job's tree stays transcendent where there is one, and a Baby's stays a Baby's
     if (job->IsUpper == true && GetJob(GetUpperJobID(normalizedJobID)) != nullptr)
         return GetUpperJobID(normalizedJobID);
+    if (job->IsBaby == true && GetBabyJobID(normalizedJobID) != 0)
+        return GetBabyJobID(normalizedJobID);
     return normalizedJobID;
 }
 
@@ -796,7 +798,7 @@ void ROWOWMod::PCCalcSkillTree(ROWOWIdentity& identity) const
         static std::pair<uint16, uint16> const linkedSkills[] = { { ROWOW_SKILL_BA_WHISTLE, ROWOW_SKILL_DC_HUMMING },
             { ROWOW_SKILL_BA_ASSASSINCROSS, ROWOW_SKILL_DC_DONTFORGETME }, { ROWOW_SKILL_BA_POEMBRAGI, ROWOW_SKILL_DC_FORTUNEKISS },
             { ROWOW_SKILL_BA_APPLEIDUN, ROWOW_SKILL_DC_SERVICEFORYOU } };
-        bool isMale = identity.JobID == ROWOW_JOB_BARD || identity.JobID == ROWOW_JOB_CLOWN;
+        bool isMale = identity.JobID == ROWOW_JOB_BARD || identity.JobID == ROWOW_JOB_CLOWN || identity.JobID == ROWOW_JOB_BABY_BARD;
         for (auto const& skill : linkedSkills)
         {
             if (PCCheckSkill(identity, isMale == true ? skill.first : skill.second) < 10)
@@ -892,19 +894,22 @@ void ROWOWMod::PCJobChange(Player* player, uint16 jobID)
 std::vector<uint16> ROWOWMod::GetSkillTreeJobIDs(uint16 jobID) const
 {
     // The skill window's tabs: Novice, the first job, a transcendent second job's normal one, and the job (Lord_Knight: Novice, Swordman,
-    // Knight, Lord_Knight; Swordman_High: Novice_High, Swordman_High).  The Taekwon jobs, Gunslinger and Ninja come after Novice
+    // Knight, Lord_Knight; Swordman_High: Novice_High, Swordman_High; Baby_Knight: Baby, Baby_Swordman, Baby_Knight).  The Taekwon jobs,
+    // Gunslinger and Ninja come after Novice
     std::vector<uint16> jobIDs;
     ROWOWJob const* job = GetJob(jobID);
     if (job == nullptr)
         return jobIDs;
     bool isUpper = job->IsUpper == true && GetNormalJobID(jobID) != jobID;
-    uint16 noviceJobID = isUpper == true ? ROWOW_JOB_NOVICE_HIGH : ROWOW_JOB_NOVICE;
+    uint16 noviceJobID = isUpper == true ? ROWOW_JOB_NOVICE_HIGH : (job->IsBaby == true ? ROWOW_JOB_BABY : ROWOW_JOB_NOVICE);
     jobIDs.push_back(noviceJobID);
     if (job->FirstJobID >= 0)
     {
         uint16 firstJobID = uint16(job->FirstJobID);
         if (isUpper == true && GetJob(GetUpperJobID(firstJobID)) != nullptr)
             firstJobID = GetUpperJobID(firstJobID);
+        else if (job->IsBaby == true && GetBabyJobID(firstJobID) != 0)
+            firstJobID = GetBabyJobID(firstJobID);
         jobIDs.push_back(firstJobID);
         if (isUpper == true)
             jobIDs.push_back(GetNormalJobID(jobID));

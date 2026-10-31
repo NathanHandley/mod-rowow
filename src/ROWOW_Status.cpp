@@ -213,6 +213,8 @@ void ROWOWMod::LoadStatusData()
         readValue("max_aspd", maxAspd);
         readValue("max_parameter", BattleConfig.MaxParameter);
         readValue("max_trans_parameter", BattleConfig.MaxTransParameter);
+        readValue("max_baby_parameter", BattleConfig.MaxBabyParameter);
+        readValue("dancing_weaponswitch_fix", BattleConfig.DancingWeaponSwitchFix);
         readValue("max_def", BattleConfig.MaxDef);
         readValue("over_def_bonus", BattleConfig.OverDefBonus);
         readValue("weapon_defense_type", BattleConfig.WeaponDefenseType);
@@ -593,6 +595,7 @@ void ROWOWMod::CalculateIdentityStatus(Player* player, ROWOWIdentity& identity) 
     status.Level = identity.BaseLevel;
     status.Mode = ROWOW_MODE_PC;
     ROWOWJob const* job = GetJob(identity.JobID);
+    status.Size = (job != nullptr && job->IsBaby == true) ? ROWOW_SIZE_SMALL : ROWOW_SIZE_MEDIUM; // (character_size is 0: riding changes nothing)
 
     // The worn items, their refine, scripts and cards, the ammo and the item combos, then the statuses' scripts (StatusCalcPCItems)
     StatusCalcPCItems(player, identity, status);
@@ -628,7 +631,7 @@ void ROWOWMod::CalculateIdentityStatus(Player* player, ROWOWIdentity& identity) 
         skillStats[ROWOW_STAT_INT] += (skill + 1) / 2; // +1 INT / 2 lv
     if ((skill = PCCheckSkill(identity, ROWOW_SKILL_AC_OWL)) > 0)
         skillStats[ROWOW_STAT_DEX] += skill;
-    if (identity.JobID == ROWOW_JOB_SUPER_NOVICE && identity.JobLevel >= 70 && GetIdentityVariable(identity, ROWOW_PCDIECOUNTER_VAR) == 0)
+    if (GetNonBabyJobID(identity.JobID) == ROWOW_JOB_SUPER_NOVICE && identity.JobLevel >= 70 && GetIdentityVariable(identity, ROWOW_PCDIECOUNTER_VAR) == 0)
         for (int32& skillStat : skillStats)
             skillStat += 10;
     for (uint8 statIndex = 0; statIndex < ROWOW_STAT_COUNT; statIndex++)
@@ -993,8 +996,10 @@ void ROWOWMod::StatusCalcRegen(Unit const* unit, ROWOWStatus& status) const
 
 int32 ROWOWMod::PCMaxParameter(ROWOWIdentity const& identity) const
 {
-    // pc_maxparameter, for the pre-renewal jobs (no baby or third jobs here)
+    // pc_maxparameter, for the pre-renewal jobs (Babies first; no third jobs here)
     ROWOWJob const* job = GetJob(identity.JobID);
+    if (job != nullptr && job->IsBaby == true)
+        return BattleConfig.MaxBabyParameter;
     return (job != nullptr && job->IsUpper == true) ? BattleConfig.MaxTransParameter : BattleConfig.MaxParameter;
 }
 
@@ -1218,11 +1223,11 @@ bool ROWOWMod::PCCheckJobLevelUp(Player* player)
 void ROWOWMod::PCDeadPenalty(Player* player)
 {
     // The exp penalty of pc_dead: a share of the exp to the next level (death_penalty_type 1) or of the exp held (2), in hundredths of a
-    // percent.  Novices (and Novice Highs) never lose exp, nor does anyone on a nopenalty map
+    // percent.  Novices (Novice Highs and Babies too) never lose exp, nor does anyone on a nopenalty map
     ROWOWIdentity* identity = GetIdentity(player);
     if (identity->IsInForm == false || BattleConfig.DeathPenaltyType == 0)
         return;
-    if (identity->JobID == ROWOW_JOB_NOVICE || identity->JobID == ROWOW_JOB_NOVICE_HIGH)
+    if (GetNonBabyJobID(identity->JobID) == ROWOW_JOB_NOVICE || identity->JobID == ROWOW_JOB_NOVICE_HIGH)
         return;
     if (NoPenaltyMapIDs.find(player->GetMapId()) != NoPenaltyMapIDs.end())
         return;

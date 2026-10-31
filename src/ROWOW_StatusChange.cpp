@@ -856,7 +856,7 @@ bool ROWOWMod::StatusChangeStartPostDelay(Unit* src, Unit* bl, int32 type, int32
             if (sd == nullptr)
                 return false; // Status change is only applicable for players
             ROWOWIdentity const* identity = GetIdentity(sd);
-            int32 jobID = identity->JobID;
+            int32 jobID = GetNonBabyJobID(identity->JobID); // MAPID_SECONDMASK leaves out JOBL_BABY: a Baby is linked as its job
             int32 secondJobID = jobID >= ROWOW_JOB_UPPER_START && jobID <= ROWOW_JOB_UPPER_END ? jobID - ROWOW_JOB_UPPER_START + 1 : jobID; // MAPID_SECONDMASK
             int32 targetClass = -1;
             switch (val2)

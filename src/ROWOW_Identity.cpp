@@ -67,7 +67,20 @@ namespace
         { 4013, "Assassin_Cross", "Assassin" }, { 4015, "Paladin", "Crusader" }, { 4016, "Champion", "Monk" },
         { 4017, "Professor", "Sage" }, { 4018, "Stalker", "Rogue" }, { 4019, "Creator", "Alchemist" }, { 4020, "Clown", "BardDancer" },
         { 4021, "Gypsy", "BardDancer" }, { 4046, "Taekwon", "Taekwon" }, { 4047, "Star_Gladiator", "StarGladiator" },
-        { 4049, "Soul_Linker", "SoulLinker" },
+        { 4049, "Soul_Linker", "SoulLinker" }, { 4023, "Baby", "Novice" }, { 4024, "Baby_Swordman", "Swordman" }, { 4025, "Baby_Mage", "Mage" },
+        { 4026, "Baby_Archer", "Archer" }, { 4027, "Baby_Acolyte", "Acolyte" }, { 4028, "Baby_Merchant", "Merchant" }, { 4029, "Baby_Thief", "Thief" },
+        { 4030, "Baby_Knight", "Knight" }, { 4031, "Baby_Priest", "Priest" }, { 4032, "Baby_Wizard", "Wizard" }, { 4033, "Baby_Blacksmith", "Blacksmith" },
+        { 4034, "Baby_Hunter", "Hunter" }, { 4035, "Baby_Assassin", "Assassin" }, { 4037, "Baby_Crusader", "Crusader" }, { 4038, "Baby_Monk", "Monk" },
+        { 4039, "Baby_Sage", "Sage" }, { 4040, "Baby_Rogue", "Rogue" }, { 4041, "Baby_Alchemist", "Alchemist" }, { 4042, "Baby_Bard", "BardDancer" },
+        { 4043, "Baby_Dancer", "BardDancer" }, { 4045, "Super_Baby", "SuperNovice" },
+    };
+
+    // Each Baby job's normal job (pc_mapid2jobid of its class_ less JOBL_BABY).  A Baby has its job's look, items, skills and data, but is
+    // small, has a lower stat cap (max_baby_parameter) and makes potions and weapons less often
+    std::pair<uint16, uint16> const BabyJobNormalJobIDs[] =
+    {
+        { 4023, 0 }, { 4024, 1 }, { 4025, 2 }, { 4026, 3 }, { 4027, 4 }, { 4028, 5 }, { 4029, 6 }, { 4030, 7 }, { 4031, 8 }, { 4032, 9 }, { 4033, 10 },
+        { 4034, 11 }, { 4035, 12 }, { 4037, 14 }, { 4038, 15 }, { 4039, 16 }, { 4040, 17 }, { 4041, 18 }, { 4042, 19 }, { 4043, 20 }, { 4045, 23 },
     };
 
     // Each second job's first job, as a normal job (rAthena's MAPID_FIRSTMASK of a JOBL_2 job; the Super Novice is a Novice of its own)
@@ -192,6 +205,7 @@ void ROWOWMod::LoadIdentityData()
         for (int32 itemJobIndex = 0; itemJobIndex < ROWOW_ITEM_JOB_COUNT; itemJobIndex++)
             if (strcmp(ROWOWItemJobNames[itemJobIndex], jobName.ItemJobName) == 0)
                 job.ItemJobIndex = itemJobIndex;
+        job.NormalJobID = job.JobID;
         job.IllusionJobKey = ToLower(job.Name);
         if (job.IllusionJobKey.size() > 5 && job.IllusionJobKey.compare(job.IllusionJobKey.size() - 5, 5, "_high") == 0)
             job.IllusionJobKey.resize(job.IllusionJobKey.size() - 5); // Transcendent first jobs look like the first job
@@ -199,6 +213,16 @@ void ROWOWMod::LoadIdentityData()
     }
     for (auto const& secondJobFirstJobID : SecondJobFirstJobIDs)
         JobsByID[secondJobFirstJobID.first].FirstJobID = secondJobFirstJobID.second;
+    for (auto const& babyJobNormalJobID : BabyJobNormalJobIDs)
+    {
+        // A Baby job looks like its job and is in the same line (a Baby_Knight's first job is the Swordman, as a normal job)
+        ROWOWJob& job = JobsByID[babyJobNormalJobID.first];
+        ROWOWJob const& normalJob = JobsByID[babyJobNormalJobID.second];
+        job.IsBaby = true;
+        job.NormalJobID = normalJob.JobID;
+        job.IllusionJobKey = normalJob.IllusionJobKey;
+        job.FirstJobID = normalJob.FirstJobID;
+    }
     if (ROWOWDataTable const* jobTable = GetDataTable(ROWOW_DATA_TABLE_JOB))
     {
         int32 jobsColumnIndex = jobTable->GetColumnIndex("Jobs");
@@ -352,6 +376,27 @@ ROWOWJob const* ROWOWMod::GetJob(uint16 jobID) const
     if (jobIter == JobsByID.end())
         return nullptr;
     return &jobIter->second;
+}
+
+uint16 ROWOWMod::GetNonBabyJobID(uint16 jobID) const
+{
+    ROWOWJob const* job = GetJob(jobID);
+    return job != nullptr ? job->NormalJobID : jobID;
+}
+
+uint8 ROWOWMod::GetItemClassMask(ROWOWJob const& job)
+{
+    if (job.IsUpper == true)
+        return ROWOW_ITEM_CLASS_UPPER;
+    return job.IsBaby == true ? ROWOW_ITEM_CLASS_BABY : ROWOW_ITEM_CLASS_NORMAL;
+}
+
+uint16 ROWOWMod::GetBabyJobID(uint16 normalJobID) const
+{
+    for (auto const& jobByID : JobsByID)
+        if (jobByID.second.IsBaby == true && jobByID.second.NormalJobID == normalJobID)
+            return jobByID.first;
+    return 0;
 }
 
 uint32 ROWOWMod::GetMapIDByMapName(std::string const& mapName) const
@@ -871,8 +916,14 @@ void ROWOWMod::LeaveROForm(Player* player)
     if (identity->IsInForm == false)
         return;
 
-    // The form's values to keep, and its statuses (leaving the RO world is RO's logout)
+    // The form's values to keep, and its statuses (leaving the RO world is RO's logout).  The arrival invincibility is the form's: WoW's
+    // immunity to NPCs goes with it (a reset identity would no longer know of it)
     LeaveStatusChanges(player, *identity);
+    if (identity->InvincibleEndTime != 0)
+    {
+        identity->InvincibleEndTime = 0;
+        player->SetImmuneToNPC(false);
+    }
     identity->Zeny = player->GetMoney();
     if (player->IsAlive() == true)
     {
@@ -979,7 +1030,7 @@ void ROWOWMod::RespawnAtSavePoint(Player* player)
     uint32 maxHP = identity->Status.MaxHP;
     uint32 maxSP = identity->Status.MaxSP;
     uint32 restartHP = 0;
-    if ((identity->JobID == ROWOW_JOB_NOVICE || identity->JobID == ROWOW_JOB_NOVICE_HIGH) && BattleConfig.RestartHPRate < 50)
+    if ((GetNonBabyJobID(identity->JobID) == ROWOW_JOB_NOVICE || identity->JobID == ROWOW_JOB_NOVICE_HIGH) && BattleConfig.RestartHPRate < 50)
         restartHP = maxHP / 2;
     else
         restartHP = uint32(uint64(maxHP) * BattleConfig.RestartHPRate / 100);

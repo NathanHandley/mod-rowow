@@ -260,6 +260,8 @@ int32 ROWOWMod::SkillProduceMixRate(Player* player, uint16 skillID, uint32 nameI
     bool isEquip = roItem != nullptr && (roItem->IsWeapon == true || roItem->IsArmor == true);
     int32 wlv = isEquip == true && roItem->IsWeapon == true ? roItem->WeaponLevel : 0;
     int32 jobLevel = int32(identity->JobLevel);
+    ROWOWJob const* job = GetJob(identity->JobID);
+    bool isBaby = job != nullptr && job->IsBaby == true;
     int32 makePer = 0;
     if (isEquip == false)
     {
@@ -335,7 +337,9 @@ int32 ROWOWMod::SkillProduceMixRate(Player* player, uint16 skillID, uint32 nameI
                 }
                 if (BattleConfig.PotionProduceRate != 100)
                     makePer = makePer * BattleConfig.PotionProduceRate / 100;
-                // (Baby classes' 30% penalty: there are no baby jobs here)
+                // Baby classes receive a 30% penalty for these skills
+                if (isBaby == true)
+                    makePer = (makePer * 70) / 100;
                 break;
             case ROWOW_SKILL_SA_CREATECON: // Elemental Converter Creation
                 makePer = 100000; // should be 100% success rate
@@ -376,6 +380,9 @@ int32 ROWOWMod::SkillProduceMixRate(Player* player, uint16 skillID, uint32 nameI
             makePer += 0; // Anvil: +0
         if (BattleConfig.WeaponProduceRate != 100)
             makePer = makePer * BattleConfig.WeaponProduceRate / 100;
+        // Baby classes receive a 30% penalty when the target item is a weapon
+        if (isBaby == true)
+            makePer = (makePer * 70) / 100;
     }
 
     if (makePer < 1)
