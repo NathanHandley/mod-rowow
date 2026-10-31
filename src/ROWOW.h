@@ -586,6 +586,7 @@ struct ROWOWBattleConfig
     int32 MaxParameter = 99;
     int32 MaxTransParameter = 99;
     int32 MaxBabyParameter = 80;
+    int32 TranscendentStatusPoints = 52; // transcendent_status_points: the status points a change to a transcendent job gives
     int32 DancingWeaponSwitchFix = 1;
     int32 MaxDef = 99;
     int32 OverDefBonus = 0;
@@ -1462,6 +1463,8 @@ public:
     int64 PCJobIDToMapID(int32 jobID) const; // pc_jobid2mapid: the job's class (MAPID, EAJ_), -1 for none
     int32 PCMapIDToJobID(uint64 mapID, bool isMale) const; // pc_mapid2jobid: -1 for none
     int32 PCResetSkill(Player* player); // pc_resetskill (flag 1): the skill points it gave back
+    void PCResetState(ROWOWIdentity& identity) const; // pc_resetstate: the stats back to 1 and their points back (the caller refreshes the form)
+    void PCResetLvl(Player* player, int32 type); // pc_resetlvl: rebirth (1), or base and job level 1 (2), base (3) or job (4) level 1
     std::vector<uint16> GetSkillTreeJobIDs(uint16 jobID) const; // The jobs whose skills the skill window shows, Novice first
     int64 GetIdentityVariable(ROWOWIdentity const& identity, std::string const& name) const;
     void SetIdentityVariable(ROWOWIdentity& identity, std::string const& name, int64 value) const;
@@ -1918,7 +1921,7 @@ public:
     std::vector<ROWOWNpcAnnouncement> PendingNpcAnnouncements; // Under NpcStateMutex
     std::unordered_map<ObjectGuid, ROWOWScriptMob> ScriptMobsByGUID; // Living script monsters, under NpcStateMutex
     std::vector<ROWOWScriptMobKill> PendingScriptMobKills; // Under NpcStateMutex
-    Creature* SpawnScriptMob(Map* map, uint32 mobID, int32 x, int32 y, std::string const& event); // monster: on the map's thread (or with maps idle)
+    Creature* SpawnScriptMob(Map* map, uint32 mobID, int32 x, int32 y, std::string const& name, std::string const& event); // monster: on the map's thread (or with maps idle)
     bool OnScriptMobDeath(Creature* creature, Unit* killer); // The event its death runs, with the killer attached (false: it had none)
     std::vector<ROWOWPendingScriptMob> PendingScriptMobs; // Under NpcStateMutex: monsters for maps not loaded yet
     std::vector<ROWOWNpcMapWarp> PendingNpcMapWarps; // Under NpcStateMutex: mapwarp and areawarp, for the world update

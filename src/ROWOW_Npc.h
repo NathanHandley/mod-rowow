@@ -105,6 +105,7 @@ struct ROWOWPendingScriptMob
     int32 X = 0;
     int32 Y = 0;
     uint32 MobID = 0;
+    std::string Name; // The script's name for it ("--en--" and "--ja--" for mob_db's)
     std::string Event;
 };
 

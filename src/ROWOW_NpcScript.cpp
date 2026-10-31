@@ -1248,7 +1248,7 @@ void ROWOWMod::UpdateNpcScripts(uint32 diff)
         }
     }
     for (ROWOWPendingScriptMob const& mob : loadedMapMobs)
-        SpawnScriptMob(sMapMgr->FindBaseNonInstanceMap(mob.MapID), mob.MobID, mob.X, mob.Y, mob.Event);
+        SpawnScriptMob(sMapMgr->FindBaseNonInstanceMap(mob.MapID), mob.MobID, mob.X, mob.Y, mob.Name, mob.Event);
     if (loadedMapMobs.empty() == false)
         LOG_INFO("module.ROWOW", "ROWOWMod::UpdateNpcScripts spawned {} script monsters that waited for their map (first map {})", loadedMapMobs.size(),
             loadedMapMobs.front().MapID);

@@ -906,8 +906,8 @@ void ROWOWMod::RegisterNpcScriptCommands()
 
     // Monsters scripts spawn (monster, areamonster), count (mobcount) and take away (killmonster).  The spawn happens on the run's thread
     // when that's the map's (the player's map) or the world update's; a kill goes to the world update
-    auto spawnMobs = [this](ROWOWScriptContext& context, std::string const& mapName, int32 x1, int32 y1, int32 x2, int32 y2, uint32 mobID, int64 amount,
-        std::string const& event)
+    auto spawnMobs = [this](ROWOWScriptContext& context, std::string const& mapName, int32 x1, int32 y1, int32 x2, int32 y2, std::string const& name,
+        uint32 mobID, int64 amount, std::string const& event)
     {
         uint32 mapID = GetMapIDByMapName(mapName);
         if (mapID == 0 && context.AttachedPlayer != nullptr && (mapName == "this" || mapName.empty() == true))
@@ -930,6 +930,7 @@ void ROWOWMod::RegisterNpcScriptCommands()
                 mob.X = x1 == x2 ? x1 : int32(urand(uint32(std::min(x1, x2)), uint32(std::max(x1, x2))));
                 mob.Y = y1 == y2 ? y1 : int32(urand(uint32(std::min(y1, y2)), uint32(std::max(y1, y2))));
                 mob.MobID = mobID;
+                mob.Name = name;
                 mob.Event = event;
                 PendingScriptMobs.push_back(mob);
             }
@@ -939,7 +940,7 @@ void ROWOWMod::RegisterNpcScriptCommands()
         {
             int32 x = x1 == x2 ? x1 : int32(urand(uint32(std::min(x1, x2)), uint32(std::max(x1, x2))));
             int32 y = y1 == y2 ? y1 : int32(urand(uint32(std::min(y1, y2)), uint32(std::max(y1, y2))));
-            SpawnScriptMob(map, mobID, x, y, event);
+            SpawnScriptMob(map, mobID, x, y, name, event);
         }
     };
     engine->RegisterCommand("monster", [spawnMobs](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
@@ -947,14 +948,14 @@ void ROWOWMod::RegisterNpcScriptCommands()
         // monster "<map>",<x>,<y>,"<name>",<mob id>,<amount>{,"<event>"{,<size>{,<ai>}}}
         int32 x = int32(GetArgument(arguments, 1, 0));
         int32 y = int32(GetArgument(arguments, 2, 0));
-        spawnMobs(context, GetTextArgument(arguments, 0), x, y, x, y, uint32(GetArgument(arguments, 4, 0)), GetArgument(arguments, 5, 1), GetTextArgument(arguments, 6));
+        spawnMobs(context, GetTextArgument(arguments, 0), x, y, x, y, GetTextArgument(arguments, 3), uint32(GetArgument(arguments, 4, 0)), GetArgument(arguments, 5, 1), GetTextArgument(arguments, 6));
         return ROWOWScriptValue::FromNumber(0);
     });
     engine->RegisterCommand("areamonster", [spawnMobs](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
     {
         // areamonster "<map>",<x1>,<y1>,<x2>,<y2>,"<name>",<mob id>,<amount>{,"<event>"{,<size>{,<ai>}}}
         spawnMobs(context, GetTextArgument(arguments, 0), int32(GetArgument(arguments, 1, 0)), int32(GetArgument(arguments, 2, 0)), int32(GetArgument(arguments, 3, 0)),
-            int32(GetArgument(arguments, 4, 0)), uint32(GetArgument(arguments, 6, 0)), GetArgument(arguments, 7, 1), GetTextArgument(arguments, 8));
+            int32(GetArgument(arguments, 4, 0)), GetTextArgument(arguments, 5), uint32(GetArgument(arguments, 6, 0)), GetArgument(arguments, 7, 1), GetTextArgument(arguments, 8));
         return ROWOWScriptValue::FromNumber(0);
     });
     engine->RegisterCommand("mobcount", [this](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const& arguments)
@@ -970,7 +971,61 @@ void ROWOWMod::RegisterNpcScriptCommands()
                 count++;
         return ROWOWScriptValue::FromNumber(count);
     });
-    auto queueKill = [this](uint32 mapID, std::string const& event, bool isAll)
+    engine->RegisterCommand("getmonsterinfo", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // getmonsterinfo(<mob id or "AegisName">,<type>): mob_db's values by rAthena's MOB_* types (MOB_NAME 1 .. MOB_ID 29); "null" or -1
+        // for a monster that isn't there
+        enum { MOB_NAME = 1, MOB_LV, MOB_MAXHP, MOB_MAXSP, MOB_BASEEXP, MOB_JOBEXP, MOB_ATKMIN, MOB_ATKMAX, MOB_DEF, MOB_MDEF, MOB_RES, MOB_MRES, MOB_STR,
+            MOB_AGI, MOB_VIT, MOB_INT, MOB_DEX, MOB_LUK, MOB_SPEED, MOB_ATKRANGE, MOB_SKILLRANGE, MOB_CHASERANGE, MOB_SIZE, MOB_RACE, MOB_ELEMENT,
+            MOB_ELEMENTLV, MOB_MODE, MOB_MVPEXP, MOB_ID };
+        ROWOWDataTable const* mobTable = GetDataTable(ROWOW_DATA_TABLE_MOB);
+        int64 type = GetArgument(arguments, 1, 0);
+        int64 mobRowIndex = -1;
+        if (mobTable != nullptr && arguments.empty() == false && arguments[0].IsString == true)
+        {
+            int32 aegisNameColumnIndex = mobTable->GetColumnIndex("AegisName");
+            for (size_t rowIndex = 0; rowIndex < mobTable->Rows.size() && mobRowIndex < 0; rowIndex++)
+                if (mobTable->GetCell(rowIndex, aegisNameColumnIndex) == arguments[0].Text)
+                    mobRowIndex = int64(rowIndex);
+        }
+        else if (mobTable != nullptr)
+            mobRowIndex = GetMobRowIndex(uint32(GetArgument(arguments, 0, 0)));
+        uint32 mobID = mobRowIndex >= 0 ? uint32(mobTable->GetInt(size_t(mobRowIndex), mobTable->GetColumnIndex("Id"), 0)) : 0;
+        auto statusIter = MobStatusesByMobID.find(mobID);
+        if (mobRowIndex < 0 || statusIter == MobStatusesByMobID.end())
+            return type == MOB_NAME ? ROWOWScriptValue::FromText("null") : ROWOWScriptValue::FromNumber(-1);
+        ROWOWStatus const& status = statusIter->second;
+        auto getInt = [mobTable, mobRowIndex](char const* columnName) { return mobTable->GetInt(size_t(mobRowIndex), mobTable->GetColumnIndex(columnName), 0); };
+        switch (type)
+        {
+            case MOB_NAME: return ROWOWScriptValue::FromText(mobTable->GetCell(size_t(mobRowIndex), mobTable->GetColumnIndex("JapaneseName")));
+            case MOB_LV: return ROWOWScriptValue::FromNumber(status.Level);
+            case MOB_MAXHP: return ROWOWScriptValue::FromNumber(status.MaxHP);
+            case MOB_MAXSP: return ROWOWScriptValue::FromNumber(status.MaxSP);
+            case MOB_BASEEXP: return ROWOWScriptValue::FromNumber(getInt("BaseExp") * BattleConfig.BaseExpRate / 100);
+            case MOB_JOBEXP: return ROWOWScriptValue::FromNumber(getInt("JobExp") * BattleConfig.JobExpRate / 100);
+            case MOB_ATKMIN: return ROWOWScriptValue::FromNumber(status.WeaponAttack);
+            case MOB_ATKMAX: return ROWOWScriptValue::FromNumber(status.WeaponRefineAttack);
+            case MOB_DEF: return ROWOWScriptValue::FromNumber(status.Def);
+            case MOB_MDEF: return ROWOWScriptValue::FromNumber(status.MDef);
+            case MOB_RES: case MOB_MRES: return ROWOWScriptValue::FromNumber(0); // Renewal's
+            case MOB_STR: case MOB_AGI: case MOB_VIT: case MOB_INT: case MOB_DEX: case MOB_LUK:
+                return ROWOWScriptValue::FromNumber(status.Stats[type - MOB_STR]);
+            case MOB_SPEED: return ROWOWScriptValue::FromNumber(status.Speed);
+            case MOB_ATKRANGE: return ROWOWScriptValue::FromNumber(status.Range);
+            case MOB_SKILLRANGE: return ROWOWScriptValue::FromNumber(getInt("SkillRange"));
+            case MOB_CHASERANGE: return ROWOWScriptValue::FromNumber(getInt("ChaseRange"));
+            case MOB_SIZE: return ROWOWScriptValue::FromNumber(status.Size);
+            case MOB_RACE: return ROWOWScriptValue::FromNumber(status.Race);
+            case MOB_ELEMENT: return ROWOWScriptValue::FromNumber(status.DefElement);
+            case MOB_ELEMENTLV: return ROWOWScriptValue::FromNumber(status.ElementLevel);
+            case MOB_MODE: return ROWOWScriptValue::FromNumber(status.Mode);
+            case MOB_MVPEXP: return ROWOWScriptValue::FromNumber(getInt("MvpExp"));
+            case MOB_ID: return ROWOWScriptValue::FromNumber(mobID);
+            default: return Fail(context, fmt::format("invalid getmonsterinfo type {}", type));
+        }
+    });
+    auto queueKill =[this](uint32 mapID, std::string const& event, bool isAll)
     {
         // At once in the world update (the maps idle), as rAthena's: a script that kills a stage's monsters and spawns the next stage's
         // right after must not lose the new ones.  From a map's thread the kill waits for the world update (the monsters can be on another map)
@@ -1863,7 +1918,14 @@ void ROWOWMod::RegisterNpcScriptCommands()
             PCResetSkill(player);
         return ROWOWScriptValue::FromNumber(0);
     });
-    auto getOption = [this](Player* player) -> int64
+    engine->RegisterCommand("resetlvl", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // resetlvl <action type>{,<char id>}: pc_resetlvl (the Valkyrie's rebirth is type 1, after the change to High Novice)
+        if (Player* player = GetAttachedPlayer(context, "resetlvl"))
+            PCResetLvl(player, int32(GetArgument(arguments, 0, 0)));
+        return ROWOWScriptValue::FromNumber(0);
+    });
+    auto getOption =[this](Player* player) -> int64
     {
         // sc.option: the statuses' options (hiding, cloaking...) and the identity's own (a Peco, a falcon).  The cart isn't an option
         // (NEW_CARTS: the client the constants are for has SC_PUSH_CART)
@@ -2065,9 +2127,9 @@ void ROWOWMod::RegisterNpcScriptCommands()
     engine->SetStub("specialeffect2");
 }
 
-Creature* ROWOWMod::SpawnScriptMob(Map* map, uint32 mobID, int32 x, int32 y, std::string const& event)
+Creature* ROWOWMod::SpawnScriptMob(Map* map, uint32 mobID, int32 x, int32 y, std::string const& name, std::string const& event)
 {
-    // mob_once_spawn: the monster on the cell (a random one of the map for 0,0), kept until killed or taken away
+    // mob_once_spawn: the monster on the cell (a random one of the map for 0,0), kept until killed or taken away, with the script's name
     uint32 entry = GetMobCreatureEntry(mobID);
     if (map == nullptr || entry == 0)
         return nullptr;
@@ -2077,6 +2139,27 @@ Creature* ROWOWMod::SpawnScriptMob(Map* map, uint32 mobID, int32 x, int32 y, std
     TempSummon* creature = map->SummonCreature(entry, Position(position.X, position.Y, position.Z, float(urand(0, 7)) * float(M_PI) / 4.0f));
     if (creature == nullptr)
         return nullptr;
+
+    // mob_parse_dataset's name: "--en--" is mob_db's name (the template's), "--ja--" its Japanese name, anything else the script's own
+    // (override_mob_names is off).  WoW names a creature by its template, so a name of its own goes by the pet name query: the creature
+    // carries a pet number, the client asks for that number's name (CMSG_PET_NAME_QUERY) and the server answers with the creature's own
+    // name (SendPetNameQuery: GetName).  The number is the GUID's counter with the top bit (players' pet numbers count up from 1), the
+    // timestamp tells the client a cached name for a reused number is stale
+    std::string shownName = name;
+    if (name == "--en--")
+        shownName.clear();
+    else if (name == "--ja--")
+    {
+        ROWOWDataTable const* mobTable = GetDataTable(ROWOW_DATA_TABLE_MOB);
+        int64 mobRowIndex = GetMobRowIndex(mobID);
+        shownName = mobTable != nullptr && mobRowIndex >= 0 ? mobTable->GetCell(size_t(mobRowIndex), mobTable->GetColumnIndex("JapaneseName")) : std::string();
+    }
+    if (shownName.empty() == false && shownName != creature->GetName())
+    {
+        creature->SetName(shownName);
+        creature->SetUInt32Value(UNIT_FIELD_PETNUMBER, 0x80000000 | (creature->GetGUID().GetCounter() & 0x7FFFFFFF));
+        creature->SetUInt32Value(UNIT_FIELD_PET_NAME_TIMESTAMP, uint32(GameTime::GetGameTime().count()));
+    }
     ROWOWScriptMob scriptMob;
     scriptMob.MapID = map->GetId();
     scriptMob.Event = event;

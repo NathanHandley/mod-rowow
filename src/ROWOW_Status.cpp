@@ -214,6 +214,7 @@ void ROWOWMod::LoadStatusData()
         readValue("max_parameter", BattleConfig.MaxParameter);
         readValue("max_trans_parameter", BattleConfig.MaxTransParameter);
         readValue("max_baby_parameter", BattleConfig.MaxBabyParameter);
+        readValue("transcendent_status_points", BattleConfig.TranscendentStatusPoints);
         readValue("dancing_weaponswitch_fix", BattleConfig.DancingWeaponSwitchFix);
         readValue("max_def", BattleConfig.MaxDef);
         readValue("over_def_bonus", BattleConfig.OverDefBonus);

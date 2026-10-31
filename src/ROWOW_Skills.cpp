@@ -880,6 +880,7 @@ void ROWOWMod::PCJobChange(Player* player, uint16 jobID)
         PCResetHate(player);
     }
     StatusChangeEnd(player, ROWOW_SC_SPIRIT); // A spirit links the old job only
+    bool wasUpper = oldJob != nullptr && oldJob->IsUpper == true;
     identity->JobID = jobID;
     identity->JobLevel = 1;
     identity->JobExp = 0;
@@ -887,6 +888,19 @@ void ROWOWMod::PCJobChange(Player* player, uint16 jobID)
     {
         identity->BaseLevel = job->MaxBaseLevel;
         identity->BaseExp = 0;
+        PCResetState(*identity);
+    }
+
+    // Give or reduce transcendent status points
+    uint32 transcendentStatusPoints = uint32(std::max(0, BattleConfig.TranscendentStatusPoints));
+    if (job->IsUpper == true && wasUpper == false) // Change from a non t class to a t class -> give points
+        identity->StatusPoints += transcendentStatusPoints;
+    else if (job->IsUpper == false && wasUpper == true) // Change from a t class to a non t class -> remove points
+    {
+        if (identity->StatusPoints < transcendentStatusPoints)
+            PCResetState(*identity); // The player already used his bonus points, so we have to reset his status points
+        else
+            identity->StatusPoints -= transcendentStatusPoints;
     }
     RefreshROForm(player);
 
@@ -957,6 +971,72 @@ int32 ROWOWMod::PCResetSkill(Player* player)
     identity->AreSkillsChanged = true;
     RefreshROForm(player);
     return skillPoint;
+}
+
+void ROWOWMod::PCResetState(ROWOWIdentity& identity) const
+{
+    // pc_resetstate: the base level's status points (statpoint.yml), and the transcendent ones for a transcendent job, with every stat 1
+    auto statusPointsIter = StatusPointsByBaseLevel.find(identity.BaseLevel);
+    identity.StatusPoints = statusPointsIter != StatusPointsByBaseLevel.end() ? statusPointsIter->second : 0;
+    ROWOWJob const* job = GetJob(identity.JobID);
+    if (job != nullptr && job->IsUpper == true)
+        identity.StatusPoints += uint32(std::max(0, BattleConfig.TranscendentStatusPoints));
+    for (uint8 statIndex = 0; statIndex < ROWOW_STAT_COUNT; statIndex++)
+        identity.Stats[statIndex] = 1;
+}
+
+void ROWOWMod::PCResetLvl(Player* player, int32 type)
+{
+    // pc_resetlvl (/resetlvl, the Valkyrie's rebirth with type 1): the skills reset first (but for type 3), then type 1 makes base and job
+    // level 1 with no skill points, no options and every stat 1 (a High Novice gets 100 status points and First Aid and Play Dead), type 2
+    // base and job level 1 with no skill points, type 3 base level 1, type 4 job level 1.  Gear it can't wear any more comes off with the
+    // next equipment check (pc_checkitem), as pc_resetlvl's pc_isequip loop takes it off
+    ROWOWIdentity* identity = GetIdentity(player);
+    if (identity->Exists == false)
+        return;
+    if (type != 3) // Also reset skills
+        PCResetSkill(player);
+    if (type == 1)
+    {
+        identity->SkillPoints = 0;
+        identity->BaseLevel = 1;
+        identity->JobLevel = 1;
+        identity->BaseExp = 0;
+        identity->JobExp = 0;
+        PCSetRiding(player, false); // sc.option = 0: no Peco, falcon or cart
+        PCSetFalcon(player, false);
+        if (PCIsCartOn(player) == true)
+            PCSetCart(player, 0);
+        for (uint8 statIndex = 0; statIndex < ROWOW_STAT_COUNT; statIndex++)
+            identity->Stats[statIndex] = 1;
+        if (identity->JobID == ROWOW_JOB_NOVICE_HIGH)
+        {
+            identity->StatusPoints = 100; // not 88 [celest]
+            // give platinum skills upon changing
+            PCSkill(player, ROWOW_SKILL_NV_FIRSTAID, 1);
+            PCSkill(player, ROWOW_SKILL_NV_TRICKDEAD, 1);
+        }
+    }
+    if (type == 2)
+    {
+        identity->SkillPoints = 0;
+        identity->BaseLevel = 1;
+        identity->JobLevel = 1;
+        identity->BaseExp = 0;
+        identity->JobExp = 0;
+    }
+    if (type == 3)
+    {
+        identity->BaseLevel = 1;
+        identity->BaseExp = 0;
+    }
+    if (type == 4)
+    {
+        identity->JobLevel = 1;
+        identity->JobExp = 0;
+    }
+    RefreshROForm(player);
+    SendSkillsToClient(player, *identity, true);
 }
 
 std::vector<uint16> ROWOWMod::GetSkillTreeJobIDs(uint16 jobID) const
