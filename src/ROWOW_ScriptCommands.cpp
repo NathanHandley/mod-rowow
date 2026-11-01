@@ -1058,6 +1058,43 @@ void ROWOWMod::RegisterNpcScriptCommands()
         std::lock_guard<std::mutex> lock(NpcStateMutex);
         PendingScriptMobKills.push_back(kill);
     };
+    engine->RegisterCommand("makeitem", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // makeitem <item>,<amount>,"<map>",<x>,<y>: an item on the ground around the cell, for anyone (map_addflooritem, flags 4).  A negative ID comes as a drop
+        // would, unidentified if it's equipment.  Only the run's own map can be reached: the player's, or any map from the world update
+        if (arguments.empty() == true)
+            return ROWOWScriptValue::FromNumber(0);
+        bool isNegative = false;
+        uint32 itemID = 0;
+        if (arguments[0].IsString == true)
+        {
+            auto itemIDIter = ItemIDsByAegisName.find(ToLower(arguments[0].Text));
+            itemID = itemIDIter != ItemIDsByAegisName.end() ? itemIDIter->second : 0;
+        }
+        else
+        {
+            int64 value = arguments[0].GetNumber();
+            isNegative = value < 0;
+            itemID = uint32(std::abs(value));
+        }
+        std::string mapName = GetTextArgument(arguments, 2);
+        uint32 mapID = mapName == "this" && context.AttachedPlayer != nullptr ? context.AttachedPlayer->GetMapId() : GetMapIDByMapName(mapName);
+        Map* map = nullptr;
+        if (context.AttachedPlayer != nullptr)
+            map = context.AttachedPlayer->GetMapId() == mapID ? context.AttachedPlayer->GetMap() : nullptr;
+        else
+            map = sMapMgr->FindBaseNonInstanceMap(mapID);
+        auto itemTemplateIDIter = ItemTemplateIDsByItemID.find(itemID);
+        if (map == nullptr || itemTemplateIDIter == ItemTemplateIDsByItemID.end())
+            return ROWOWScriptValue::FromNumber(0);
+        ROWOWDropItem item;
+        item.ItemTemplateID = itemTemplateIDIter->second;
+        item.Amount = uint32(std::max<int64>(1, GetArgument(arguments, 1, 1)));
+        item.IsIdentified = isNegative == false || ItemDBIsIdentified(itemID);
+        MapAddFloorItem(map, item, int32(GetArgument(arguments, 3, 0)), int32(GetArgument(arguments, 4, 0)), ObjectGuid::Empty, ObjectGuid::Empty, ObjectGuid::Empty,
+            ROWOW_FLOORITEM_NO_DROP_CHECK, ROWOW_RO_DIRECTION_COUNT, false);
+        return ROWOWScriptValue::FromNumber(0);
+    });
     engine->RegisterCommand("killmonster", [this, queueKill](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const& arguments)
     {
         // killmonster "<map>","<event>"{,<type>}: "All" for every script monster of the map
@@ -1852,8 +1889,7 @@ void ROWOWMod::RegisterNpcScriptCommands()
         StubCommand{ "setmapflag", MapCellReason }, StubCommand{ "removemapflag", MapCellReason }, StubCommand{ "setcell", MapCellReason },
         StubCommand{ "setwall", MapCellReason }, StubCommand{ "delwall", MapCellReason }, StubCommand{ "setnpcdisplay", "NPC looks can't change yet (R9)" },
         StubCommand{ "movenpc", "NPCs can't move yet" }, StubCommand{ "refineui", "the refine window is a renewal feature (feature.refineui is off)" },
-        StubCommand{ "waitingroom2bg", BattlegroundReason },
-        StubCommand{ "makeitem", "items on the floor come with the ground drops (R10.4)" } })
+        StubCommand{ "waitingroom2bg", BattlegroundReason } })
     {
         std::string name = stubCommand.Name;
         char const* reason = stubCommand.Reason;

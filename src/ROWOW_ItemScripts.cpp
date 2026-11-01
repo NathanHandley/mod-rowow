@@ -25,9 +25,8 @@
 
 using namespace std;
 
-// RO items' hooks: using an RO item runs its script (ROWOW_Items.cpp), RO equipment drops unidentified, worn items can't be sold or
-// traded, and the worn items are kept true to the bags.  All of it runs in the player's own thread (its session's packets, its map's
-// update)
+// RO items' hooks: using an RO item runs its script (ROWOW_Items.cpp), worn items can't be sold or traded, and the worn items are kept
+// true to the bags.  All of it runs in the player's own thread (its session's packets, its map's update)
 
 namespace
 {
@@ -38,7 +37,7 @@ namespace
 class ROWOW_ItemPlayerScript : public PlayerScript
 {
 public:
-    ROWOW_ItemPlayerScript() : PlayerScript("ROWOW_ItemPlayerScript", { PLAYERHOOK_ON_UPDATE, PLAYERHOOK_ON_LOOT_ITEM, PLAYERHOOK_CAN_SELL_ITEM, PLAYERHOOK_CAN_SET_TRADE_ITEM }) {}
+    ROWOW_ItemPlayerScript() : PlayerScript("ROWOW_ItemPlayerScript", { PLAYERHOOK_ON_UPDATE, PLAYERHOOK_CAN_SELL_ITEM, PLAYERHOOK_CAN_SET_TRADE_ITEM }) {}
 
     void OnPlayerUpdate(Player* player, uint32 p_time) override
     {
@@ -50,17 +49,6 @@ public:
             return;
         identity->EquipmentCheckTimer = 0;
         ROWOW->UpdateIdentityEquipment(player, *identity);
-    }
-
-    void OnPlayerLootItem(Player* player, Item* item, uint32 /*count*/, ObjectGuid lootGUID) override
-    {
-        // RO equipment an RO monster drops is unidentified (mob_setdropitem with itemdb_isidentified)
-        if (ROWOW->IsEnabled == false || item == nullptr || lootGUID.IsCreatureOrVehicle() == false || ROWOW->IsROMap(player->GetMapId()) == false)
-            return;
-        ROWOWItem const* roItem = ROWOW->GetROItem(item);
-        if (roItem == nullptr || (roItem->Type != ROWOW_ITEM_TYPE_WEAPON && roItem->Type != ROWOW_ITEM_TYPE_ARMOR && roItem->Type != ROWOW_ITEM_TYPE_PETARMOR))
-            return;
-        ROWOWMod::SetItemState(player, item, 0, false, false);
     }
 
     bool OnPlayerCanSellItem(Player* player, Item* item, Creature* /*creature*/) override

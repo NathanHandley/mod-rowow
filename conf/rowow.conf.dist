@@ -53,12 +53,6 @@ ROWOW.Creature.GroundSnapTolerance = 0.15
 #		How long a dead RO monster's body stays, as RO's body fades
 #	Default: 3000
 #
-# 	ROWOW.Creature.CorpseLootHoldTimeInSec
-#		How long a body with loot still on it can stay, in seconds, even past the end of its respawn
-#       time, until the ground drops of R10.4 replace the corpse's loot
-#	Default: 30
-#
 ###################################################################################################
 
 ROWOW.Creature.CorpseTimeInMS = 3000
-ROWOW.Creature.CorpseLootHoldTimeInSec = 30

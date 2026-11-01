@@ -249,7 +249,7 @@ void ROWOWMod::LoadItemScriptData()
         for (size_t rowIndex = 0; rowIndex < mapFlagTable->Rows.size(); rowIndex++)
         {
             std::string const& flag = mapFlagTable->GetCell(rowIndex, flagColumnIndex);
-            if (flag != "noteleport" && flag != "noreturn" && flag != "nobranch" && flag != "monster_noteleport")
+            if (flag != "noteleport" && flag != "noreturn" && flag != "nobranch" && flag != "monster_noteleport" && flag != "nomobloot" && flag != "nomvploot")
                 continue;
             uint32 mapID = GetMapIDByMapName(mapFlagTable->GetCell(rowIndex, mapColumnIndex));
             if (mapID == 0)
@@ -1215,6 +1215,12 @@ bool ROWOWMod::ItemDBIsIdentified(uint32 itemID) const
     return itemIter == ItemsByItemTemplateID.end() || IsIdentifiedByDefault(itemIter->second) == true;
 }
 
+ROWOWItem const* ROWOWMod::GetROItemByItemTemplateID(uint32 itemTemplateID) const
+{
+    auto itemIter = ItemsByItemTemplateID.find(itemTemplateID);
+    return itemIter != ItemsByItemTemplateID.end() ? &itemIter->second : nullptr;
+}
+
 std::string ROWOWMod::GetROItemName(uint32 itemID) const
 {
     auto itemTemplateIDIter = ItemTemplateIDsByItemID.find(itemID);
@@ -1224,8 +1230,8 @@ std::string ROWOWMod::GetROItemName(uint32 itemID) const
 
 bool ROWOWMod::GiveROItem(Player* player, uint32 itemID, uint32 amount, bool isIdentified, Item** itemOut)
 {
-    // pc_additem: into the bags, and what doesn't fit comes by mail (RO drops it on the floor, which comes with the ground items, R10).  The
-    // item stored (none when it all went by mail) is given back for the caller to change
+    // pc_additem: into the bags, and what doesn't fit lands at the player's feet (off an RO map, where nothing lies on the ground, it comes by mail).  The
+    // item stored (none when nothing fit) is given back for the caller to change
     auto itemTemplateIDIter = ItemTemplateIDsByItemID.find(itemID);
     if (itemTemplateIDIter == ItemTemplateIDsByItemID.end() || amount == 0)
     {
@@ -1250,8 +1256,11 @@ bool ROWOWMod::GiveROItem(Player* player, uint32 itemID, uint32 amount, bool isI
     }
     if (noSpaceCount > 0)
     {
-        SendItemMessage(player, "Your bags are full, so the rest comes by mail.");
-        player->SendItemRetrievalMail(itemTemplateID, noSpaceCount);
+        SendItemMessage(player, "You cannot get the item.");
+        if (IsROMap(player->GetMapId()) == true)
+            PCDropItemAtFeet(player, itemTemplateID, noSpaceCount, isIdentified);
+        else
+            player->SendItemRetrievalMail(itemTemplateID, noSpaceCount);
     }
     return true;
 }

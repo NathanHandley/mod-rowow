@@ -970,13 +970,7 @@ namespace
 
         void CastendNoDamageID(Unit* src, Unit* /*target*/, uint16 /*skillLevel*/, uint64 /*tick*/, int32& /*flag*/) const override
         {
-            src->CustomData.Erase("ROWOWDamageLog");
             ROWOW->StatusKill(src);
-            if (Creature* md = src->ToCreature())
-            {
-                md->loot.clear();
-                md->RemoveDynamicFlag(UNIT_DYNFLAG_LOOTABLE);
-            }
         }
     };
 

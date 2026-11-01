@@ -78,8 +78,10 @@ public:
 
     void OnMapUpdate(Map* map, uint32 diff) override
     {
-        if (ROWOW->IsEnabled == true && map != nullptr)
-            ROWOW->SkillUnitTimer(map, diff);
+        if (ROWOW->IsEnabled == false || map == nullptr)
+            return;
+        ROWOW->SkillUnitTimer(map, diff);
+        ROWOW->MapFloorItemTimer(map);
     }
 };
 

@@ -860,7 +860,7 @@ void ROWOWMod::MobWarpSlave(Creature* md, int32 range)
 
 void ROWOWMod::MobDeleteSlave(Creature* md)
 {
-    // mob_deleteslave: its slaves die with it (status_kill: no exp, no loot)
+    // mob_deleteslave: its slaves die with it (status_kill: no exp, no drops)
     ROWOWMobData* mob = GetMobData(md);
     std::vector<ObjectGuid> slaveGUIDs;
     slaveGUIDs.swap(mob->SlaveGUIDs);
@@ -869,10 +869,7 @@ void ROWOWMod::MobDeleteSlave(Creature* md)
         Creature* slave = ObjectAccessor::GetCreature(*md, slaveGUID);
         if (slave == nullptr || slave->IsAlive() == false)
             continue;
-        slave->CustomData.Erase("ROWOWDamageLog");
         StatusKill(slave);
-        slave->loot.clear();
-        slave->RemoveDynamicFlag(UNIT_DYNFLAG_LOOTABLE);
     }
 }
 
@@ -910,16 +907,18 @@ int32 ROWOWMod::MobDeadAttackerCount(Creature* md)
     return count;
 }
 
-void ROWOWMod::MobDeadMVP(Creature* md, Player* mvpSD, int32 count)
+void ROWOWMod::MobDeadMVP(Creature* md, Player* mvpSD, int32 count, ROWOWLootPriority const& priority, bool isNoRewards)
 {
-    // mob_dead's MVP reward: mvp.spr over the MVP for those around (clif_mvp_effect), its exp and its item.  The item goes straight to the bags (pc_additem);
-    // GiveROItem mails what doesn't fit, where rAthena drops it on the ground at the MVP's feet (R10.4)
+    // mob_dead's MVP reward: mvp.spr over the MVP for those around (clif_mvp_effect), its exp and its item.  The item goes straight to the bags (pc_additem), or
+    // what doesn't fit to the ground at the MVP's feet with the MVP's long protection.  type&3 is none of the rewards
     uint32 mobID = GetROMobID(md);
     int64 mobRowIndex = GetMobRowIndex(mobID);
     ROWOWDataTable const* mobTable = GetDataTable(ROWOW_DATA_TABLE_MOB);
     if (mobRowIndex < 0 || mobTable == nullptr)
         return;
     PlayScriptLook(mvpSD, ROWOW_SCRIPT_LOOK_EMOTION, "mvp"); // clif_mvp_effect: the converter's look of mvp.spr, kept with the emotions
+    if (isNoRewards == true)
+        return;
     ChatHandler handler(mvpSD->GetSession());
 
     // mob_db's mexp at mvp_exp_rate, then exp_bonus_attacker for each extra attacker, the mapflag noexp aside
@@ -937,37 +936,38 @@ void ROWOWMod::MobDeadMVP(Creature* md, Player* mvpSD, int32 count)
     }
 
     // Order might be random depending on item_drop_mvp_mode config setting: only one item is given unless it's 2
-    std::vector<std::pair<uint32, int32>> mdrop;
-    for (auto const& drop : ROWOWDataTable::ParseMapList(mobTable->GetCell(size_t(mobRowIndex), mobTable->GetColumnIndex("MvpDrops"))))
-    {
-        uint32 itemID = 0;
-        int32 rate = 0;
-        for (auto const& field : drop)
-        {
-            if (field.first == "Item")
-            {
-                std::string aegisName = field.second;
-                std::transform(aegisName.begin(), aegisName.end(), aegisName.begin(), ::tolower);
-                auto itemIDIter = ItemIDsByAegisName.find(aegisName);
-                itemID = itemIDIter != ItemIDsByAegisName.end() ? itemIDIter->second : 0;
-            }
-            else if (field.first == "Rate")
-                rate = int32(strtol(field.second.c_str(), nullptr, 10));
-        }
-        if (itemID != 0)
-            mdrop.emplace_back(itemID, std::clamp<int32>(rate * BattleConfig.ItemRateMvp / 100, BattleConfig.ItemDropMvpMin, BattleConfig.ItemDropMvpMax)); // mob_drop_adjust
-    }
+    auto mvpDropsIter = MobMvpDropsByMobID.find(mobID);
+    if (mvpDropsIter == MobMvpDropsByMobID.end() || (MapIDsByMapFlag.count("nomvploot") != 0 && MapIDsByMapFlag.at("nomvploot").count(md->GetMapId()) != 0))
+        return;
+    std::vector<ROWOWMobDrop> mdrop = mvpDropsIter->second;
     if (BattleConfig.ItemDropMvpMode == 1)
     {
         for (size_t i = mdrop.size(); i > 1; i--) // rnd_vector_order
             std::swap(mdrop[i - 1], mdrop[urand(0, uint32(i - 1))]);
     }
-    for (std::pair<uint32, int32> const& entry : mdrop)
+    for (ROWOWMobDrop const& entry : mdrop)
     {
-        if (entry.second != 10000 && int32(urand(0, 9999)) >= entry.second)
-            continue;
-        if (GiveROItem(mvpSD, entry.first, 1, ItemDBIsIdentified(entry.first)) == true)
-            handler.PSendSysMessage("Congratulations! You are the MVP! Your reward item is {} !!", GetROItemName(entry.first)); // clif_mvp_item
+        int32 rate = entry.Rate;
+        if (rate != 10000)
+        {
+            if (rate <= 0 && BattleConfig.DropRate0Item == 0)
+                rate = 1;
+            if (int32(urand(0, 9999)) >= rate) // if ==0, then it doesn't drop
+                continue;
+        }
+        handler.PSendSysMessage("Congratulations! You are the MVP! Your reward item is {} !!", GetROItemName(entry.ItemID)); // clif_mvp_item
+        bool isIdentified = ItemDBIsIdentified(entry.ItemID);
+        if (PCAddItem(mvpSD, entry.ItemTemplateID, 1, isIdentified) == false)
+        {
+            handler.SendSysMessage("You cannot get the item."); // clif_additem
+            int32 x = 0, y = 0;
+            GetUnitCell(mvpSD, x, y);
+            ROWOWDropItem item;
+            item.ItemTemplateID = entry.ItemTemplateID;
+            item.IsIdentified = isIdentified;
+            MapAddFloorItem(mvpSD->GetMap(), item, x, y, mvpSD->GetGUID(), priority.SecondSD != nullptr ? priority.SecondSD->GetGUID() : ObjectGuid::Empty,
+                priority.ThirdSD != nullptr ? priority.ThirdSD->GetGUID() : ObjectGuid::Empty, ROWOW_FLOORITEM_MVP, ROWOW_RO_DIRECTION_CENTER, false);
+        }
         if (BattleConfig.ItemDropMvpMode != 2)
             break; // If item_drop_mvp_mode is not 2, then only one item should be granted
     }
@@ -975,15 +975,23 @@ void ROWOWMod::MobDeadMVP(Creature* md, Player* mvpSD, int32 count)
 
 void ROWOWMod::MobDead(Creature* md, Unit* killer)
 {
-    // mob_dead's rewards, in its order as far as they meet: Ore Discovery with the drops, the exp, the MVP reward, then the slaves
+    // mob_dead's rewards, in its order: the loot priority and the MVP (the first attacker bonus doesn't count for the MVP), the exp, the drops, the MVP reward,
+    // then the slaves.  status_kill's type (no exp, no drops) leaves only what it looted
     if (GetROMobID(md) == 0)
         return;
-    Player* mvpSD = BattleConfig.MvpToLootPriority == 0 ? MobGetMVPPlayer(md) : nullptr;
+    ROWOWMobData* mob = GetMobData(md);
+    bool isNoRewards = mob->IsNoRewards;
+    mob->IsNoRewards = false;
+    ROWOWLootPriority priority;
+    MobDeadLootPriority(md, killer, priority);
+    ROWOWStatus const* status = GetROStatus(md);
+    Player* mvpSD = BattleConfig.MvpToLootPriority == 0 ? MobGetMVPPlayer(md) : (status != nullptr && (status->Mode & ROWOW_MODE_MVP) != 0 ? priority.FirstSD : nullptr);
     int32 count = MobDeadAttackerCount(md);
-    MobDeadFindingOre(md);
-    MobDeadExp(md, killer);
+    if (isNoRewards == false)
+        MobDeadExp(md, killer);
+    MobDeadDrops(md, killer, priority, isNoRewards);
     if (mvpSD != nullptr)
-        MobDeadMVP(md, mvpSD, count);
+        MobDeadMVP(md, mvpSD, count, priority, isNoRewards);
     MobDeleteSlave(md);
 }
 

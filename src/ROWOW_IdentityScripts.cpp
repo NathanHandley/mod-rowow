@@ -631,6 +631,12 @@ public:
             { "mobskilldirect", HandleROMobSkillDirectCommand, SEC_GAMEMASTER, Console::No },
             { "mobskillrun", HandleROMobSkillRunCommand, SEC_GAMEMASTER, Console::No },
             { "mobbattle", HandleROMobBattleCommand, SEC_GAMEMASTER, Console::No },
+            { "flooritem", HandleROFloorItemCommand, SEC_GAMEMASTER, Console::No },
+            { "flooritems", HandleROFloorItemsCommand, SEC_GAMEMASTER, Console::No },
+            { "floorfill", HandleROFloorFillCommand, SEC_GAMEMASTER, Console::No },
+            { "floorclear", HandleROFloorClearCommand, SEC_GAMEMASTER, Console::No },
+            { "mobdropdump", HandleROMobDropDumpCommand, SEC_GAMEMASTER, Console::Yes },
+            { "mobdropsample", HandleROMobDropSampleCommand, SEC_GAMEMASTER, Console::No },
             { "setcart",  HandleROSetCartCommand, SEC_GAMEMASTER, Console::No },
             { "setriding", HandleROSetRidingCommand, SEC_GAMEMASTER, Console::No },
             { "setfalcon", HandleROSetFalconCommand, SEC_GAMEMASTER, Console::No },
@@ -1447,6 +1453,80 @@ public:
         else
             ROWOW->SetMobSkillTrace(mode == "on");
         handler->PSendSysMessage("Monster skill trace: {}", mode);
+        return true;
+    }
+
+    static bool HandleROFloorItemCommand(ChatHandler* handler, uint32 itemID, Optional<uint32> amount, Optional<uint32> isUnidentified)
+    {
+        // `.ro flooritem <item> [amount] [1: unidentified]`: an item on a cell around the player (map_addflooritem), free for all.  The item is RO's, or a
+        // template of a ground item that isn't (a companion carrier)
+        Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
+        auto itemTemplateIDIter = ROWOW->ItemTemplateIDsByItemID.find(itemID);
+        if (player == nullptr || (itemTemplateIDIter == ROWOW->ItemTemplateIDsByItemID.end() && ROWOW->GroundItemsByItemTemplateID.count(itemID) == 0))
+            return false;
+        ROWOWDropItem item;
+        item.ItemTemplateID = itemTemplateIDIter != ROWOW->ItemTemplateIDsByItemID.end() ? itemTemplateIDIter->second : itemID;
+        item.Amount = amount.value_or(1);
+        item.IsIdentified = isUnidentified.value_or(0) == 0;
+        int32 x = 0, y = 0;
+        ROWOW->GetUnitCell(player, x, y);
+        ObjectGuid guid = ROWOW->MapAddFloorItem(player->GetMap(), item, x, y, ObjectGuid::Empty, ObjectGuid::Empty, ObjectGuid::Empty, ROWOW_FLOORITEM_NO_DROP_CHECK, ROWOW_RO_DIRECTION_COUNT, false);
+        handler->PSendSysMessage("Floor item: {}", guid.GetCounter());
+        return guid.IsEmpty() == false;
+    }
+
+    static bool HandleROFloorItemsCommand(ChatHandler* handler)
+    {
+        Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
+        if (player == nullptr)
+            return false;
+        ROWOW->WriteFloorItemList(handler, player->GetMap());
+        return true;
+    }
+
+    static bool HandleROFloorFillCommand(ChatHandler* handler, uint32 count, Optional<uint32> range)
+    {
+        Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
+        if (player == nullptr)
+            return false;
+        handler->PSendSysMessage("Floor items added: {}", ROWOW->MapFloorItemFill(player, count, int32(range.value_or(20))));
+        return true;
+    }
+
+    static bool HandleROFloorClearCommand(ChatHandler* handler)
+    {
+        Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
+        if (player == nullptr)
+            return false;
+        Map* map = player->GetMap();
+        ROWOWMapFloorItems const* floorItems = map->CustomData.Get<ROWOWMapFloorItems>("ROWOWMapFloorItems");
+        if (floorItems == nullptr)
+            return true;
+        std::vector<ObjectGuid> guids;
+        for (auto const& floorItem : floorItems->ItemsByGUID)
+            guids.push_back(floorItem.first);
+        for (ObjectGuid const& guid : guids)
+            ROWOW->MapClearFloorItem(map, guid);
+        handler->PSendSysMessage("Floor items cleared: {}", guids.size());
+        return true;
+    }
+
+    static bool HandleROMobDropDumpCommand(ChatHandler* handler, std::string filePath)
+    {
+        // `.ro mobdropdump <file>`: every monster's drops as the oracle's @oraclemobdrops writes them
+        if (ROWOW->WriteMobDropDump(filePath) == false)
+            return false;
+        handler->PSendSysMessage("Wrote {}", filePath);
+        return true;
+    }
+
+    static bool HandleROMobDropSampleCommand(ChatHandler* handler, uint32 mobID, uint32 kills, std::string filePath)
+    {
+        // `.ro mobdropsample <mob> <kills> <file>`: the rolls of that many kills by this player, nothing landing
+        Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
+        if (player == nullptr || ROWOW->WriteMobDropSample(player, mobID, kills, filePath) == false)
+            return false;
+        handler->PSendSysMessage("Wrote {}", filePath);
         return true;
     }
 

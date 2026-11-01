@@ -335,6 +335,39 @@ bool ROWOWMod::UnitCanReachBL(Creature* md, Unit const* tbl, int32 range, int32&
     return PathSearch(path, map, *mapGrid, x0, y0, x1 - dx, y1 - dy, ROWOW_CELL_CHKNOPASS);
 }
 
+bool ROWOWMod::UnitCanReachCell(Creature* md, int32 x1, int32 y1, int32 range) const
+{
+    // unit_can_reach_bl for a floor item: a cell beside it, as for a unit on it
+    ROWOWMapGrid const* mapGrid = GetMapGrid(md->GetMapId());
+    if (mapGrid == nullptr)
+        return false;
+    int32 x0 = 0, y0 = 0;
+    GetUnitCell(md, x0, y0);
+    if (x0 == x1 && y0 == y1)
+        return true;
+    if (range > 0 && std::max(std::abs(x1 - x0), std::abs(y1 - y0)) > range)
+        return false;
+
+    // It judges whether it can adjoin or not.
+    int32 dx = x1 - x0;
+    int32 dy = y1 - y0;
+    dx = dx > 0 ? 1 : (dx < 0 ? -1 : 0);
+    dy = dy > 0 ? 1 : (dy < 0 ? -1 : 0);
+    Map* map = md->GetMap();
+    if (MapGetCellNoPass(map, *mapGrid, x1 - dx, y1 - dy) == true) // Look for a suitable cell to place in.
+    {
+        int32 direction = 0;
+        for (; direction < ROWOW_RO_DIRECTION_COUNT && MapGetCellNoPass(map, *mapGrid, x1 - DirectionX[direction], y1 - DirectionY[direction]) == true; direction++)
+            ;
+        if (direction == ROWOW_RO_DIRECTION_COUNT)
+            return false; // No valid cells.
+        dx = DirectionX[direction];
+        dy = DirectionY[direction];
+    }
+    std::vector<uint8> path;
+    return PathSearch(path, map, *mapGrid, x0, y0, x1 - dx, y1 - dy, ROWOW_CELL_CHKNOPASS);
+}
+
 uint32 ROWOWMod::UnitWalkPathPos(Creature* /*md*/, ROWOWMobData const* mob, uint64 tick) const
 {
     // walkpath.path_pos: the cells of its path walked so far
@@ -374,6 +407,9 @@ bool ROWOWMod::UnitWalkPath(Creature* md, ROWOWMobData* mob, std::vector<uint8> 
     mob->WalkStartTime = GetTick();
     mob->WalkPathTime = pathTime;
     mob->WalkPathLength = uint32(path.size());
+    mob->WalkPath = path;
+    mob->WalkPathX = x0;
+    mob->WalkPathY = y0;
     return true;
 }
 
@@ -516,6 +552,54 @@ uint32 ROWOWMod::UnitEscape(Creature* md, Unit* target, int32 dist, uint8 flag)
     if (dist > 0 && UnitWalkToXY(md, x + dist * DirectionX[dir], y + dist * DirectionY[dir]) == true)
         return GetMobData(md)->WalkPathTime; // unit_get_walkpath_time
     return 0;
+}
+
+bool ROWOWMod::UnitWalkToCell(Creature* md, ROWOWMobData* mob, int32 x, int32 y)
+{
+    // unit_walktobl with range 0, for a floor item: onto its cell
+    ROWOWMapGrid const* mapGrid = GetMapGrid(md->GetMapId());
+    uint64 tick = GetTick();
+    mob->AttackTargetID.Clear(); // unit_stop_attack: Sets target to 0
+    if (mapGrid == nullptr)
+        return false;
+    if (mob->CanMoveTime > tick)
+        return true; // Can't move, wait a bit before invoking the movement (the next think invokes it)
+    if (UnitCanMove(md, mob, tick) == false)
+        return false;
+    int32 x0 = 0, y0 = 0;
+    GetUnitCell(md, x0, y0);
+    std::vector<uint8> path;
+    if (PathSearch(path, md->GetMap(), *mapGrid, x0, y0, x, y, ROWOW_CELL_CHKNOPASS) == false)
+        return false;
+    return path.empty() == true || UnitWalkPath(md, mob, path, x0, y0, true);
+}
+
+void ROWOWMod::UnitStopWalkingSoon(Creature* md, uint64 tick)
+{
+    // unit_stop_walking_soon: the path is cut to the next cell, or the one after it once it's past the middle of this one, so it stops on a cell and not at once
+    ROWOWMobData* mob = GetMobData(md);
+    if (mob->IsWalking == false || mob->WalkPath.empty() == true || mob->WalkPathTime == 0)
+    {
+        UnitStopWalking(md);
+        return;
+    }
+    uint64 walkedTime = tick - mob->WalkStartTime;
+    uint32 pathPos = UnitWalkPathPos(md, mob, tick);
+    uint32 pathRemain = (walkedTime * mob->WalkPathLength * 2 / mob->WalkPathTime) % 2 != 0 ? 2 : 1;
+    if (pathPos >= mob->WalkPath.size())
+    {
+        UnitStopWalking(md);
+        return;
+    }
+    int32 x = mob->WalkPathX;
+    int32 y = mob->WalkPathY;
+    for (uint32 i = 0; i < pathPos; i++)
+    {
+        x += DirectionX[mob->WalkPath[i]];
+        y += DirectionY[mob->WalkPath[i]];
+    }
+    std::vector<uint8> path(mob->WalkPath.begin() + pathPos, mob->WalkPath.begin() + std::min<size_t>(pathPos + pathRemain, mob->WalkPath.size()));
+    UnitWalkPath(md, mob, path, x, y, true);
 }
 
 void ROWOWMod::UnitStopWalking(Creature* md)

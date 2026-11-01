@@ -66,7 +66,6 @@ void ROWOWMod::LoadConfigurationFile()
     ConfigGroundSnapCheckIntervalInMS = sConfigMgr->GetOption<uint32>("ROWOW.Creature.GroundSnapCheckIntervalInMS", 1000);
     ConfigGroundSnapTolerance = sConfigMgr->GetOption<float>("ROWOW.Creature.GroundSnapTolerance", 0.15f);
     ConfigCorpseTimeInMS = sConfigMgr->GetOption<uint32>("ROWOW.Creature.CorpseTimeInMS", 3000);
-    ConfigCorpseLootHoldTimeInSec = sConfigMgr->GetOption<uint32>("ROWOW.Creature.CorpseLootHoldTimeInSec", 30);
 
     // Event intervals of zero would make the AI's event loop run the same event over and over in one update
     if (ConfigGroundSnapCheckIntervalInMS < 100)

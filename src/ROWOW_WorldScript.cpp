@@ -55,6 +55,7 @@ public:
         ROWOW->LoadProduceData(); // After the items, which its recipes make and use
         ROWOW->LoadSkillData(); // After the items, whose names the skills' item costs use
         ROWOW->LoadMobSkillData(); // After the skills, which its rows' target rules read
+        ROWOW->LoadFloorItemData(); // After the items and the monsters' statuses
         ROWOW->LoadAbraData();
         ROWOW->LoadSkillUnitData();
         ROWOW->LoadStatusChangeData(); // After the skills, whose durations the statuses take, and the script commands their scripts use

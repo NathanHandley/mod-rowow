@@ -184,12 +184,20 @@ namespace
         }
     };
 
-    // SkillGreed: picks up the floor items around the caster (skill_greed).  RO monsters' drops are still their corpses' loot, not floor
-    // items (the ground drops are R10), so there is nothing for it to pick up yet
+    // SkillGreed: picks up the floor items around the caster (skill_greed)
     class ROWOWSkillGreed : public ROWOWSkillImpl
     {
     public:
         ROWOWSkillGreed() : ROWOWSkillImpl(ROWOW_SKILL_BS_GREED) { }
+
+        void CastendNoDamageID(Unit* src, Unit* target, uint16 skillLevel, uint64 /*tick*/, int32& /*flag*/) const override
+        {
+            Player* sd = src->ToPlayer();
+            if (sd == nullptr)
+                return;
+            ROWOW->ClifSkillNoDamage(src, target, SkillID, skillLevel);
+            ROWOW->SkillGreed(sd);
+        }
     };
 
     // SkillAcidTerror: a weapon attack (50% a level; DEF ignored and VIT DEF taken off the damage, in battle_calc_attack) that may make the

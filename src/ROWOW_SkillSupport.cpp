@@ -22,7 +22,6 @@
 #include "CreatureAI.h"
 #include "Item.h"
 #include "Log.h"
-#include "LootMgr.h"
 #include "Map.h"
 #include "ObjectAccessor.h"
 #include "Player.h"
@@ -945,9 +944,12 @@ void ROWOWMod::StatusSetSP(Unit* bl, uint32 sp)
 
 void ROWOWMod::StatusKill(Unit* bl)
 {
-    // status_kill (status_percent_damage(nullptr, bl, 100, 0, true)): all its HP, with no attacker
-    if (bl->IsAlive() == true)
-        StatusZap(bl, bl->GetHealth(), 0);
+    // status_kill (status_percent_damage(nullptr, bl, 100, 0, true)): all its HP, with no attacker.  A monster dies with flag 4: mob_dead's no exp, no drops
+    if (bl->IsAlive() == false)
+        return;
+    if (Creature* md = bl->ToCreature(); md != nullptr && GetROMobID(md) != 0)
+        GetMobData(md)->IsNoRewards = true;
+    StatusZap(bl, bl->GetHealth(), 0);
 }
 
 uint32 ROWOWMod::GetMobCreatureEntry(uint32 mobID) const
@@ -1301,12 +1303,24 @@ void ROWOWMod::SkillRevealTrapInArea(Unit* src, int32 range, int32 x, int32 y)
 
 void ROWOWMod::SkillTrapGiveBack(Unit* src, ROWOWSkillUnitGroup const& group)
 {
-    // The trap an expired trap turns back into (skill_unit_timer_sub's revert, map_addflooritem at the trap's cell), or the one Remove Trap gets
-    // back (pc_additem).  RO's items on the ground are R10's: until then it goes into the Hunter's bags
+    // The trap Remove Trap gets back (pc_additem)
     Player* sd = src != nullptr ? src->ToPlayer() : nullptr;
     if (sd == nullptr || IsInROForm(sd) == false)
         return;
     GiveROItem(sd, group.ItemID != 0 ? group.ItemID : ROWOW_ITEMID_TRAP, 1, true);
+}
+
+void ROWOWMod::SkillTrapRevert(Map* map, Unit* src, ROWOWSkillUnitGroup const& group, int32 x, int32 y)
+{
+    // skill_unit_timer_sub's revert: an expired trap of a player turns back into a trap on the ground (map_addflooritem, flags 4), for anyone to take
+    if (src == nullptr || src->IsPlayer() == false)
+        return;
+    auto itemTemplateIDIter = ItemTemplateIDsByItemID.find(group.ItemID != 0 ? group.ItemID : ROWOW_ITEMID_TRAP);
+    if (itemTemplateIDIter == ItemTemplateIDsByItemID.end())
+        return;
+    ROWOWDropItem item;
+    item.ItemTemplateID = itemTemplateIDIter->second;
+    MapAddFloorItem(map, item, x, y, ObjectGuid::Empty, ObjectGuid::Empty, ObjectGuid::Empty, ROWOW_FLOORITEM_NO_DROP_CHECK, ROWOW_RO_DIRECTION_COUNT, false);
 }
 
 void ROWOWMod::SkillExtremityFistEnd(Unit* src, Unit* target, uint16 skillLevel)
@@ -1362,7 +1376,7 @@ Creature* ROWOWMod::MobOnceSpawnSub(Unit* src, int32 x, int32 y, uint32 mobID, u
         return nullptr;
     // A duration of 0 is a monster with no deletetimer: it stays until it dies, then its body goes as a spawned one's
     TempSummon* md = src->SummonCreature(entry, cellX, cellY, cellZ, src->GetOrientation(), duration > 0 ? TEMPSUMMON_TIMED_DESPAWN : TEMPSUMMON_CORPSE_TIMED_DESPAWN,
-        duration > 0 ? uint32(duration) : ConfigCorpseLootHoldTimeInSec * 1000);
+        duration > 0 ? uint32(duration) : ConfigCorpseTimeInMS);
     if (md == nullptr)
         return nullptr;
     if (ai != ROWOW_AI_NONE)
@@ -1413,46 +1427,23 @@ int32 ROWOWMod::SkillCheckConditionMobMaster(Player* sd, uint16 skillID, uint32 
     return i;
 }
 
-void ROWOWMod::MobDeadFindingOre(Creature* md)
+uint32 ROWOWMod::ItemGroupRandomDropItem(std::string const& groupName) const
 {
-    // mob_dead's Ore Discovery (triggers if owner has loot priority, does not require to be the killer): the player first in the loot (the most
-    // damage, the first attacker's raised by first_attack_loot_bonus) who knows it gets a random ore of IG_ORE at its rate (GROUP_ALGORITHM_DROP)
-    // in the monster's loot.  (The loot is the corpse's until the ground drops, R10)
-    ROWOWDamageLog const* damageLog = md->CustomData.Get<ROWOWDamageLog>("ROWOWDamageLog");
-    if (damageLog == nullptr || damageLog->Entries.empty() == true)
-        return;
-    uint64 totalDamage = 0;
-    for (ROWOWDamageLogEntry const& entry : damageLog->Entries)
-        totalDamage += entry.Damage;
-    ROWOWDamageLogEntry const* first = nullptr;
-    uint64 firstDamage = 0;
-    for (size_t i = 0; i < damageLog->Entries.size(); i++)
-    {
-        // Officially, the first player in the damage log gets 30% of total damage as bonus for loot priority
-        uint64 damage = damageLog->Entries[i].Damage + (i == 0 ? totalDamage * uint64(BattleConfig.FirstAttackLootBonus) / 100 : 0);
-        if (first == nullptr || damage > firstDamage)
-        {
-            first = &damageLog->Entries[i];
-            firstDamage = damage;
-        }
-    }
-    Player* firstSD = ObjectAccessor::GetPlayer(*md, first->PlayerGUID);
-    if (firstSD == nullptr || PCCheckSkill(firstSD, ROWOW_SKILL_BS_FINDINGORE) <= 0)
-        return;
-    auto groupIter = ItemGroupsByName.find("ORE");
+    // itemdb_group.get_random_entry(group, 1, GROUP_ALGORITHM_DROP), the group by its name (with or without IG_, in any case).  We pick a random item from the
+    // group and then do a drop check based on the rate (item_group_rate's).  On fail, do not return any item
+    std::string name = groupName;
+    std::transform(name.begin(), name.end(), name.begin(), ::toupper);
+    if (name.rfind("IG_", 0) == 0)
+        name = name.substr(3);
+    auto groupIter = ItemGroupsByName.find(name);
     if (groupIter == ItemGroupsByName.end())
-        return;
+        return 0;
     auto subGroupIter = groupIter->second.SubGroupsByID.find(1);
     if (subGroupIter == groupIter->second.SubGroupsByID.end() || subGroupIter->second.Entries.empty() == true)
-        return;
-    // We pick a random item from the group and then do a drop check based on the rate.  (item_group_rate 100: the rate as it is, at least 1)
+        return 0;
     ROWOWItemGroupEntry const& entry = subGroupIter->second.Entries[urand(0, uint32(subGroupIter->second.Entries.size() - 1))];
-    if (urand(0, 9999) >= std::clamp<uint32>(entry.Rate, 1, 10000))
-        return;
-    auto itemTemplateIDIter = ItemTemplateIDsByItemID.find(entry.ItemID);
-    if (itemTemplateIDIter == ItemTemplateIDsByItemID.end())
-        return;
-    md->loot.AddItem(LootStoreItem(itemTemplateIDIter->second, 0, 100.0f, false, LOOT_MODE_DEFAULT, 0, 1, 1));
+    int32 rate = std::clamp<int32>(int32(entry.Rate) * BattleConfig.ItemGroupRate / 100, BattleConfig.ItemGroupDropMin, BattleConfig.ItemGroupDropMax);
+    return int32(urand(0, 9999)) < rate ? entry.ItemID : 0;
 }
 
 int8 ROWOWMod::SkillIsCopyable(Player* sd, uint16 skillID) const

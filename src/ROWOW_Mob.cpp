@@ -30,7 +30,7 @@ using namespace std;
 
 // RO monster AI, a port of rAthena's mob.cpp (pre-renewal): mob_ai_sub_hard and what it calls, under the same names.  A monster's target is its own
 // (ROWOWMobData::TargetID, md->target_id): the WoW threat list only keeps the WoW combat state, and the WoW victim follows the target.  Mob skills and
-// slaves are in ROWOW_MobSkill.cpp; looting is a seam for R10.4.  Everything here runs in the monster's map thread.  Other monsters of the map (assist)
+// slaves are in ROWOW_MobSkill.cpp, the items it loots in ROWOW_FloorItem.cpp.  Everything here runs in the monster's map thread.  Other monsters of the map (assist)
 // and the players it looks at are on that map too, so nothing here needs a lock; startup data is only read
 
 namespace
@@ -98,6 +98,10 @@ void ROWOWMod::MobSpawnReset(Creature* md)
     uint64 tick = GetTick();
     ROWOWMobData* mob = GetMobData(md);
     mob->TargetID.Clear();
+    mob->LootTargetID.Clear();
+    mob->LootWalkID.Clear();
+    mob->LootItems.clear();
+    mob->IsNoRewards = false;
     mob->AttackedID.Clear();
     mob->NormAttackedID.Clear();
     mob->ProvokeFlag.Clear();
@@ -347,13 +351,6 @@ void ROWOWMod::MobCastSensor(Creature* md, Unit* src, uint64 tick)
     }
 }
 
-bool ROWOWMod::MobLootSearch(Creature* /*md*/, ROWOWMobData* /*mob*/, uint64 /*tick*/)
-{
-    // mob_ai_sub_hard's looter part and mob_ai_sub_hard_lootsearch, R10.4's: a looter (MD_LOOTER) with no target looks for a floor item within
-    // loot_range and walks onto it (MSS_LOOT).  True ends this think, as the item branch of mob_ai_sub_hard does
-    return false;
-}
-
 void ROWOWMod::MobAISubHardActiveSearch(Creature* md, ROWOWMobData* mob, Unit* bl, Unit*& target, uint32 mode, int32 range2, int32 range3) const
 {
     // mob_ai_sub_hard_activesearch.  If can't seek yet, not an enemy, or you can't attack it, skip.  A summoned plant goes by RO's sides alone: WoW lets
@@ -446,7 +443,7 @@ void ROWOWMod::MobUnlockTarget(Creature* md, uint64 tick)
         case ROWOW_MSS_IDLE:
             break;
         case ROWOW_MSS_LOOT:
-            UnitStopWalking(md); // Looters that lost their target stop (R10.4: after 0.5-1.5 cells moved)
+            UnitStopWalkingSoon(md, tick); // Looters that lost their target stop after 0.5-1.5 cells moved
             isDefault = true;
             break;
         default:
@@ -463,6 +460,8 @@ void ROWOWMod::MobUnlockTarget(Creature* md, uint64 tick)
             mob->NextWalkTime = tick + urand(0, 999) + MIN_RANDOMWALKTIME;
     }
     mob->TargetID.Clear();
+    mob->LootTargetID.Clear();
+    mob->LootWalkID.Clear();
     mob->IsAttackContinue = false;
     mob->TargetToID.Clear();
 }
@@ -598,8 +597,14 @@ bool ROWOWMod::MobAISubHard(Creature* md, uint64 tick)
     if (canMove == true)
         mob->LastCanMove = tick;
 
+    // Its target can be a floor item, which isn't a Unit and has its own ID
     Unit* tbl = nullptr;
     Unit* abl = nullptr;
+    ROWOWFloorItem const* fitem = nullptr;
+    if (mob->TargetID.IsEmpty() == false)
+        mob->LootTargetID.Clear();
+    else if (mob->LootTargetID.IsEmpty() == false && (fitem = MapFindFloorItem(md->GetMap(), mob->LootTargetID)) == nullptr)
+        MobUnlockTarget(md, tick); // No valid target
     if (mob->TargetID.IsEmpty() == false)
     {
         // Check validity of current target. [Skotlex]
@@ -664,6 +669,8 @@ bool ROWOWMod::MobAISubHard(Creature* md, uint64 tick)
             {
                 // Attackable: if a monster can change the target to the attacker, it will change the target
                 mob->TargetID = mob->AttackedID; // set target
+                mob->LootTargetID.Clear();
+                fitem = nullptr;
                 if (mob->AttackedCount > 0)
                     mob->AttackedCount--; // Should we reset rude attack count?
                 tbl = abl; // Set the new target
@@ -685,11 +692,25 @@ bool ROWOWMod::MobAISubHard(Creature* md, uint64 tick)
     }
 
     // Scan area for items to loot, avoid trying to loot if the mob is full and can't consume the items.
-    if (canMove == true && (mode & ROWOW_MODE_LOOTER) != 0 && tbl == nullptr && MobLootSearch(md, mob, tick) == true)
-        return true;
+    if (canMove == true && (mode & ROWOW_MODE_LOOTER) != 0 && tick > GetSkillUnitData(md)->CanActTime &&
+        (mob->LootItems.size() < ROWOW_LOOTITEM_SIZE || BattleConfig.MonsterLootType != 1))
+    {
+        if (tbl == nullptr && fitem == nullptr)
+            fitem = MobLootSearch(md, mob, BattleConfig.LootRange); // Search for items in loot range
+        else if (fitem != nullptr && BattleConfig.MonsterLootSearchType == 0)
+        {
+            // Looter already has a target item, but we want to check if there is an item that's closer
+            int32 x = 0, y = 0;
+            GetUnitCell(md, x, y);
+            int32 dist = std::max(std::abs(fitem->X - x), std::abs(fitem->Y - y)) - 1;
+            if (dist > 0)
+                if (ROWOWFloorItem const* closerItem = MobLootSearch(md, mob, dist))
+                    fitem = closerItem;
+        }
+    }
 
     // Scan area for targets
-    if (((mode & ROWOW_MODE_AGGRESSIVE) != 0 && (tbl == nullptr || isSlaveLostTarget == true)) || mob->SkillState == ROWOW_MSS_FOLLOW)
+    if (((mode & ROWOW_MODE_AGGRESSIVE) != 0 && ((tbl == nullptr && fitem == nullptr) || isSlaveLostTarget == true)) || mob->SkillState == ROWOW_MSS_FOLLOW)
     {
         ObjectGuid prevID = mob->TargetID;
         int32 range2 = status->Range2;
@@ -716,7 +737,12 @@ bool ROWOWMod::MobAISubHard(Creature* md, uint64 tick)
         });
     }
 
-    if (tbl == nullptr) // No targets available.
+    if (tbl != nullptr)
+    {
+        mob->LootTargetID.Clear(); // A unit took the item's place as its target
+        fitem = nullptr;
+    }
+    if (tbl == nullptr && fitem == nullptr) // No targets available.
     {
         // Make sure target is unlocked
         MobUnlockTarget(md, tick);
@@ -732,6 +758,10 @@ bool ROWOWMod::MobAISubHard(Creature* md, uint64 tick)
         }
         return true;
     }
+
+    // Target exists, attack or loot as applicable.
+    if (fitem != nullptr)
+        return MobAISubHardLoot(md, mob, fitem, mode, canMove, tick);
 
     // At this point we know the target is attackable, attempt to attack.  Normal attack / berserk skill is only used when target is in range
     if (BattleCheckRange(md, tbl, attackRange) == true)
@@ -1141,8 +1171,8 @@ int64 ROWOWMod::MobSpawnTimeOf(Creature const* md, ROWOWMobSpawnLine const& line
 void ROWOWMod::MobSetDelaySpawn(Creature* md)
 {
     // mob_setdelayspawn, at the monster's death.  The core's clock counts whole seconds, so it's set to the second before the time, and MobSpawn
-    // (CanRespawn) holds the respawn until the time itself.  A corpse goes after ROWOW.Creature.CorpseTimeInMS, as RO's body fades, or holds on for
-    // its loot until the ground drops replace that (R10.4)
+    // (CanRespawn) holds the respawn until the time itself.  A corpse goes after ROWOW.Creature.CorpseTimeInMS, as RO's body fades (UpdateMobCorpse): the
+    // core's whole seconds are only the time it would go by itself
     ROWOWCreatureSpawn const* spawn = GetCreatureSpawn(md);
     if (spawn == nullptr)
         return; // Doesn't has respawn data!
@@ -1155,20 +1185,18 @@ void ROWOWMod::MobSetDelaySpawn(Creature* md)
     md->SetRespawnTime(uint32(spawntime / 1000));
     if (md->GetCreatureTemplate()->rank >= CREATURE_ELITE_ELITE)
         md->SaveRespawnTime(); // The core saved its own time at death
-    md->SetCorpseRemoveTime(ConfigCorpseLootHoldTimeInSec);
+    md->SetCorpseRemoveTime((ConfigCorpseTimeInMS + 999) / 1000);
 }
 
 void ROWOWMod::UpdateMobCorpse(Creature* md)
 {
-    // The body goes once it faded and its loot is gone (R10.4: nothing to wait for), and the loot's hold never passes the end of the respawn time
-    // by more than the time set for it (see MobSetDelaySpawn)
+    // The body goes once it faded, to the millisecond
     if (md->getDeathState() != DeathState::Corpse || GetROMobID(md) == 0)
         return;
     ROWOWMobData const* mob = md->CustomData.Get<ROWOWMobData>("ROWOWMobData");
     if (mob == nullptr || mob->DeadTime == 0 || GetTick() < mob->DeadTime + uint64(ConfigCorpseTimeInMS))
         return;
-    if (md->loot.isLooted() == true || md->loot.empty() == true)
-        md->RemoveCorpse(false);
+    md->RemoveCorpse(false);
 }
 
 bool ROWOWMod::MapSearchFreeCellOfSpawn(ROWOWMapGrid const& mapGrid, Map* map, int32 baseX, int32 baseY, int32 rx, int32 ry, int32 tries, int32& xOut, int32& yOut) const

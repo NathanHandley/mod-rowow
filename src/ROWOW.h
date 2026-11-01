@@ -41,7 +41,9 @@
 #include <unordered_set>
 #include <vector>
 
+class ChatHandler;
 class Creature;
+class GameObject;
 class Item;
 class Map;
 class Player;
@@ -101,6 +103,7 @@ struct ROWOWItemVisual
 // RO's directions from one cell to another (0 north, then counter-clockwise: rAthena's enum directions)
 #define ROWOW_RO_DIRECTION_COUNT                    8
 #define ROWOW_RO_DIRECTION_WEST                     2
+#define ROWOW_RO_DIRECTION_CENTER                   -1 // DIR_CENTER
 #define ROWOW_RO_DIRECTION_EAST                     6
 #define ROWOW_SKILL_CELL_GROUND_SEARCH_HEIGHT       3.0f    // How far above a ground skill's spot the ground search for its units' cells starts
 #define ROWOW_SKILL_CELL_GROUND_SEARCH_DISTANCE     10.0f   // How far down it looks
@@ -612,6 +615,16 @@ struct ROWOWProduce
 };
 
 // The rAthena battle config values (conf/battle) the RO rules use (from mod_rowow_db_battle_config), with rAthena's defaults
+// The rates of a kind of item in drops.conf
+struct ROWOWDropRateConfig
+{
+    int32 Rate = 100;
+    int32 RateBoss = 100;
+    int32 RateMvp = 100;
+    int32 Min = 1;
+    int32 Max = 10000;
+};
+
 struct ROWOWBattleConfig
 {
     int32 BaseExpRate = 100;
@@ -796,6 +809,34 @@ struct ROWOWBattleConfig
     int32 AlchemistSummonSetting = 15; // alchemist_summon_setting: 1 players can hit the plants, 2 the Marine Spheres, 4 one plant kind at a time
     int32 AlchemistSummonReward = 1; // alchemist_summon_reward: 1 Marine Spheres drop their items, 2 the plants too
     int32 FirstAttackLootBonus = 30; // first_attack_loot_bonus: the percent of all the damage the first attacker adds for the loot priority
+    int32 FlooritemLifetime = 60000; // flooritem_lifetime: how long an item stays on the ground (ms)
+    int32 ItemFirstGetTime = 3000; // item_first_get_time: how long only the top damage dealer can take a drop, then the second too, then the third (ms)
+    int32 ItemSecondGetTime = 2000; // item_second_get_time
+    int32 ItemThirdGetTime = 2000; // item_third_get_time
+    int32 MvpItemFirstGetTime = 10000; // mvp_item_first_get_time: the same for what a boss drops
+    int32 MvpItemSecondGetTime = 10000; // mvp_item_second_get_time
+    int32 MvpItemThirdGetTime = 2000; // mvp_item_third_get_time
+    int32 ItemOnFloor = 1; // item_flooritem_check: an item that can't be dropped is destroyed rather than left on the ground
+    int32 MonsterLootType = 0; // monster_loot_type: 1 a looter with 10 items stops looting, 0 it loses the first it took
+    int32 MonsterLootSearchType = 1; // monster_loot_search_type: 1 the item first on the map, 0 the closest
+    ROWOWDropRateConfig ItemDropCommon; // item_rate_common and friends (drops.conf): common items, in the ETC tab
+    ROWOWDropRateConfig ItemDropHeal; // Items that restore HP or SP
+    ROWOWDropRateConfig ItemDropUse; // Other usable items
+    ROWOWDropRateConfig ItemDropEquip; // Equipment
+    ROWOWDropRateConfig ItemDropCard;
+    ROWOWDropRateConfig ItemDropTreasure; // Treasure Boxes' (only the plain rate)
+    int32 ItemRateAddDrop = 100; // item_rate_adddrop: equip-granted drops
+    int32 ItemDropAddDropMin = 1; // item_drop_add_min
+    int32 ItemDropAddDropMax = 10000; // item_drop_add_max
+    int32 ItemGroupRate = 100; // item_group_rate: items inside equip-granted item groups and Ore Discovery's
+    int32 ItemGroupDropMin = 1; // item_group_drop_min
+    int32 ItemGroupDropMax = 10000; // item_group_drop_max
+    int32 LogarithmicDrops = 0; // item_logarithmic_drops
+    int32 DropRate0Item = 0; // drop_rate0item: a rate can become 0
+    int32 DropRateIncrease = 0; // drop_rateincrease: all items are increased by 0.01%
+    int32 DropsByLuk = 0; // drops_by_luk
+    int32 DropsByLuk2 = 0; // drops_by_luk2
+    int32 DropRateCap = 9000; // drop_rate_cap
     int32 SkillAddHealRate = 487; // skill_add_heal_rate: the heal skills bHealPower raises (1 Heal, 2 Sanctuary, 4 Aid Potion, 8 Slim Potion Pitcher, 16 Apple of Idun...)
     int32 BackstabBowPenalty = 1; // backstab_bow_penalty: Back Stab with a bow does half its damage
     int32 SwitchRemoveEdp = 2; // switch_remove_edp: (pre-renewal &1) taking off the weapon ends Enchant Deadly Poison, which bare hands can't cast
@@ -1139,6 +1180,15 @@ struct ROWOWMobChat
     std::string Message;
 };
 
+// An item as it falls (s_item_drop) and lies on the ground, and what a looter keeps of it (s_mob_lootitem): RO's items, and the converter's companion carriers
+struct ROWOWDropItem
+{
+    uint32 ItemTemplateID = 0;
+    uint32 Amount = 1;
+    bool IsIdentified = true;
+    uint32 MobID = 0; // The monster it dropped from, for the longer protection of a boss's drops, 0 for none
+};
+
 struct ROWOWMobData : public DataMap::Base
 {
     ObjectGuid TargetID; // target_id
@@ -1171,6 +1221,10 @@ struct ROWOWMobData : public DataMap::Base
     uint64 TrickCasting = 0; // trickcasting: the fake cast bar of NPC_RANDOMMOVE's walk
     bool IsCanEscape = false; // state.can_escape: a hit doesn't stop its walk (NPC_RUN, NPC_RANDOMMOVE)
     std::vector<ObjectGuid> SlaveGUIDs; // Its slaves on the map (what mob_countslave's map search finds)
+    ObjectGuid LootTargetID; // target_id when that's a floor item, which isn't a Unit (empty while TargetID is set)
+    ObjectGuid LootWalkID; // ud.target: the floor item it's walking to
+    std::vector<ROWOWDropItem> LootItems; // lootitems: what a looter picked up, which it drops when it dies
+    bool IsNoRewards = false; // mob_dead's type 1 and 2: killed by status_kill, so no exp and no drops
 
     // unit_data
     uint64 CanMoveTime = 0; // canmove_tick
@@ -1178,10 +1232,79 @@ struct ROWOWMobData : public DataMap::Base
     uint64 WalkStartTime = 0; // When the path started
     uint32 WalkPathTime = 0; // unit_get_walkpath_time of the path
     uint32 WalkPathLength = 0; // walkpath.path_len
+    std::vector<uint8> WalkPath; // walkpath.path, and the cell it starts on
+    int32 WalkPathX = 0;
+    int32 WalkPathY = 0;
     ObjectGuid TargetToID; // target_to: who it's walking to
     int32 ChaseRange = 0; // chaserange
     bool IsAttackContinue = false; // state.attack_continue
     ObjectGuid AttackTargetID; // target, with attacktimer: who it's swinging at, empty when not
+};
+
+#define ROWOW_LOOTITEM_SIZE                         10 // LOOTITEM_SIZE: what a looter can hold
+
+// map_addflooritem's flags
+#define ROWOW_FLOORITEM_MVP                         1 // &1 MVP item
+#define ROWOW_FLOORITEM_WIDE_SEARCH                 2 // &2 search free cell in 5x5 area instead of 3x3
+#define ROWOW_FLOORITEM_NO_DROP_CHECK               4 // &4 bypass droppable check
+
+// An item on the ground (flooritem_data).  Its gameobject (a temporary one, of the item's look) is what the clients see; this is kept in the map's ROWOWMapFloorItems
+struct ROWOWFloorItem
+{
+    ObjectGuid GUID; // Its gameobject
+    uint64 ID = 0; // bl.id, in the order they fell: the first looters go for
+    ROWOWDropItem Item;
+    int32 X = 0; // Its cell
+    int32 Y = 0;
+    ObjectGuid FirstGetCharID; // first_get_charid: empty for no owner
+    ObjectGuid SecondGetCharID;
+    ObjectGuid ThirdGetCharID;
+    uint64 FirstGetTick = 0;
+    uint64 SecondGetTick = 0;
+    uint64 ThirdGetTick = 0;
+};
+
+// The floor items of a map, kept in its CustomData as "ROWOWMapFloorItems".  Only that map's thread touches them
+struct ROWOWMapFloorItems : public DataMap::Base
+{
+    std::unordered_map<ObjectGuid, ROWOWFloorItem> ItemsByGUID;
+    std::deque<std::pair<uint64, ObjectGuid>> ClearQueue; // When each goes (cleartimer), soonest first: every item stays as long
+    uint64 LastID = 0;
+};
+
+// The gameobject template an item lies on the ground as (mod_rowow_ground_item)
+struct ROWOWGroundItem
+{
+    uint32 GameObjectEntry = 0;
+    uint32 UnidentifiedGameObjectEntry = 0; // 0 if it never comes unidentified
+};
+
+// A drop of a monster (s_mob_drop) as mob_drop_ratio_adjust leaves it.  A companion carrier has no RO ItemID
+struct ROWOWMobDrop
+{
+    uint32 ItemID = 0;
+    uint32 ItemTemplateID = 0;
+    int32 Rate = 0; // In 10000
+};
+
+// An equip-granted drop (s_add_drop): for race or class, an item or a group.  The race can be a monster, as -its ID
+#define ROWOW_ADD_DROP_RACE_NONE                    -1 // RC_NONE_
+#define ROWOW_ADD_DROP_CLASS_NONE                   -1 // CLASS_NONE
+struct ROWOWAddDrop
+{
+    uint32 ItemID = 0;
+    std::string Group;
+    int32 Race = ROWOW_ADD_DROP_RACE_NONE;
+    int32 Class = ROWOW_CLASS_ALL;
+    int32 Rate = 0;
+};
+
+// Who has the priority on what a monster leaves (mob_dead's first_sd, second_sd and third_sd)
+struct ROWOWLootPriority
+{
+    Player* FirstSD = nullptr;
+    Player* SecondSD = nullptr;
+    Player* ThirdSD = nullptr;
 };
 
 // One line of the monster spawns, as npc_parse_mob leaves it (from mod_rowow_db_mob_spawn)
@@ -1457,7 +1580,6 @@ public:
     uint32 ConfigGroundSnapCheckIntervalInMS = 1000;
     float ConfigGroundSnapTolerance = 0.15f;
     uint32 ConfigCorpseTimeInMS = 3000; // How long a monster's body stays, as RO's fades
-    uint32 ConfigCorpseLootHoldTimeInSec = 30; // How long a body with loot on it can stay.  The ground drops (R10.4) end this
     float CellSize = 1.05f; // Yards in an RO cell (from the map grids), for placing skill cells off the RO maps
 
     // Loaded once at startup, and only read after that (so the map threads can read it without a lock)
@@ -1637,6 +1759,7 @@ public:
     uint32 StatusCalcMaxSPPC(ROWOWIdentity const& identity, ROWOWStatus const& status, ROWOWStatusChange const* sc) const; // status_calc_maxsp_pc
     void StatusCalcRegen(Unit const* unit, ROWOWStatus& status) const; // status_calc_regen, for a player (its regen skills when the unit is given)
     ROWOWItem const* GetROItem(Item const* item) const;
+    ROWOWItem const* GetROItemByItemTemplateID(uint32 itemTemplateID) const;
 
     // Status points (pc.cpp): what raising a stat costs, the most it can go to, and raising it
     int32 PCNeedStatusPoint(ROWOWIdentity const& identity, uint8 statIndex, int32 value) const; // pc_need_status_point
@@ -1725,7 +1848,7 @@ public:
     void PCPercentHeal(Player* player, int32 hp, int32 sp); // pc_percentheal
     void StatusHeal(Player* player, int64 hp, int64 sp); // status_heal on a player
     bool PCGetItemGroup(Player* player, std::string const& groupName); // ItemGroupDatabase::pc_get_itemgroup
-    bool GiveROItem(Player* player, uint32 itemID, uint32 amount, bool isIdentified, Item** itemOut = nullptr); // pc_additem, mailing what doesn't fit
+    bool GiveROItem(Player* player, uint32 itemID, uint32 amount, bool isIdentified, Item** itemOut = nullptr); // pc_additem, what doesn't fit landing at the player's feet
     bool ItemDBIsIdentified(uint32 itemID) const; // itemdb_isidentified
     std::string GetROItemName(uint32 itemID) const; // The item's client name
     Item* PCSearchInventory(Player* player, uint32 itemID) const; // pc_search_inventory: an item of an item_db Id in the bags (identified, not worn)
@@ -2044,7 +2167,8 @@ public:
     void SkillRevealTrapInArea(Unit* src, int32 range, int32 x, int32 y); // skill_reveal_trap_inarea
     int32 SkillTrapSplash(Map* map, Unit* bl, ROWOWSkillUnitGroup& group, int32 index, uint64 tick); // skill_trap_splash
     void ClifChangeTrapLook(Map* map, ROWOWSkillUnitGroup& group, int32 index, Unit* target); // clif_changetraplook (UNT_USED_TRAPS): the trap's spring look on what set it off
-    void SkillTrapGiveBack(Unit* src, ROWOWSkillUnitGroup const& group); // The trap item an expired or removed trap leaves (map_addflooritem / pc_additem)
+    void SkillTrapGiveBack(Unit* src, ROWOWSkillUnitGroup const& group); // The trap item a removed trap gives back (pc_additem)
+    void SkillTrapRevert(Map* map, Unit* src, ROWOWSkillUnitGroup const& group, int32 x, int32 y); // The trap item an expired trap leaves on the ground (map_addflooritem)
     int32 SkillDanceOverlap(Map* map, ROWOWSkillUnitGroup& group, int32 index, uint8 flag); // skill_dance_overlap
     bool SkillDanceSwitch(ROWOWSkillUnitGroup& group, int32 index, bool revert); // skill_dance_switch
     void SkillUnitMoveUnitGroup(Map* map, std::shared_ptr<ROWOWSkillUnitGroup> group, int32 dx, int32 dy); // skill_unit_move_unit_group
@@ -2057,7 +2181,7 @@ public:
     Creature* MobOnceSpawnSub(Unit* src, int32 x, int32 y, uint32 mobID, uint8 ai, int64 duration); // mob_once_spawn_sub + mob_spawn, deleted after duration
     Unit const* BattleGetMaster(Unit const* bl) const; // battle_get_master: the player a summoned monster answers to (on its map), or itself
     int32 SkillCheckConditionMobMaster(Player* sd, uint16 skillID, uint32 mobClass, int32& countOut); // skill_check_condition_mob_master_sub's count
-    void MobDeadFindingOre(Creature* md); // mob_dead's Ore Discovery: an ore in the loot for the player with the loot priority who knows it
+    uint32 ItemGroupRandomDropItem(std::string const& groupName) const; // itemdb_group.get_random_entry(group, 1, GROUP_ALGORITHM_DROP): a random item that passed its rate, 0 for none
     int32 PCSkillHealBonus(Unit const* unit, uint16 skillID) const; // pc_skillheal_bonus: bHealPower (by skill_add_heal_rate) and bSkillHeal
     int32 PCSkillHeal2Bonus(Unit const* unit, uint16 skillID) const; // pc_skillheal2_bonus: bHealPower2 and bSkillHeal2
 
@@ -2113,11 +2237,49 @@ public:
     Unit* MobGetMaster(Creature const* md) const; // map_id2bl(md->master_id): a slave's monster master or a summon's player
     Player* MobGetMVPPlayer(Creature* md); // mob_data::get_mvp_player
     void MobDead(Creature* md, Unit* killer); // mob_dead's rewards and slaves, at a death or before a revive
-    void MobDeadMVP(Creature* md, Player* mvpSD, int32 count); // mob_dead's MVP reward
+    void MobDeadMVP(Creature* md, Player* mvpSD, int32 count, ROWOWLootPriority const& priority, bool isNoRewards); // mob_dead's MVP reward
     int32 MobDeadAttackerCount(Creature* md); // mob_dead's count: the logged attackers on its map
     bool MobBeforeDeath(Creature* md, Unit* src, uint32& damage); // status_damage about to kill a monster: its dead skills, and Kaizel and NPC_REBIRTH's revive
     void MobRevive(Creature* md, int32 perHP); // status_revive and mob_revive
-    bool MobLootSearch(Creature* md, ROWOWMobData* mob, uint64 tick); // The looter part of mob_ai_sub_hard: the seam for R10.4
+
+    // The items on the ground and monster drops (ROWOW_FloorItem.cpp), a port of map.cpp's, mob.cpp's and pc.cpp's.  A map's items are touched only in its
+    // thread; the tables are written at startup
+    void LoadFloorItemData();
+    int32 MobDropAdjust(int32 baseRate, int32 rateAdjust, int32 rateMin, int32 rateMax) const; // mob_drop_adjust
+    int32 MobGetDropRate(Unit const* src, int32 baseRate, int32 factor) const; // mob_getdroprate
+    void PCGetAddDrops(Player* sd, std::vector<ROWOWAddDrop>& addDropsOut) const; // sd->add_drop, by pc_bonus_item_drop's rules
+    bool PCGetZenyBonus(Player* sd, int32 mobLevel, int32& zenyOut) const; // mob_dead's get_zeny_num
+    void MobRollDrops(uint32 mobID, int32 mobLevel, uint8 race, uint8 mobClass, Unit* src, Player* sd, Player* firstSD, std::vector<ROWOWDropItem>& itemsOut); // mob_dead's rolls
+    void MobDeadLootPriority(Creature* md, Unit* src, ROWOWLootPriority& priority) const; // mob_dead's first_sd, second_sd and third_sd
+    void MobDeadDrops(Creature* md, Unit* src, ROWOWLootPriority const& priority, bool isNoDrops); // mob_dead's drops, and what it looted, on the ground
+    ROWOWFloorItem const* MapFindFloorItem(Map* map, ObjectGuid const& guid) const; // map_id2bl for a floor item
+    bool MapCellFree(Map* map, ROWOWMapGrid const& mapGrid, int32 x, int32 y, bool isCountingUnits) const; // map_cell_free
+    bool MapSearchFreeCellDist(Map* map, ROWOWMapGrid const& mapGrid, int32& x, int32& y, int32 distMin, int32 distMax, bool isCountingUnits) const; // map_search_freecell_dist
+    ObjectGuid MapAddFloorItem(Map* map, ROWOWDropItem const& item, int32 x, int32 y, ObjectGuid const& firstCharID, ObjectGuid const& secondCharID, ObjectGuid const& thirdCharID,
+        int32 flags, int8 dir, bool isCountingUnits); // map_addflooritem
+    void MapClearFloorItem(Map* map, ObjectGuid const& guid); // map_clearflooritem
+    void ClearFloorItemRow(Map* map, ObjectGuid const& guid);
+    void MapFloorItemTimer(Map* map); // map_clearflooritem_timer, from the map's update
+    void OnGroundItemRemoved(GameObject* go); // The gameobject of a floor item left the world
+    bool IsGroundItem(GameObject const* go) const; // A gameobject of a floor item
+    bool PCAddItem(Player* player, uint32 itemTemplateID, uint32 amount, bool isIdentified, Item** itemOut = nullptr); // pc_additem: all of it into the bags, or false
+    bool PCCantAct(Player* sd) const; // pc_cant_act
+    bool PCTakeItem(Player* sd, ObjectGuid const& guid, bool isGreed); // pc_takeitem
+    void ClifParseTakeItem(Player* sd, GameObject* go); // clif_parse_TakeItem
+    void SkillGreed(Player* sd); // skill_greed around a player
+    void PCDropItemAtFeet(Player* player, uint32 itemTemplateID, uint32 amount, bool isIdentified); // map_addflooritem at the feet, with no owner
+    ROWOWFloorItem const* MobLootSearch(Creature* md, ROWOWMobData* mob, int32 range); // mob_ai_sub_hard_lootsearch over the shooting range
+    bool MobAISubHardLoot(Creature* md, ROWOWMobData* mob, ROWOWFloorItem const* fitem, uint32 mode, bool canMove, uint64 tick); // mob_ai_sub_hard with a floor item as its target
+    void WriteFloorItemList(ChatHandler* handler, Map* map) const; // `.ro flooritems`
+    uint32 MapFloorItemFill(Player* player, uint32 count, int32 range); // `.ro floorfill`
+    bool WriteMobDropDump(std::string const& filePath) const; // Each monster's drops, as the oracle's @oraclemobdrops writes them
+    bool WriteMobDropSample(Player* player, uint32 mobID, uint32 kills, std::string const& filePath); // A sample of a monster's drops, as the oracle's @oracledropsample writes it
+    std::unordered_map<uint32, ROWOWGroundItem> GroundItemsByItemTemplateID; // Written at startup, read only after
+    uint32 GroundItemEntryLow = 0;
+    uint32 GroundItemEntryHigh = 0;
+    std::unordered_map<uint32, std::vector<ROWOWMobDrop>> MobDropsByMobID; // md->db->dropitem.  Written at startup, read only after
+    std::unordered_map<uint32, std::vector<ROWOWMobDrop>> MobMvpDropsByMobID; // md->db->mvpitem
+    std::unordered_map<uint32, std::vector<ROWOWMobDrop>> MobCompanionDropsByMobID; // The companion carriers, which are no RO drops
     bool MobAISubHardSlaveMob(Creature* md, ROWOWMobData* mob, uint64 tick); // mob_ai_sub_hard_slavemob
     void MobForEachEnemyInRange(Creature* md, int32 range, std::function<void(Unit*)> const& func); // map_foreachinallrange over DEFAULT_ENEMY_TYPE
     void MobAISubHardActiveSearch(Creature* md, ROWOWMobData* mob, Unit* bl, Unit*& target, uint32 mode, int32 range2, int32 range3) const; // mob_ai_sub_hard_activesearch
@@ -2157,6 +2319,8 @@ public:
     bool IsMobMovementBlocked(Creature* md, bool isIgnoreDisableMove = false) const; // Movement the core controls, or that's impossible right now
     bool UnitCanMove(Creature* md, ROWOWMobData const* mob, uint64 tick) const; // unit_can_move
     bool UnitCanReachBL(Creature* md, Unit const* tbl, int32 range, int32& xOut, int32& yOut) const; // unit_can_reach_bl
+    bool UnitCanReachCell(Creature* md, int32 x1, int32 y1, int32 range) const; // unit_can_reach_bl for a floor item, which stands on its cell
+    bool UnitWalkToCell(Creature* md, ROWOWMobData* mob, int32 x, int32 y); // unit_walktobl with range 0, for a floor item
     uint32 UnitWalkPathPos(Creature* md, ROWOWMobData const* mob, uint64 tick) const; // walkpath.path_pos
     bool UnitWalkPath(Creature* md, ROWOWMobData* mob, std::vector<uint8> const& path, int32 x0, int32 y0, bool isRun); // Starts walking a path
     uint32 UnitEscape(Creature* md, Unit* target, int32 dist, uint8 flag); // unit_escape: the walk's time, 0 for no walk
@@ -2165,6 +2329,7 @@ public:
     bool UnitWalkToBL(Creature* md, ROWOWMobData* mob, Unit* tbl, int32 range, bool isAttackContinue); // unit_walktobl
     bool UnitUpdateChase(Creature* md, ROWOWMobData* mob, uint64 tick); // unit_update_chase
     void UnitStopWalking(Creature* md); // unit_stop_walking, leaving movement the core controls alone
+    void UnitStopWalkingSoon(Creature* md, uint64 tick); // unit_stop_walking_soon: after 0.5 to 1.5 more cells
     void UnitSetWalkDelay(Creature* md, ROWOWMobData* mob, uint64 tick, int64 delay); // unit_set_walkdelay, for damage
     bool UnitAttack(Creature* md, ROWOWMobData* mob, Unit* target); // unit_attack: false when the walking may go on
     void UnitUnattackable(Creature* md, ROWOWMobData* mob, uint64 tick); // unit_unattackable

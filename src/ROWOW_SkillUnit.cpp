@@ -2120,7 +2120,7 @@ void ROWOWMod::SkillUnitTimer(Map* map, uint32 /*diff*/)
                     case ROWOW_UNT_TALKIEBOX:
                         // revert unit back into a trap (an unspent one, set by a player)
                         if (unit.Val1 > 0)
-                            SkillTrapGiveBack(GetSkillUnitGroupSource(map, group->SrcGUID), *group);
+                            SkillTrapRevert(map, GetSkillUnitGroupSource(map, group->SrcGUID), *group, unit.X, unit.Y);
                         SkillDelUnit(map, *group, index);
                         break;
                     case ROWOW_UNT_WARP_ACTIVE:
