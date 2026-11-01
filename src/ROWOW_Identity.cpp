@@ -951,6 +951,8 @@ void ROWOWMod::RemoveROFormAuras(Player* player)
     RefreshIllusionHead(player, nullptr);
     RefreshIllusionHeadgear(player, nullptr);
     RefreshIllusionOptionLooks(player, nullptr);
+    RefreshIllusionGarment(player, nullptr);
+    RefreshIllusionHatEffects(player, nullptr);
 }
 
 void ROWOWMod::LeaveROForm(Player* player)

@@ -217,6 +217,7 @@ public:
     void SendInput(Player* player, ROWOWNpc const* npc, bool isString, int64 minimum, int64 maximum) override;
     void SendCutin(Player* player, std::string const& image, int32 position) override;
     void SendEnd(Player* player, ROWOWNpc const* npc) override;
+    void SendAnswered(Player* player, ROWOWNpc const* npc) override;
 };
 
 #endif

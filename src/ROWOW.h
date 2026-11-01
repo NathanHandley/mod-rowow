@@ -90,11 +90,12 @@ struct ROWOWIllusion
 #define ROWOW_ITEM_VISUAL_TYPE_HEADGEAR_TOP         2
 #define ROWOW_ITEM_VISUAL_TYPE_HEADGEAR_MID         3
 #define ROWOW_ITEM_VISUAL_TYPE_HEADGEAR_LOW         4
+#define ROWOW_ITEM_VISUAL_TYPE_GARMENT              6 // Its view is the robe ID (only the post-renewal looks)
 #define ROWOW_HAIR_STYLE_DEFAULT                    1 // The head shown for a hair style or color with no head (RO's first style, its own colors)
 struct ROWOWItemVisual
 {
     uint8 VisualType = 0;
-    uint32 ViewID = 0; // RO headgear accessory ID or shield type
+    uint32 ViewID = 0; // RO headgear accessory ID, shield type or robe ID
     uint32 VisualSpellID = 0; // Aura that attaches the headgear model, 0 for none
 };
 
@@ -502,6 +503,7 @@ struct ROWOWItem
     int32 Buy = 0; // The NPC shops' price (zeny)
     bool IsNoTrade = false; // item_db's Trade restrictions the cart and the shops read (itemdb_cantrade, itemdb_cancartstore)
     bool IsNoCart = false;
+    std::vector<std::string> HatEffectNames; // The hat effects (HAT_EF_*, in upper case) it shows while worn (only the post-renewal looks have them)
 };
 
 // An item group (rAthena's item_group_db, by its name without IG_): its subgroups, each giving one item picked at random, or all of them
@@ -1211,6 +1213,11 @@ public:
     std::unordered_set<uint32> OptionLookSpellIDs;
     std::unordered_map<uint32, uint32> OptionIconSpellIDsByOption; // The marker aura of an option RO shows an icon for (ROWOW_OPTION_RIDING, _FALCON)
     std::unordered_map<std::string, uint32> ScriptLookSpellIDsByKey; // See GetScriptLookKey
+    std::unordered_map<std::string, uint32> ScriptLookSoundIDsByName; // The SoundEntries ID of each sound look (by its file name)
+    std::unordered_map<uint32, uint32> GarmentSpellIDsByKey; // See GetGarmentKey
+    std::unordered_set<uint32> GarmentSpellIDs;
+    std::unordered_map<std::string, uint32> HatEffectSpellIDsByName; // By the HAT_EF_ name, in upper case
+    std::unordered_set<uint32> HatEffectSpellIDs;
     std::unordered_map<uint32, ROWOWMapGrid> MapGridsByMapID;
     std::unordered_map<std::string, ROWOWDataTable> DataTablesByName; // The rAthena data, by table name (ROWOW_DATA_TABLE_*)
     std::unordered_map<uint32, uint32> MobIDsByCreatureEntry; // The RO monster (mob_db Id) behind each RO creature template
@@ -1286,6 +1293,13 @@ public:
     bool SetIdentityHair(Player* player, uint32 style, uint32 color); // False if there's no head for it
     void SendHairToClient(Player* player);
 
+    // R9.6: the post-renewal looks' garments (robes, wings) and hat effects in the RO form, each a hidden aura (the garment's model attached
+    // at the body anchor, the hat effect's looping effect), kept by RefreshIllusionDisplay like the headgear.  None without the converter's
+    // RO_ITEM_GENERATE_RENEWAL_ITEMS
+    static uint32 GetGarmentKey(uint32 viewID, bool isMale) { return (viewID << 1) | (isMale == true ? 1 : 0); }
+    void RefreshIllusionGarment(Player* player, ROWOWIllusion const* illusion);
+    void RefreshIllusionHatEffects(Player* player, ROWOWIllusion const* illusion);
+
     // R9.5: the identity's options on its RO illusion.  Riding a Peco shows the job's mounted body (the illusion of its job key with
     // "_riding"), and the cart (in its look) and the falcon are hidden auras attaching their models, with RO's riding and falcon icons as
     // marker auras.  Kept by RefreshIllusionDisplay, like the head
@@ -1297,6 +1311,7 @@ public:
     // emotion over its head, RO's effect or RO's sound (mod_rowow_script_look).  False when the converter made none for it
     static std::string GetScriptLookKey(uint8 kind, std::string const& name) { return fmt::format("{}:{}", kind, name); }
     bool PlayScriptLook(Unit* unit, uint8 kind, std::string const& name);
+    bool PlayScriptSoundToPlayer(Player* player, std::string const& fileName); // The sound heard by that player only, wherever it is (soundeffectall on a map)
     bool ClifEmotion(Unit* unit, int32 type); // clif_emotion
 
     // A table of rAthena data (ROWOW_DATA_TABLE_*), or null when the converter hasn't written it

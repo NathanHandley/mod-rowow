@@ -2201,12 +2201,24 @@ void ROWOWMod::RegisterNpcScriptCommands()
             PlayScriptLook(context.AttachedPlayer, ROWOW_SCRIPT_LOOK_SOUND, ToLower(GetTextArgument(arguments, 0)));
         return ROWOWScriptValue::FromNumber(0);
     });
-    engine->RegisterCommand("soundeffectall", [this, getNpcUnit](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    engine->RegisterCommand("soundeffectall", [this, getNpcUnit, forEachPlayerInArea](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
     {
-        // soundeffectall "<file>",<type>{,"<map>"{,<x0>,<y0>,<x1>,<y1>}}: around the attached player, else the NPC (a whole map or an area of
-        // it is heard around the player or NPC only)
+        // soundeffectall "<file>",<type>{,"<map>"{,<x0>,<y0>,<x1>,<y1>}}: around the attached player, else the NPC; with a map, every player
+        // on it (or in the area of it) hears it where it is (rAthena's map_foreachinmap/map_foreachinallarea of soundeffect_sub).  A map other
+        // than the run's is only reached from the world update (forEachPlayerInArea)
+        std::string fileName = ToLower(GetTextArgument(arguments, 0));
+        if (arguments.size() >= 3)
+        {
+            bool isArea = arguments.size() >= 7;
+            int32 x0 = isArea == true ? int32(GetArgument(arguments, 3, 0)) : 0;
+            int32 y0 = isArea == true ? int32(GetArgument(arguments, 4, 0)) : 0;
+            int32 x1 = isArea == true ? int32(GetArgument(arguments, 5, 0)) : std::numeric_limits<int32>::max();
+            int32 y1 = isArea == true ? int32(GetArgument(arguments, 6, 0)) : std::numeric_limits<int32>::max();
+            forEachPlayerInArea(context, GetTextArgument(arguments, 2), x0, y0, x1, y1, [this, &fileName](Player* player) { PlayScriptSoundToPlayer(player, fileName); });
+            return ROWOWScriptValue::FromNumber(0);
+        }
         Unit* unit = context.AttachedPlayer != nullptr ? static_cast<Unit*>(context.AttachedPlayer) : getNpcUnit(context, context.Npc);
-        PlayScriptLook(unit, ROWOW_SCRIPT_LOOK_SOUND, ToLower(GetTextArgument(arguments, 0)));
+        PlayScriptLook(unit, ROWOW_SCRIPT_LOOK_SOUND, fileName);
         return ROWOWScriptValue::FromNumber(0);
     });
 

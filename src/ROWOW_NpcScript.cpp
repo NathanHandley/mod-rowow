@@ -193,6 +193,13 @@ void ROWOWWindowScriptDialog::SendEnd(Player* player, ROWOWNpc const* /*npc*/)
     SendNpcWindowMessage(player, "E");
 }
 
+void ROWOWWindowScriptDialog::SendAnswered(Player* player, ROWOWNpc const* /*npc*/)
+{
+    // "A": the window clears itself on its own buttons, but an answer typed (.ro npc next, quickly or by a test) would leave the old page
+    // and buttons showing under the next one
+    SendNpcWindowMessage(player, "A");
+}
+
 void ROWOWChatScriptDialog::SendMes(Player* player, ROWOWNpc const* npc, std::string const& text)
 {
     ChatHandler(player->GetSession()).PSendSysMessage("|cffffd100{}:|r {}", npc != nullptr ? npc->Name : "NPC", GetChatText(text));
@@ -700,6 +707,8 @@ void ROWOWMod::NpcDialogNext(Player* player)
     ROWOWIdentity* identity = GetIdentity(player);
     if (identity->NpcRun == nullptr || identity->NpcRun->Wait != ROWOW_SCRIPT_WAIT_NEXT)
         return;
+    if (identity->NpcRun->Dialog != nullptr)
+        identity->NpcRun->Dialog->SendAnswered(player, identity->NpcRun->Npc);
     ROWOWSCRIPT->Resume(*identity->NpcRun);
     if (identity->NpcRun != nullptr && identity->NpcRun->IsStopped == true)
         EndNpcRun(player);
@@ -712,6 +721,8 @@ void ROWOWMod::NpcDialogSelect(Player* player, int32 choice)
     if (identity->NpcRun == nullptr || identity->NpcRun->Wait != ROWOW_SCRIPT_WAIT_MENU)
         return;
     ROWOWScriptContext& context = *identity->NpcRun;
+    if (context.Dialog != nullptr)
+        context.Dialog->SendAnswered(player, context.Npc);
     context.NpcMenu = choice;
     ROWOWSCRIPT->Resume(context);
     if (identity->NpcRun != nullptr && identity->NpcRun->IsStopped == true)
@@ -725,6 +736,8 @@ void ROWOWMod::NpcDialogInput(Player* player, std::string const& value)
     if (identity->NpcRun == nullptr || identity->NpcRun->Wait != ROWOW_SCRIPT_WAIT_INPUT)
         return;
     ROWOWScriptContext& context = *identity->NpcRun;
+    if (context.Dialog != nullptr)
+        context.Dialog->SendAnswered(player, context.Npc);
     context.NpcString = value;
     context.NpcAmount = int64(strtoll(value.c_str(), nullptr, 10));
     ROWOWSCRIPT->Resume(context);

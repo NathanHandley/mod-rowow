@@ -49,6 +49,11 @@ void ROWOWMod::LoadIllusionData()
     HeadSpellIDs.clear();
     OptionLookSpellIDsByKey.clear();
     OptionLookSpellIDs.clear();
+    GarmentSpellIDsByKey.clear();
+    GarmentSpellIDs.clear();
+    HatEffectSpellIDsByName.clear();
+    HatEffectSpellIDs.clear();
+    ScriptLookSoundIDsByName.clear();
     if (IsEnabled == false)
         return;
 
@@ -144,12 +149,47 @@ void ROWOWMod::LoadIllusionData()
     QueryResult scriptLookTableResult = WorldDatabase.Query("SELECT 1 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'mod_rowow_script_look'");
     if (scriptLookTableResult)
     {
-        if (QueryResult result = WorldDatabase.Query("SELECT `Kind`, `Name`, `SpellID` FROM `mod_rowow_script_look`"))
+        // The sounds' own IDs came later (R9.6, for map-wide sounds), so a table without them still loads
+        QueryResult soundColumnResult = WorldDatabase.Query("SELECT 1 FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'mod_rowow_script_look' AND column_name = 'SoundEntryID'");
+        if (QueryResult result = WorldDatabase.Query(soundColumnResult ? "SELECT `Kind`, `Name`, `SpellID`, `SoundEntryID` FROM `mod_rowow_script_look`"
+            : "SELECT `Kind`, `Name`, `SpellID`, 0 FROM `mod_rowow_script_look`"))
         {
             do
             {
                 Field* fields = result->Fetch();
-                ScriptLookSpellIDsByKey[GetScriptLookKey(fields[0].Get<uint8>(), fields[1].Get<std::string>())] = fields[2].Get<uint32>();
+                uint8 kind = fields[0].Get<uint8>();
+                std::string name = fields[1].Get<std::string>();
+                ScriptLookSpellIDsByKey[GetScriptLookKey(kind, name)] = fields[2].Get<uint32>();
+                if (kind == ROWOW_SCRIPT_LOOK_SOUND && fields[3].Get<uint32>() != 0)
+                    ScriptLookSoundIDsByName[name] = fields[3].Get<uint32>();
+            } while (result->NextRow());
+        }
+    }
+    QueryResult garmentTableResult = WorldDatabase.Query("SELECT 1 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'mod_rowow_garment'");
+    if (garmentTableResult)
+    {
+        if (QueryResult result = WorldDatabase.Query("SELECT `ViewID`, `IsMale`, `SpellID` FROM `mod_rowow_garment`"))
+        {
+            do
+            {
+                Field* fields = result->Fetch();
+                uint32 spellID = fields[2].Get<uint32>();
+                GarmentSpellIDsByKey[GetGarmentKey(fields[0].Get<uint32>(), fields[1].Get<uint8>() != 0)] = spellID;
+                GarmentSpellIDs.insert(spellID);
+            } while (result->NextRow());
+        }
+    }
+    QueryResult hatEffectTableResult = WorldDatabase.Query("SELECT 1 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'mod_rowow_hat_effect'");
+    if (hatEffectTableResult)
+    {
+        if (QueryResult result = WorldDatabase.Query("SELECT `Name`, `SpellID` FROM `mod_rowow_hat_effect`"))
+        {
+            do
+            {
+                Field* fields = result->Fetch();
+                uint32 spellID = fields[1].Get<uint32>();
+                HatEffectSpellIDsByName[fields[0].Get<std::string>()] = spellID;
+                HatEffectSpellIDs.insert(spellID);
             } while (result->NextRow());
         }
     }
@@ -167,8 +207,9 @@ void ROWOWMod::LoadIllusionData()
             } while (result->NextRow());
         }
     }
-    LOG_INFO("module.ROWOW", "ROWOWMod::LoadIllusionData loaded {} RO illusions, {} item visuals, {} headgear auras, {} head auras, {} option look auras and {} script looks",
-        IllusionsBySpellID.size(), ItemVisualsByItemID.size(), HeadgearSpellIDs.size(), HeadSpellIDs.size(), OptionLookSpellIDs.size(), ScriptLookSpellIDsByKey.size());
+    LOG_INFO("module.ROWOW", "ROWOWMod::LoadIllusionData loaded {} RO illusions, {} item visuals, {} headgear auras, {} head auras, {} option look auras, {} script looks, "
+        "{} garment auras and {} hat effect auras", IllusionsBySpellID.size(), ItemVisualsByItemID.size(), HeadgearSpellIDs.size(), HeadSpellIDs.size(), OptionLookSpellIDs.size(),
+        ScriptLookSpellIDsByKey.size(), GarmentSpellIDs.size(), HatEffectSpellIDs.size());
 }
 
 ROWOWIllusion const* ROWOWMod::GetActiveIllusion(Player* player) const
@@ -270,6 +311,8 @@ void ROWOWMod::RefreshIllusionDisplay(Player* player)
     RefreshIllusionHead(player, illusion);
     RefreshIllusionHeadgear(player, illusion);
     RefreshIllusionOptionLooks(player, illusion);
+    RefreshIllusionGarment(player, illusion);
+    RefreshIllusionHatEffects(player, illusion);
     if (illusion == nullptr)
         return;
 
@@ -349,6 +392,87 @@ void ROWOWMod::RefreshIllusionHeadgear(Player* player, ROWOWIllusion const* illu
     for (uint8 i = 0; i < 3; ++i)
         if (wantedSpellIDs[i] != 0 && player->HasAura(wantedSpellIDs[i]) == false)
             player->AddAura(wantedSpellIDs[i], player);
+}
+
+void ROWOWMod::RefreshIllusionGarment(Player* player, ROWOWIllusion const* illusion)
+{
+    if (GarmentSpellIDs.empty() == true)
+        return;
+
+    // The garment aura wanted: in the RO form's illusion, the robe of the garment worn, a costume garment over the garment (RO's clif_changelook
+    // LOOK_ROBE, the costume's view first)
+    uint32 wantedSpellID = 0;
+    if (illusion != nullptr && IsInROForm(player) == true)
+    {
+        for (uint32 garmentPosition : { ROWOW_EQUIP_POSITION_COSTUME_GARMENT, ROWOW_EQUIP_POSITION_GARMENT })
+        {
+            Item* item = GetIdentityEquippedItem(player, garmentPosition);
+            if (item == nullptr)
+                continue;
+            auto itemVisualIter = ItemVisualsByItemID.find(item->GetEntry());
+            if (itemVisualIter == ItemVisualsByItemID.end() || itemVisualIter->second.VisualType != ROWOW_ITEM_VISUAL_TYPE_GARMENT)
+                continue;
+            auto spellIter = GarmentSpellIDsByKey.find(GetGarmentKey(itemVisualIter->second.ViewID, illusion->IsMale));
+            if (spellIter != GarmentSpellIDsByKey.end())
+            {
+                wantedSpellID = spellIter->second;
+                break;
+            }
+        }
+    }
+
+    // Take off the garment auras that aren't wanted (dummy auras, like the headgear's), and put on the wanted one
+    std::vector<uint32> spellIDsToRemove;
+    for (AuraEffect const* auraEffect : player->GetAuraEffectsByType(SPELL_AURA_DUMMY))
+    {
+        uint32 spellID = auraEffect->GetId();
+        if (spellID != wantedSpellID && GarmentSpellIDs.find(spellID) != GarmentSpellIDs.end())
+            spellIDsToRemove.push_back(spellID);
+    }
+    for (uint32 spellID : spellIDsToRemove)
+        player->RemoveAurasDueToSpell(spellID);
+    if (wantedSpellID != 0 && player->HasAura(wantedSpellID) == false)
+        player->AddAura(wantedSpellID, player);
+}
+
+void ROWOWMod::RefreshIllusionHatEffects(Player* player, ROWOWIllusion const* illusion)
+{
+    if (HatEffectSpellIDs.empty() == true)
+        return;
+
+    // The hat effect auras wanted: in the RO form's illusion, every hat effect of the items worn (rAthena's clif_hat_effects, from the
+    // items' HatEffects)
+    std::unordered_set<uint32> wantedSpellIDs;
+    if (illusion != nullptr && IsInROForm(player) == true)
+    {
+        ROWOWIdentity* identity = GetIdentity(player);
+        for (auto const& itemGUIDByEquipPosition : identity->ItemGUIDsByEquipPosition)
+        {
+            ROWOWItem const* roItem = GetROItem(player->GetItemByGuid(ObjectGuid::Create<HighGuid::Item>(itemGUIDByEquipPosition.second)));
+            if (roItem == nullptr)
+                continue;
+            for (std::string const& hatEffectName : roItem->HatEffectNames)
+            {
+                auto spellIter = HatEffectSpellIDsByName.find(hatEffectName);
+                if (spellIter != HatEffectSpellIDsByName.end())
+                    wantedSpellIDs.insert(spellIter->second);
+            }
+        }
+    }
+
+    // Take off the hat effect auras that aren't wanted (dummy auras), and put on the wanted ones
+    std::vector<uint32> spellIDsToRemove;
+    for (AuraEffect const* auraEffect : player->GetAuraEffectsByType(SPELL_AURA_DUMMY))
+    {
+        uint32 spellID = auraEffect->GetId();
+        if (HatEffectSpellIDs.find(spellID) != HatEffectSpellIDs.end() && wantedSpellIDs.find(spellID) == wantedSpellIDs.end())
+            spellIDsToRemove.push_back(spellID);
+    }
+    for (uint32 spellID : spellIDsToRemove)
+        player->RemoveAurasDueToSpell(spellID);
+    for (uint32 spellID : wantedSpellIDs)
+        if (player->HasAura(spellID) == false)
+            player->AddAura(spellID, player);
 }
 
 uint32 ROWOWMod::GetHeadSpellID(uint32 style, uint32 color, bool isMale) const
@@ -507,6 +631,18 @@ bool ROWOWMod::PlayScriptLook(Unit* unit, uint8 kind, std::string const& name)
     if (spellIter == ScriptLookSpellIDsByKey.end())
         return false;
     unit->CastSpell(unit, spellIter->second, true);
+    return true;
+}
+
+bool ROWOWMod::PlayScriptSoundToPlayer(Player* player, std::string const& fileName)
+{
+    // The sound itself (not its spell), sent to the player alone, so a map-wide soundeffectall is heard once by each player wherever it is
+    if (player == nullptr || player->IsInWorld() == false)
+        return false;
+    auto soundIter = ScriptLookSoundIDsByName.find(fileName);
+    if (soundIter == ScriptLookSoundIDsByName.end())
+        return false;
+    player->PlayDirectSound(soundIter->second, player);
     return true;
 }
 

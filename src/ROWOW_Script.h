@@ -228,6 +228,8 @@ public:
     virtual void SendInput(Player* player, ROWOWNpc const* npc, bool isString, int64 minimum, int64 maximum) = 0; // clif_scriptinput(str), with its bounds
     virtual void SendCutin(Player* player, std::string const& image, int32 position) = 0; // clif_cutin (position 255 takes it off)
     virtual void SendEnd(Player* player, ROWOWNpc const* npc) = 0; // The run is over: the window goes
+    virtual void SendAnswered(Player* /*player*/, ROWOWNpc const* /*npc*/) {} // A next, menu or input answer was taken (clicked or typed): the window
+                                                                               // drops its buttons and menu and starts a new page, as RO's client does
 };
 
 typedef std::function<ROWOWScriptValue(ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)> ROWOWScriptCommandFunction;

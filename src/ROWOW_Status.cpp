@@ -438,6 +438,7 @@ void ROWOWMod::LoadStatusData()
         int32 weightColumnIndex = itemTable->GetColumnIndex("Weight");
         int32 tradeColumnIndex = itemTable->GetColumnIndex("Trade");
         int32 buyColumnIndex = itemTable->GetColumnIndex("Buy");
+        int32 hatEffectsColumnIndex = itemTable->GetColumnIndex("HatEffects"); // The post-renewal looks' (RoItemsRenewal.csv)
         for (size_t rowIndex = 0; rowIndex < itemTable->Rows.size(); rowIndex++)
         {
             uint32 itemID = uint32(itemTable->GetInt(rowIndex, idColumnIndex, 0));
@@ -534,6 +535,9 @@ void ROWOWMod::LoadStatusData()
                 else if (tradeField.first == "NoCart")
                     item.IsNoCart = tradeField.second == "true";
             }
+            item.HatEffectNames = ROWOWDataTable::ParseTextList(itemTable->GetCell(rowIndex, hatEffectsColumnIndex));
+            for (std::string& hatEffectName : item.HatEffectNames) // The converter's mod_rowow_hat_effect goes by the upper case name
+                std::transform(hatEffectName.begin(), hatEffectName.end(), hatEffectName.begin(), [](unsigned char c) { return char(std::toupper(c)); });
             if (item.IsWeapon == true)
                 item.WeaponType = uint8(std::max(0, GetWeaponTypeByName(itemTable->GetCell(rowIndex, subTypeColumnIndex))));
             if (item.IsAmmo == true)
