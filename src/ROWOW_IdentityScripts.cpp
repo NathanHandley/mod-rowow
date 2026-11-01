@@ -413,7 +413,7 @@ public:
 class ROWOW_IdentityUnitScript : public UnitScript
 {
 public:
-    ROWOW_IdentityUnitScript() : UnitScript("ROWOW_IdentityUnitScript", true, { UNITHOOK_ON_DAMAGE, UNITHOOK_ON_UNIT_DEATH, UNITHOOK_ON_UNIT_ENTER_EVADE_MODE }) {}
+    ROWOW_IdentityUnitScript() : UnitScript("ROWOW_IdentityUnitScript", true, { UNITHOOK_ON_DAMAGE, UNITHOOK_ON_UNIT_DEATH }) {}
 
     void OnDamage(Unit* attacker, Unit* victim, uint32& damage) override
     {
@@ -471,14 +471,6 @@ public:
         }
         else if (unit->IsPlayer() == true)
             ROWOW->PCDeadPenalty(unit->ToPlayer());
-    }
-
-    void OnUnitEnterEvadeMode(Unit* unit, uint8 /*evadeReason*/) override
-    {
-        // Back home at full health, so what it was dealt before no longer counts
-        if (unit != nullptr && unit->IsCreature() == true)
-            if (ROWOWDamageLog* damageLog = unit->CustomData.Get<ROWOWDamageLog>("ROWOWDamageLog"))
-                damageLog->Entries.clear();
     }
 };
 
@@ -621,6 +613,9 @@ public:
             { "weaponrefine", HandleROWeaponRefineCommand, SEC_PLAYER, Console::No },
             { "message",  HandleROMessageCommand, SEC_PLAYER,    Console::No },
             { "mobcast",  HandleROMobCastCommand, SEC_GAMEMASTER, Console::No },
+            { "mob",      HandleROMobCommand,    SEC_GAMEMASTER, Console::No },
+            { "mobs",     HandleROMobsCommand,   SEC_GAMEMASTER, Console::No },
+            { "mobdump",  HandleROMobDumpCommand, SEC_GAMEMASTER, Console::Yes },
             { "setcart",  HandleROSetCartCommand, SEC_GAMEMASTER, Console::No },
             { "setriding", HandleROSetRidingCommand, SEC_GAMEMASTER, Console::No },
             { "setfalcon", HandleROSetFalconCommand, SEC_GAMEMASTER, Console::No },
@@ -1344,6 +1339,85 @@ public:
         // Thrust's 0.1% a weapon hit is 20%).  A world-thread command, run between the maps' updates; the converter's value is back at restart
         ROWOW->BattleConfig.EquipSelfBreakRate = std::clamp(rate, 0, 1000000);
         handler->PSendSysMessage("equip_self_break_rate is now {}.", ROWOW->BattleConfig.EquipSelfBreakRate);
+        return true;
+    }
+
+    static bool HandleROMobCommand(ChatHandler* handler, Optional<uint32> spawnID)
+    {
+        // What the selected RO monster (or the one of a spawn id, on the GM's map) is thinking: its modes, state, target and spawn line
+        Creature* md = handler->getSelectedCreature();
+        if (spawnID.has_value() == true && handler->GetSession() != nullptr)
+        {
+            auto creatures = handler->GetSession()->GetPlayer()->GetMap()->GetCreatureBySpawnIdStore().equal_range(*spawnID);
+            md = creatures.first != creatures.second ? creatures.first->second : nullptr;
+        }
+        ROWOWStatus const* status = md != nullptr ? ROWOW->GetROStatus(md) : nullptr;
+        if (status == nullptr)
+        {
+            handler->SendSysMessage("Select an RO monster.");
+            return false;
+        }
+        static char const* const stateNames[] = { "idle", "walk", "loot", "dead", "berserk", "angry", "rush", "follow" };
+        ROWOWMobData* mob = ROWOW->GetMobData(md);
+        Unit* target = ObjectAccessor::GetUnit(*md, mob->TargetID);
+        int32 x = 0, y = 0;
+        ROWOW->GetUnitCell(md, x, y);
+        handler->PSendSysMessage("{} (mob {}) mode {:#x} range {} view {} chase {} state {} aggressive {} target {} victim {} walking {} combat {} hp {}/{} cell {},{}",
+            md->GetName(), ROWOW->GetROMobID(md), status->Mode, status->Range, status->Range2, status->Range3, stateNames[mob->SkillState], mob->IsAggressive,
+            target != nullptr ? target->GetName() : "none", md->GetVictim() != nullptr ? md->GetVictim()->GetName() : "none", mob->IsWalking, md->IsInCombat(),
+            md->GetHealth(), md->GetMaxHealth(), x, y);
+        if (Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr)
+        {
+            // What mob_ai_sub_hard_activesearch finds of the GM
+            ROWOWMapGrid const* mapGrid = ROWOW->GetMapGrid(md->GetMapId());
+            int32 px = 0, py = 0;
+            ROWOW->GetUnitCell(player, px, py);
+            std::vector<uint8> path;
+            bool hasPath = mapGrid != nullptr && ROWOW->PathSearch(path, md->GetMap(), *mapGrid, x, y, px, py, ROWOW_CELL_CHKWALL);
+            handler->PSendSysMessage("of you: distance {} valid {} skilluse {} target {} cantarget {} range {} path {} len {} near {} think in {}", ROWOW->DistanceBL(md, player), md->IsValidAttackTarget(player),
+                ROWOW->StatusCheckSkillUse(md, player, 0, 0), ROWOW->BattleCheckTarget(md, player, ROWOW_BCT_ENEMY), ROWOW->MobCanTarget(md, player), ROWOW->BattleCheckRange(md, player, status->Range2),
+                hasPath, path.size(), ROWOW->MobIsNearPC(md, mob), mob->ThinkTimer);
+        }
+        if (ROWOWCreatureSpawn const* spawn = ROWOW->GetCreatureSpawn(md))
+            handler->PSendSysMessage("spawn id {} line {},{} span {},{} delay1 {} delay2 {} boss {} center {},{} last return {} ms of {}", md->GetSpawnId(), spawn->Line->X, spawn->Line->Y,
+                spawn->Line->XS, spawn->Line->YS, spawn->Line->Delay1, spawn->Line->Delay2, spawn->Line->IsBoss, spawn->CenterX, spawn->CenterY, mob->LastSpawnDelay, mob->LastSpawnTime);
+        return true;
+    }
+
+    static bool HandleROMobDumpCommand(ChatHandler* handler, std::string filePath)
+    {
+        // For comparing with the oracle's @oraclemobs
+        handler->PSendSysMessage("{}", ROWOW->WriteMobDump(filePath) == true ? "written" : "can't write it");
+        return true;
+    }
+
+    static bool HandleROMobsCommand(ChatHandler* handler, Optional<uint32> mobID)
+    {
+        // The RO monsters on the GM's map: those alive and dead in the map's creature store, of one monster or all.  A grid not loaded doesn't count
+        Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
+        if (player == nullptr)
+            return false;
+        uint32 aliveCount = 0;
+        uint32 deadCount = 0;
+        std::map<uint32, uint32> aliveByMob;
+        for (auto const& creatureByGUID : player->GetMap()->GetCreatureBySpawnIdStore())
+        {
+            Creature* md = creatureByGUID.second;
+            uint32 id = ROWOW->GetROMobID(md);
+            if (id == 0 || (mobID.has_value() == true && id != *mobID))
+                continue;
+            if (md->IsAlive() == true)
+            {
+                aliveCount++;
+                aliveByMob[id]++;
+            }
+            else
+                deadCount++;
+        }
+        std::string counts;
+        for (auto const& countByMob : aliveByMob)
+            counts += fmt::format(" {}:{}", countByMob.first, countByMob.second);
+        handler->PSendSysMessage("RO monsters here: {} alive, {} dead;{}", aliveCount, deadCount, counts);
         return true;
     }
 

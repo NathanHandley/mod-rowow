@@ -18,16 +18,22 @@
 #include "Creature.h"
 #include "GridTerrainData.h"
 #include "Map.h"
-#include "ModelIgnoreFlags.h"
+#include "MotionMaster.h"
+#include "MoveSpline.h"
+#include "ObjectAccessor.h"
 #include "Player.h"
 
 #include <cmath>
 
 #include "ROWOW.h"
+#include "ROWOW_Skill.h"
+
+#include <queue>
 
 using namespace std;
 
-// RO monster movement: ground-contoured small-step paths, and cell-to-cell paths on RO maps
+// RO monster movement and attacks, a port of rAthena's unit.cpp for monsters, and of path.cpp's search on the map's GAT.  A path is RO's own, cell to
+// cell, walked as one WoW spline over the ground under each cell.  All of it runs in the monster's map thread
 
 bool ROWOWMod::GetGroundZ(Creature* creature, float x, float y, float referenceZ, float& groundZOut)
 {
@@ -43,207 +49,566 @@ bool ROWOWMod::GetGroundZ(Creature* creature, float x, float y, float referenceZ
     return true;
 }
 
-bool ROWOWMod::BuildGroundContouredPath(Creature* creature, float targetX, float targetY, float stopShortDistance, Movement::PointsArray& pathNodesOut)
+namespace
 {
-    pathNodesOut.clear();
+    // path.cpp
+    int32 constexpr MAX_WALKPATH = 32;
+    int32 constexpr MOVE_COST = 10;
+    int32 constexpr MOVE_DIAGONAL_COST = 14;
+    uint64 constexpr MIN_MOBLINKTIME = 1000;
 
-    if (ConfigCellPathing == true)
+    // RO's directions (rAthena's dirx and diry): 0 north, then counter-clockwise
+    int32 const DirectionX[ROWOW_RO_DIRECTION_COUNT] = { 0, -1, -1, -1, 0, 1, 1, 1 };
+    int32 const DirectionY[ROWOW_RO_DIRECTION_COUNT] = { 1, 1, 0, -1, -1, -1, 0, 1 };
+
+    enum PathNodeSet : uint8
     {
-        ROWOWMapGrid const* mapGrid = GetMapGrid(creature->GetMapId());
-        if (mapGrid != nullptr)
-            return BuildCellPath(creature, *mapGrid, targetX, targetY, stopShortDistance, pathNodesOut);
+        PATH_SET_NONE,
+        PATH_SET_OPEN,
+        PATH_SET_CLOSED
+    };
+
+    struct PathNode
+    {
+        PathNode* Parent = nullptr;
+        int16 X = 0;
+        int16 Y = 0;
+        int32 GCost = 0;
+        int32 FCost = 0;
+        PathNodeSet Set = PATH_SET_NONE;
+    };
+
+    struct PathNodeCompare
+    {
+        bool operator()(PathNode const* a, PathNode const* b) const { return a->FCost > b->FCost; }
+    };
+
+    using PathNodeHeap = std::vector<PathNode*>;
+
+    int32 PathIndex(int32 x, int32 y)
+    {
+        return (x + y * MAX_WALKPATH) & (MAX_WALKPATH * MAX_WALKPATH - 1);
     }
 
-    float startX = creature->GetPositionX();
-    float startY = creature->GetPositionY();
-    float deltaX = targetX - startX;
-    float deltaY = targetY - startY;
-    float distance = std::sqrt(deltaX * deltaX + deltaY * deltaY);
-    float travelDistance = distance - stopShortDistance;
-    if (distance < 0.01f || travelDistance < 0.1f)
-        return false;
-    float directionX = deltaX / distance;
-    float directionY = deltaY / distance;
-
-    // Step along the line, pulling each step onto the ground
-    uint32 stepCount = uint32(std::ceil(travelDistance / ConfigMoveStepDistance));
-    if (stepCount > ROWOW_MOVE_MAX_PATH_NODES)
-        stepCount = ROWOW_MOVE_MAX_PATH_NODES;
-    float stepDistance = travelDistance / float(stepCount);
-    float startZ = GetPathStartGroundZ(creature);
-    pathNodesOut.emplace_back(startX, startY, creature->GetPositionZ());
-    float priorX = startX;
-    float priorY = startY;
-    float priorZ = startZ;
-    for (uint32 stepIndex = 1; stepIndex <= stepCount; ++stepIndex)
+    int32 PathHeuristic(int32 x0, int32 y0, int32 x1, int32 y1)
     {
-        float stepX = startX + directionX * stepDistance * float(stepIndex);
-        float stepY = startY + directionY * stepDistance * float(stepIndex);
-        float stepZ = 0;
-        if (CanStepTo(creature, priorX, priorY, priorZ, stepX, stepY, stepDistance, stepZ) == false)
-            break;
-        pathNodesOut.emplace_back(stepX, stepY, stepZ);
-        priorX = stepX;
-        priorY = stepY;
-        priorZ = stepZ;
+        return MOVE_COST * (std::abs(x1 - x0) + std::abs(y1 - y0)); // Manhattan distance
     }
 
-    if (pathNodesOut.size() < 2)
+    // add_path: 1 when the node's index is taken by another cell (rAthena's array is too small to ensure all paths can be found)
+    int32 AddPath(PathNodeHeap& heap, PathNode* nodes, int32 x, int32 y, int32 gCost, PathNode* parent, int32 hCost)
     {
-        pathNodesOut.clear();
-        return false;
-    }
-    return true;
-}
-
-bool ROWOWMod::BuildCellPath(Creature* creature, ROWOWMapGrid const& mapGrid, float targetX, float targetY, float stopShortDistance, Movement::PointsArray& pathNodesOut)
-{
-    float startX = creature->GetPositionX();
-    float startY = creature->GetPositionY();
-    int32 cellX = mapGrid.GetCellX(startY);
-    int32 cellY = mapGrid.GetCellY(startX);
-    int32 targetCellX = mapGrid.GetCellX(targetY);
-    int32 targetCellY = mapGrid.GetCellY(targetX);
-    float startZ = GetPathStartGroundZ(creature);
-    pathNodesOut.emplace_back(startX, startY, creature->GetPositionZ());
-
-    // Already in the target's cell: a creature off the cell's center (after a knockback or a fear) steps onto it
-    float priorX = startX;
-    float priorY = startY;
-    float priorZ = startZ;
-    if (cellX == targetCellX && cellY == targetCellY)
-    {
-        float cellCenterX = mapGrid.GetCellCenterWorldX(cellY);
-        float cellCenterY = mapGrid.GetCellCenterWorldY(cellX);
-        float centerDistance = std::sqrt((cellCenterX - startX) * (cellCenterX - startX) + (cellCenterY - startY) * (cellCenterY - startY));
-        float centerZ = 0;
-        if (centerDistance > 0.1f && CanStepTo(creature, priorX, priorY, priorZ, cellCenterX, cellCenterY, centerDistance, centerZ) == true)
-            pathNodesOut.emplace_back(cellCenterX, cellCenterY, centerZ);
-    }
-
-    // Diagonal steps while the target's cell is off in both directions, then straight.  A blocked step tries the steps to either side of
-    // it (still toward the target), never going back onto a cell already stepped on
-    std::vector<std::pair<int32, int32>> visitedCells;
-    visitedCells.emplace_back(cellX, cellY);
-    while (pathNodesOut.size() < ROWOW_MOVE_MAX_PATH_NODES)
-    {
-        if (cellX == targetCellX && cellY == targetCellY)
-            break;
-        float nodeDeltaX = targetX - priorX;
-        float nodeDeltaY = targetY - priorY;
-        if (stopShortDistance > 0 && pathNodesOut.size() > 1 && std::sqrt(nodeDeltaX * nodeDeltaX + nodeDeltaY * nodeDeltaY) <= stopShortDistance)
-            break;
-        int32 stepCellX = targetCellX > cellX ? 1 : (targetCellX < cellX ? -1 : 0);
-        int32 stepCellY = targetCellY > cellY ? 1 : (targetCellY < cellY ? -1 : 0);
-        std::pair<int32, int32> candidateSteps[3];
-        candidateSteps[0] = std::make_pair(stepCellX, stepCellY);
-        if (stepCellX != 0 && stepCellY != 0)
+        PathNode& node = nodes[PathIndex(x, y)];
+        if (node.X == x && node.Y == y && node.Set != PATH_SET_NONE)
         {
-            candidateSteps[1] = std::make_pair(stepCellX, 0);
-            candidateSteps[2] = std::make_pair(0, stepCellY);
-        }
-        else if (stepCellX != 0)
-        {
-            candidateSteps[1] = std::make_pair(stepCellX, 1);
-            candidateSteps[2] = std::make_pair(stepCellX, -1);
-        }
-        else
-        {
-            candidateSteps[1] = std::make_pair(1, stepCellY);
-            candidateSteps[2] = std::make_pair(-1, stepCellY);
-        }
-        bool hasStepped = false;
-        for (uint8 candidateIndex = 0; candidateIndex < 3; ++candidateIndex)
-        {
-            int32 nextCellX = cellX + candidateSteps[candidateIndex].first;
-            int32 nextCellY = cellY + candidateSteps[candidateIndex].second;
-            bool isVisited = false;
-            for (std::pair<int32, int32> const& visitedCell : visitedCells)
+            // We processed this node before.  New path to this node is better than old one: update costs and parent
+            if (gCost < node.GCost)
             {
-                if (visitedCell.first == nextCellX && visitedCell.second == nextCellY)
+                node.GCost = gCost;
+                node.Parent = parent;
+                node.FCost = gCost + hCost;
+                if (node.Set == PATH_SET_CLOSED)
                 {
-                    isVisited = true;
-                    break;
+                    heap.push_back(&node); // Put it in open set again
+                    std::push_heap(heap.begin(), heap.end(), PathNodeCompare());
                 }
+                else
+                    std::make_heap(heap.begin(), heap.end(), PathNodeCompare());
+                node.Set = PATH_SET_OPEN;
             }
-            if (isVisited == true || MapGetCellIceWall(creature->GetMap(), nextCellX, nextCellY) == true) // An Ice Wall's cell is a wall
-                continue;
-            float stepX = mapGrid.GetCellCenterWorldX(nextCellY);
-            float stepY = mapGrid.GetCellCenterWorldY(nextCellX);
-            float stepDistance = std::sqrt((stepX - priorX) * (stepX - priorX) + (stepY - priorY) * (stepY - priorY));
-            float stepZ = 0;
-            if (CanStepTo(creature, priorX, priorY, priorZ, stepX, stepY, stepDistance, stepZ) == false)
-                continue;
-
-            // As in RO, a diagonal step needs both cells beside it open, so it can't squeeze between two blocked corners
-            if (candidateSteps[candidateIndex].first != 0 && candidateSteps[candidateIndex].second != 0)
-            {
-                float sideAX = mapGrid.GetCellCenterWorldX(cellY);
-                float sideAY = mapGrid.GetCellCenterWorldY(nextCellX);
-                float sideBX = mapGrid.GetCellCenterWorldX(nextCellY);
-                float sideBY = mapGrid.GetCellCenterWorldY(cellX);
-                float sideDistanceA = std::sqrt((sideAX - priorX) * (sideAX - priorX) + (sideAY - priorY) * (sideAY - priorY));
-                float sideDistanceB = std::sqrt((sideBX - priorX) * (sideBX - priorX) + (sideBY - priorY) * (sideBY - priorY));
-                float sideZ = 0;
-                if (CanStepTo(creature, priorX, priorY, priorZ, sideAX, sideAY, sideDistanceA, sideZ) == false
-                    || CanStepTo(creature, priorX, priorY, priorZ, sideBX, sideBY, sideDistanceB, sideZ) == false)
-                    continue;
-            }
-            pathNodesOut.emplace_back(stepX, stepY, stepZ);
-            visitedCells.emplace_back(nextCellX, nextCellY);
-            cellX = nextCellX;
-            cellY = nextCellY;
-            priorX = stepX;
-            priorY = stepY;
-            priorZ = stepZ;
-            hasStepped = true;
-            break;
+            return 0;
         }
-        if (hasStepped == false)
+        if (node.Set != PATH_SET_NONE)
+            return 1; // Index is already taken
+        node.X = int16(x);
+        node.Y = int16(y);
+        node.GCost = gCost;
+        node.Parent = parent;
+        node.FCost = gCost + hCost;
+        node.Set = PATH_SET_OPEN;
+        heap.push_back(&node);
+        std::push_heap(heap.begin(), heap.end(), PathNodeCompare());
+        return 0;
+    }
+
+    uint8 GetDirection(int32 dx, int32 dy)
+    {
+        for (uint8 direction = 0; direction < ROWOW_RO_DIRECTION_COUNT; direction++)
+            if (DirectionX[direction] == dx && DirectionY[direction] == dy)
+                return direction;
+        return 0;
+    }
+}
+
+bool ROWOWMod::MapGetCellNoPass(Map* map, ROWOWMapGrid const& mapGrid, int32 x, int32 y) const
+{
+    // map_getcell(CELL_CHKNOPASS): not walkable, or an Ice Wall stands on it
+    return mapGrid.IsCellWalkable(x, y) == false || MapGetCellIceWall(map, x, y) == true;
+}
+
+bool ROWOWMod::PathSearchLong(ROWOWMapGrid const& mapGrid, int32 x0, int32 y0, int32 x1, int32 y1) const
+{
+    // path_search_long with CELL_CHKWALL: is ranged attack from (x0,y0) to (x1,y1) possible?
+    if (mapGrid.HasCells() == false)
+        return true;
+    int32 dx = x1 - x0;
+    if (dx < 0)
+    {
+        std::swap(x0, x1);
+        std::swap(y0, y1);
+        dx = -dx;
+    }
+    int32 dy = y1 - y0;
+    int32 wx = 0;
+    int32 wy = 0;
+    int32 weight = dx > std::abs(dy) ? dx : std::abs(y1 - y0);
+    while (x0 != x1 || y0 != y1)
+    {
+        wx += dx;
+        wy += dy;
+        if (wx >= weight)
+        {
+            wx -= weight;
+            x0++;
+        }
+        if (wy >= weight)
+        {
+            wy -= weight;
+            y0++;
+        }
+        else if (wy < 0)
+        {
+            wy += weight;
+            y0--;
+        }
+        if ((x0 != x1 || y0 != y1) && mapGrid.IsCellShootable(x0, y0) == false)
+            return false;
+    }
+    return true;
+}
+
+bool ROWOWMod::PathSearch(std::vector<uint8>& pathOut, Map* map, ROWOWMapGrid const& mapGrid, int32 x0, int32 y0, int32 x1, int32 y1, uint8 cell) const
+{
+    // path_search with A* (the client's own search, which never cuts the corner of a cell nothing can walk on).  Its result is the directions to
+    // walk, at most MAX_WALKPATH of them.  The start cell isn't checked, as that would get a unit stuck
+    pathOut.clear();
+    if (mapGrid.HasCells() == false || mapGrid.IsCellOnMap(x0, y0) == false || mapGrid.IsCellOnMap(x1, y1) == false)
+        return false;
+    auto isBlocked = [this, map, &mapGrid, cell](int32 x, int32 y)
+    {
+        if (cell == ROWOW_CELL_CHKWALL)
+            return mapGrid.IsCellShootable(x, y) == false;
+        return MapGetCellNoPass(map, mapGrid, x, y);
+    };
+    if (isBlocked(x1, y1) == true)
+        return false;
+    if (x0 == x1 && y0 == y1)
+        return true;
+
+    PathNode nodes[MAX_WALKPATH * MAX_WALKPATH];
+    PathNodeHeap heap;
+    heap.reserve(64);
+    PathNode& startNode = nodes[PathIndex(x0, y0)];
+    startNode.X = int16(x0);
+    startNode.Y = int16(y0);
+    startNode.FCost = PathHeuristic(x0, y0, x1, y1);
+    startNode.Set = PATH_SET_OPEN;
+    heap.push_back(&startNode);
+    int32 xs = mapGrid.Width - 1;
+    int32 ys = mapGrid.Height - 1;
+    PathNode* current = nullptr;
+    for (;;)
+    {
+        if (heap.empty() == true)
+            return false;
+
+        // Look for the lowest f_cost node in the 'open' set, and move it to the 'closed' set
+        std::pop_heap(heap.begin(), heap.end(), PathNodeCompare());
+        current = heap.back();
+        heap.pop_back();
+        int32 x = current->X;
+        int32 y = current->Y;
+        int32 gCost = current->GCost;
+        current->Set = PATH_SET_CLOSED;
+        if (x == x1 && y == y1)
             break;
+
+        // The allowed directions for the current cell.  Diagonal directions are only allowed if both directions around it are allowed, to prevent
+        // cutting corner of nearby wall
+        bool isNorth = y < ys && isBlocked(x, y + 1) == false;
+        bool isSouth = y > 0 && isBlocked(x, y - 1) == false;
+        bool isEast = x < xs && isBlocked(x + 1, y) == false;
+        bool isWest = x > 0 && isBlocked(x - 1, y) == false;
+        int32 e = 0; // error flag
+        if (isSouth == true && isEast == true && isBlocked(x + 1, y - 1) == false)
+            e += AddPath(heap, nodes, x + 1, y - 1, gCost + MOVE_DIAGONAL_COST, current, PathHeuristic(x + 1, y - 1, x1, y1));
+        if (isEast == true)
+            e += AddPath(heap, nodes, x + 1, y, gCost + MOVE_COST, current, PathHeuristic(x + 1, y, x1, y1));
+        if (isNorth == true && isEast == true && isBlocked(x + 1, y + 1) == false)
+            e += AddPath(heap, nodes, x + 1, y + 1, gCost + MOVE_DIAGONAL_COST, current, PathHeuristic(x + 1, y + 1, x1, y1));
+        if (isNorth == true)
+            e += AddPath(heap, nodes, x, y + 1, gCost + MOVE_COST, current, PathHeuristic(x, y + 1, x1, y1));
+        if (isNorth == true && isWest == true && isBlocked(x - 1, y + 1) == false)
+            e += AddPath(heap, nodes, x - 1, y + 1, gCost + MOVE_DIAGONAL_COST, current, PathHeuristic(x - 1, y + 1, x1, y1));
+        if (isWest == true)
+            e += AddPath(heap, nodes, x - 1, y, gCost + MOVE_COST, current, PathHeuristic(x - 1, y, x1, y1));
+        if (isSouth == true && isWest == true && isBlocked(x - 1, y - 1) == false)
+            e += AddPath(heap, nodes, x - 1, y - 1, gCost + MOVE_DIAGONAL_COST, current, PathHeuristic(x - 1, y - 1, x1, y1));
+        if (isSouth == true)
+            e += AddPath(heap, nodes, x, y - 1, gCost + MOVE_COST, current, PathHeuristic(x, y - 1, x1, y1));
+        if (e != 0)
+            return false;
     }
 
-    if (pathNodesOut.size() < 2)
-    {
-        pathNodesOut.clear();
+    // Recreate path
+    int32 length = 0;
+    for (PathNode* node = current; node->Parent != nullptr; node = node->Parent)
+        length++;
+    if (length > MAX_WALKPATH)
         return false;
-    }
+    pathOut.resize(size_t(length));
+    int32 pathIndex = length - 1;
+    for (PathNode* node = current; node->Parent != nullptr; node = node->Parent)
+        pathOut[size_t(pathIndex--)] = GetDirection(node->X - node->Parent->X, node->Y - node->Parent->Y);
     return true;
 }
 
-bool ROWOWMod::CanStepTo(Creature* creature, float priorX, float priorY, float priorZ, float stepX, float stepY, float stepDistance, float& stepZOut)
+bool ROWOWMod::IsMobMovementBlocked(Creature* md, bool isIgnoreDisableMove) const
 {
-    // Search from a step's climb above the prior step, so a low arch or deck overhead isn't taken for the ground
-    float stepZ = 0;
-    if (GetGroundZ(creature, stepX, stepY, priorZ, ConfigMoveMaxRisePerStep * stepDistance + 0.5f, stepZ) == false)
+    // Movement the core controls (fear, confuse, knockbacks, jumps, charges) or that's otherwise impossible right now.  Creatures that never move
+    // (RO plants and the like) count as blocked unless that's ignored, since they still get put on the ground
+    if (md->HasUnitState(UNIT_STATE_LOST_CONTROL) == true || md->HasUnitState(UNIT_STATE_NOT_MOVE) == true)
+        return true;
+    if (md->HasUnitState(UNIT_STATE_CASTING) == true)
+        return true;
+    if (isIgnoreDisableMove == false && md->HasUnitFlag(UNIT_FLAG_DISABLE_MOVE) == true)
+        return true;
+    return md->GetMotionMaster()->GetMotionSlotType(MOTION_SLOT_CONTROLLED) != NULL_MOTION_TYPE;
+}
+
+bool ROWOWMod::UnitCanMove(Creature* md, ROWOWMobData const* mob, uint64 tick) const
+{
+    // unit_can_move, for a monster
+    if (mob->CanMoveTime > tick)
+        return false;
+    ROWOWStatusChange const* sc = GetStatusChange(static_cast<Unit const*>(md));
+    if (sc != nullptr && sc->Cant.Move == true)
+        return false; // Status changes that block movement
+    return IsMobMovementBlocked(md) == false;
+}
+
+bool ROWOWMod::UnitCanReachBL(Creature* md, Unit const* tbl, int32 range, int32& xOut, int32& yOut) const
+{
+    // unit_can_reach_bl: a cell beside the target that it can walk to (the one on its side if it can stand there), within range when that's set
+    ROWOWMapGrid const* mapGrid = GetMapGrid(md->GetMapId());
+    if (mapGrid == nullptr || md->GetMap() != tbl->GetMap())
+        return false;
+    int32 x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+    GetUnitCell(md, x0, y0);
+    GetUnitCell(tbl, x1, y1);
+    xOut = x1;
+    yOut = y1;
+    if (x0 == x1 && y0 == y1)
+        return true;
+    if (range > 0 && CheckDistanceBL(md, tbl, range) == false)
         return false;
 
-    // Too steep up or down is a wall or a cliff, which RO wouldn't let a monster walk over
-    if (std::fabs(stepZ - priorZ) > ConfigMoveMaxRisePerStep * stepDistance)
-        return false;
+    // It judges whether it can adjoin or not.
+    int32 dx = x1 - x0;
+    int32 dy = y1 - y0;
+    dx = dx > 0 ? 1 : (dx < 0 ? -1 : 0);
+    dy = dy > 0 ? 1 : (dy < 0 ? -1 : 0);
+    Map* map = md->GetMap();
+    if (MapGetCellNoPass(map, *mapGrid, x1 - dx, y1 - dy) == true) // Look for a suitable cell to place in.
+    {
+        int32 direction = 0;
+        for (; direction < ROWOW_RO_DIRECTION_COUNT && MapGetCellNoPass(map, *mapGrid, x1 - DirectionX[direction], y1 - DirectionY[direction]) == true; direction++)
+            ;
+        if (direction == ROWOW_RO_DIRECTION_COUNT)
+            return false; // No valid cells.
+        dx = DirectionX[direction];
+        dy = DirectionY[direction];
+    }
+    xOut = x1 - dx;
+    yOut = y1 - dy;
+    std::vector<uint8> path;
+    return PathSearch(path, map, *mapGrid, x0, y0, x1 - dx, y1 - dy, ROWOW_CELL_CHKNOPASS);
+}
 
-    // Something solid in the way (a building or a fence)
-    if (creature->GetMap()->isInLineOfSight(priorX, priorY, priorZ + ROWOW_MOVE_LINE_OF_SIGHT_HEIGHT, stepX, stepY, stepZ + ROWOW_MOVE_LINE_OF_SIGHT_HEIGHT,
-        creature->GetPhaseMask(), LINEOFSIGHT_CHECK_VMAP, VMAP::ModelIgnoreFlags::Nothing) == false)
+uint32 ROWOWMod::UnitWalkPathPos(Creature* /*md*/, ROWOWMobData const* mob, uint64 tick) const
+{
+    // walkpath.path_pos: the cells of its path walked so far
+    if (mob->IsWalking == false || mob->WalkPathTime == 0)
+        return 0;
+    return uint32(std::min<uint64>(mob->WalkPathLength, (tick - mob->WalkStartTime) * mob->WalkPathLength / mob->WalkPathTime));
+}
+
+bool ROWOWMod::UnitWalkPath(Creature* md, ROWOWMobData* mob, std::vector<uint8> const& path, int32 x0, int32 y0, bool isRun)
+{
+    // The path as one spline, over the ground under each cell's center.  The GAT's height says which floor: the ground is looked for from just above it
+    ROWOWMapGrid const* mapGrid = GetMapGrid(md->GetMapId());
+    ROWOWStatus const* status = GetROStatus(md);
+    if (mapGrid == nullptr || status == nullptr || path.empty() == true)
         return false;
-    stepZOut = stepZ;
+    Movement::PointsArray nodes;
+    nodes.reserve(path.size() + 1);
+    nodes.emplace_back(md->GetPositionX(), md->GetPositionY(), md->GetPositionZ());
+    int32 x = x0;
+    int32 y = y0;
+    uint32 pathTime = 0;
+    for (uint8 direction : path)
+    {
+        x += DirectionX[direction];
+        y += DirectionY[direction];
+        float worldX = mapGrid->GetCellCenterWorldX(y);
+        float worldY = mapGrid->GetCellCenterWorldY(x);
+        float worldZ = mapGrid->GetCellGroundZ(x, y);
+        float groundZ = 0;
+        if (GetGroundZ(md, worldX, worldY, worldZ, groundZ) == true)
+            worldZ = groundZ;
+        nodes.emplace_back(worldX, worldY, worldZ);
+        pathTime += uint32(status->Speed) * uint32((direction % 2) != 0 ? MOVE_DIAGONAL_COST : MOVE_COST) / uint32(MOVE_COST); // unit_get_walkpath_time
+    }
+    md->GetMotionMaster()->MoveSplinePath(&nodes, isRun == true ? FORCED_MOVEMENT_RUN : FORCED_MOVEMENT_WALK);
+    mob->IsWalking = true;
+    mob->WalkStartTime = GetTick();
+    mob->WalkPathTime = pathTime;
+    mob->WalkPathLength = uint32(path.size());
     return true;
 }
 
-float ROWOWMod::GetPathStartGroundZ(Creature* creature)
+bool ROWOWMod::UnitWalkToXY(Creature* md, int32 x, int32 y)
 {
-    // Steps are compared against the ground under the creature, not its own height, since other movement (a fear, a knockback)
-    // can leave it a little off the ground.  Ground far above it is an overhang (a deck, a table), not what it stands on
-    float startX = creature->GetPositionX();
-    float startY = creature->GetPositionY();
-    float startZ = creature->GetPositionZ();
-    float startGroundZ = startZ;
-    if (GetGroundZ(creature, startX, startY, startZ, startGroundZ) == false)
-        return startZ;
-    if (startGroundZ > startZ + ConfigMoveMaxRisePerStep)
+    // unit_walktoxy, the random walk's: the path must be found and no longer than max_walk_path
+    ROWOWMapGrid const* mapGrid = GetMapGrid(md->GetMapId());
+    ROWOWStatus const* status = GetROStatus(md);
+    if (mapGrid == nullptr || status == nullptr)
+        return false;
+    int32 x0 = 0, y0 = 0;
+    GetUnitCell(md, x0, y0);
+    std::vector<uint8> path;
+    if (PathSearch(path, md->GetMap(), *mapGrid, x0, y0, x, y, ROWOW_CELL_CHKNOPASS) == false)
+        return false;
+    if (int32(path.size()) > BattleConfig.MaxWalkPath)
+        return false;
+    ROWOWMobData* mob = GetMobData(md);
+    if ((status->Mode & ROWOW_MODE_CANMOVE) == 0 || UnitCanMove(md, mob, GetTick()) == false)
+        return false;
+    mob->AttackTargetID.Clear(); // unit_stop_attack: Sets target to 0
+
+    // Randomize the target position
+    if (GetSCE(md, ROWOW_SC_CONFUSION) != nullptr && MapRandomDir(md, x, y) == true)
+        if (PathSearch(path, md->GetMap(), *mapGrid, x0, y0, x, y, ROWOW_CELL_CHKNOPASS) == false)
+            return false;
+    return UnitWalkPath(md, mob, path, x0, y0, false);
+}
+
+bool ROWOWMod::UnitWalkToBL(Creature* md, ROWOWMobData* mob, Unit* tbl, int32 range, bool isAttackContinue)
+{
+    // unit_walktobl: to a cell beside the target ("monsters always target an adjacent tile even if ranged"), which unit_update_chase ends when the
+    // target comes in range
+    ROWOWStatus const* status = GetROStatus(md);
+    ROWOWMapGrid const* mapGrid = GetMapGrid(md->GetMapId());
+    if (status == nullptr || mapGrid == nullptr || (status->Mode & ROWOW_MODE_CANMOVE) == 0)
+        return false;
+    int32 toX = 0, toY = 0;
+    if (UnitCanReachBL(md, tbl, DistanceBL(md, tbl) + 1, toX, toY) == false)
     {
-        if (GetGroundZ(creature, startX, startY, startZ, 0.5f, startGroundZ) == false)
-            return startZ;
+        mob->TargetToID.Clear();
+        return false;
     }
-    return startGroundZ;
+    if (range == 0)
+        GetUnitCell(tbl, toX, toY); // Should walk on the same cell as target (for looters)
+    mob->TargetToID = tbl->GetGUID();
+    mob->ChaseRange = range;
+    mob->IsAttackContinue = isAttackContinue; // Chase to attack.
+    mob->AttackTargetID.Clear(); // unit_stop_attack: Sets target to 0
+    if (GetSCE(md, ROWOW_SC_CONFUSION) != nullptr) // Randomize the target position
+        MapRandomDir(md, toX, toY);
+    uint64 tick = GetTick();
+    if (mob->CanMoveTime > tick)
+        return true; // Can't move, wait a bit before invoking the movement (the next think invokes it)
+    if (UnitCanMove(md, mob, tick) == false)
+        return false;
+    int32 x0 = 0, y0 = 0;
+    GetUnitCell(md, x0, y0);
+    std::vector<uint8> path;
+    if (PathSearch(path, md->GetMap(), *mapGrid, x0, y0, toX, toY, ROWOW_CELL_CHKNOPASS) == false)
+        return false;
+    if (path.empty() == true)
+        return true;
+    if (UnitWalkPath(md, mob, path, x0, y0, true) == false)
+        return false;
+
+    // Set mobstate here already as chase skills can be used on the first frame of movement
+    if (isAttackContinue == true)
+        MobSetState(md, mob, ROWOW_MSS_RUSH);
+    return true;
+}
+
+bool ROWOWMod::UnitUpdateChase(Creature* md, ROWOWMobData* mob, uint64 tick)
+{
+    // unit_update_chase, each think rather than each cell: if target in attack range, attack; if target out of sight, drop target; otherwise update
+    // the chase path one cell before reaching the path's end
+    if (mob->IsWalking == false || mob->TargetToID.IsEmpty() == true)
+        return false;
+    ROWOWStatus const* status = GetROStatus(md);
+    if (status == nullptr)
+        return false;
+    Unit* tbl = ObjectAccessor::GetUnit(*md, mob->TargetToID);
+    bool isFullCheck = md->movespline->Finalized() == true || md->movespline->timeElapsed() <= status->Speed * MOVE_DIAGONAL_COST / MOVE_COST;
+    uint32 pathPos = UnitWalkPathPos(md, mob, tick);
+
+    // Reached destination, start attacking
+    if (tbl != nullptr && tbl->IsAlive() == true && tbl->GetMap() == md->GetMap() && pathPos > 0 && CheckDistanceBL(md, tbl, mob->ChaseRange) == true)
+    {
+        bool isStop = true;
+        if (mob->IsAttackContinue == true)
+            isStop = UnitAttack(md, mob, tbl);
+
+        // Stop, unless the attack was skipped
+        if (isStop == true)
+        {
+            UnitStopWalking(md);
+            mob->TargetToID.Clear();
+            return true;
+        }
+    }
+    else if (tbl == nullptr || (isFullCheck == true && MobCheckVisibility(md, tbl, true) == false)) // Cancel chase
+    {
+        MobUnlockTarget(md, tick); // Make sure monsters properly unlock their target, but still continue movement
+        return false;
+    }
+    else if (isFullCheck == true && pathPos > 0 && mob->CanMoveTime <= tick)
+    {
+        // We call this only when we know there is no walk delay to prevent it pre-planning a chase.  If the call here fails, the unit should
+        // continue its current path
+        if (UnitWalkToBL(md, mob, tbl, mob->ChaseRange, mob->IsAttackContinue) == true)
+            return true;
+    }
+    return false;
+}
+
+void ROWOWMod::UnitStopWalking(Creature* md)
+{
+    // unit_stop_walking: its own path only, leaving any movement the core controls (like a fear) alone
+    ROWOWMobData* mob = GetMobData(md);
+    mob->IsWalking = false;
+    if (md->GetMotionMaster()->GetMotionSlotType(MOTION_SLOT_ACTIVE) != ESCORT_MOTION_TYPE)
+        return;
+    md->GetMotionMaster()->MovementExpiredOnSlot(MOTION_SLOT_ACTIVE, false);
+    if (md->GetMotionMaster()->GetMotionSlotType(MOTION_SLOT_CONTROLLED) == NULL_MOTION_TYPE)
+        md->StopMoving();
+}
+
+void ROWOWMod::UnitSetWalkDelay(Creature* md, ROWOWMobData* mob, uint64 tick, int64 delay)
+{
+    // unit_set_walkdelay for a hit: trapped, or the legacy walk delay system off (damage_walk_delay), it stops on the closest cell center.  Otherwise
+    // it's held for the delay, and immune to being stopped for double the flinch time
+    if (delay <= 0)
+        return;
+    if (UnitCanMove(md, mob, tick) == false || (BattleConfig.DamageWalkDelay & ROWOW_BL_MOB) == 0)
+    {
+        UnitStopWalking(md);
+        return;
+    }
+    if (int64(mob->CanMoveTime) - (int64(tick) - delay) > 0)
+        return;
+    mob->CanMoveTime = tick + uint64(delay);
+    UnitStopWalking(md);
+}
+
+bool ROWOWMod::UnitAttack(Creature* md, ROWOWMobData* mob, Unit* target)
+{
+    // unit_attack for a monster: it swings at the target when its attack delay allows (UnitAttackTimerSub).  The state is set regardless of whether the
+    // attack is executed now or later
+    if (MobRandomTarget(md, target) == false)
+        return false; // Continue walking
+    if (target == nullptr || target->IsAlive() == false)
+    {
+        UnitUnattackable(md, mob, GetTick());
+        return true;
+    }
+    ROWOWStatusChange const* sc = GetStatusChange(static_cast<Unit const*>(md));
+    if (sc != nullptr && sc->Cant.Attack == true) // unit_can_attack
+    {
+        mob->AttackTargetID.Clear();
+        return false; // Continue walking
+    }
+    if (BattleCheckTarget(md, target, ROWOW_BCT_ENEMY) <= 0 || StatusCheckSkillUse(md, target, 0, 0) == false)
+    {
+        UnitUnattackable(md, mob, GetTick());
+        return true;
+    }
+    mob->IsAttackContinue = true;
+    mob->AttackTargetID = target->GetGUID();
+    MobSetState(md, mob, ROWOW_MSS_BERSERK);
+    return true;
+}
+
+void ROWOWMod::UnitUnattackable(Creature* md, ROWOWMobData* mob, uint64 tick)
+{
+    // unit_unattackable
+    mob->AttackTargetID.Clear();
+    mob->IsAttackContinue = false;
+    MobUnlockTarget(md, tick);
+}
+
+void ROWOWMod::UnitAttackTimerSub(Creature* md, ROWOWMobData* mob, uint64 tick)
+{
+    // unit_attack_timer_sub for a monster, on WoW's attack timer (set to the monster's attack delay).  (Its timer call runs mob_ai_sub_hard first; the
+    // think comes at most MIN_MOBTHINKTIME before this)
+    if (mob->AttackTargetID.IsEmpty() == true || md->isAttackReady() == false || md->HasUnitState(UNIT_STATE_CASTING) == true)
+        return;
+    Unit* target = ObjectAccessor::GetUnit(*md, mob->AttackTargetID);
+    ROWOWStatus const* sstatus = GetROStatus(md);
+    if (target == nullptr || sstatus == nullptr || target->GetMap() != md->GetMap() || target->IsAlive() == false)
+    {
+        UnitUnattackable(md, mob, tick);
+        return;
+    }
+
+    // Monsters have a special visibility check at the end of their attack delay: if they still have a target, but it is not visible, they drop it
+    ROWOWStatusChange const* sc = GetStatusChange(static_cast<Unit const*>(md));
+    if (MobCheckVisibility(md, target, true) == false || BattleCheckTarget(md, target, ROWOW_BCT_ENEMY) <= 0 ||
+        StatusCheckSkillUse(md, target, 0, 0) == false || (sc != nullptr && sc->Cant.Attack == true))
+    {
+        UnitUnattackable(md, mob, tick);
+        return;
+    }
+
+    // Attacking when under cast delay has restrictions: we are in a combo-attack, delay this until your canact time is over. [Skotlex]
+    if (BattleConfig.SDelayAttackEnable == 0 && GetSkillUnitData(md)->CanActTime > tick)
+        return;
+    int32 range = sstatus->Range;
+    if (target->isMoving() == true)
+        range++; // Extra range when chasing
+    if (CheckDistanceBL(md, target, range) == false || BattleCheckRange(md, target, range) == false)
+    {
+        mob->AttackTargetID.Clear(); // Monster: chase if required, which its next think does (or drops the target, if it can't move)
+        return;
+    }
+
+    if (mob->IsWalking == true)
+        UnitStopWalking(md);
+
+    // Link monsters nearby [Skotlex]
+    if ((sstatus->Mode & ROWOW_MODE_ASSIST) != 0 && tick - mob->LastLinkTime >= MIN_MOBLINKTIME)
+    {
+        mob->LastLinkTime = tick;
+        MobLinkSearch(md, target, tick);
+    }
+
+    // The AI's unit_attack at the end of the attack delay: the state follows the aggressive bit, which a hit may have cleared
+    MobSetState(md, mob, ROWOW_MSS_BERSERK);
+
+    // Turn to the target first, as RO monsters do
+    if (md->movespline->Finalized() == true && md->HasInArc(float(M_PI) / 4.0f, target) == false && IsMobMovementBlocked(md, true) == false)
+        md->SetFacingToObject(target);
+    md->AttackerStateUpdate(target);
+    md->resetAttackTimer();
+    if (ROWOWCreatureTemplate const* creatureTemplate = GetCreatureTemplate(md->GetEntry()); creatureTemplate != nullptr && creatureTemplate->AttackVisualSpellID != 0)
+        md->CastSpell(target, creatureTemplate->AttackVisualSpellID, true);
+    if (md->IsAlive() == true && mob->IsAttackContinue == false)
+        mob->AttackTargetID.Clear();
 }

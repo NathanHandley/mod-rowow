@@ -66,6 +66,7 @@ public:
             return;
         ROWOW->UpdateStatusChanges(creature);
         ROWOW->UpdateSkillUnitMove(creature);
+        ROWOW->UpdateMobCorpse(creature);
     }
 };
 

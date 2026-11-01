@@ -28,6 +28,8 @@
 #include "ROWOW.h"
 
 #include <cmath>
+#include <cstring>
+#include <zlib.h>
 
 using namespace std;
 
@@ -58,41 +60,17 @@ void ROWOWMod::LoadConfigurationFile()
         return;
     }
 
-    ConfigMoveStepDistance = sConfigMgr->GetOption<float>("ROWOW.Creature.MoveStepDistance", 1.0f);
-    if (ConfigMoveStepDistance < 0.25f)
-        ConfigMoveStepDistance = 0.25f;
     ConfigMoveMaxRisePerStep = sConfigMgr->GetOption<float>("ROWOW.Creature.MoveMaxRisePerStep", 1.2f);
     ConfigMoveFloorSearchHeight = sConfigMgr->GetOption<float>("ROWOW.Creature.MoveFloorSearchHeight", 3.0f);
     ConfigMoveFloorSearchDistance = sConfigMgr->GetOption<float>("ROWOW.Creature.MoveFloorSearchDistance", 30.0f);
-    ConfigRandomWalkMaxDistance = sConfigMgr->GetOption<float>("ROWOW.Creature.RandomWalkMaxDistance", 7.35f);
-    ConfigRandomWalkMinDelayInMS = sConfigMgr->GetOption<uint32>("ROWOW.Creature.RandomWalkMinDelayInMS", 4000);
-    ConfigRandomWalkMaxDelayInMS = sConfigMgr->GetOption<uint32>("ROWOW.Creature.RandomWalkMaxDelayInMS", 5000);
-    if (ConfigRandomWalkMaxDelayInMS < ConfigRandomWalkMinDelayInMS)
-        ConfigRandomWalkMaxDelayInMS = ConfigRandomWalkMinDelayInMS;
-    ConfigChaseRepathIntervalInMS = sConfigMgr->GetOption<uint32>("ROWOW.Creature.ChaseRepathIntervalInMS", 250);
-    ConfigChaseRepathTargetMoveDistance = sConfigMgr->GetOption<float>("ROWOW.Creature.ChaseRepathTargetMoveDistance", 1.0f);
     ConfigGroundSnapCheckIntervalInMS = sConfigMgr->GetOption<uint32>("ROWOW.Creature.GroundSnapCheckIntervalInMS", 1000);
     ConfigGroundSnapTolerance = sConfigMgr->GetOption<float>("ROWOW.Creature.GroundSnapTolerance", 0.15f);
-    ConfigUnreachableAfterTimeInMS = sConfigMgr->GetOption<uint32>("ROWOW.Creature.UnreachableAfterTimeInMS", 2000);
-    ConfigOutOfReachGiveUpTimeInMS = sConfigMgr->GetOption<uint32>("ROWOW.Creature.OutOfReachGiveUpTimeInMS", 8000);
-    ConfigRangedAttackApproachFraction = sConfigMgr->GetOption<float>("ROWOW.Creature.RangedAttackApproachFraction", 0.8f);
-    if (ConfigRangedAttackApproachFraction < 0.1f)
-        ConfigRangedAttackApproachFraction = 0.1f;
-    if (ConfigRangedAttackApproachFraction > 1.0f)
-        ConfigRangedAttackApproachFraction = 1.0f;
-    ConfigCellPathing = sConfigMgr->GetOption<bool>("ROWOW.Creature.CellPathing", true);
+    ConfigCorpseTimeInMS = sConfigMgr->GetOption<uint32>("ROWOW.Creature.CorpseTimeInMS", 3000);
+    ConfigCorpseLootHoldTimeInSec = sConfigMgr->GetOption<uint32>("ROWOW.Creature.CorpseLootHoldTimeInSec", 30);
 
     // Event intervals of zero would make the AI's event loop run the same event over and over in one update
-    if (ConfigRandomWalkMinDelayInMS < 100)
-        ConfigRandomWalkMinDelayInMS = 100;
-    if (ConfigRandomWalkMaxDelayInMS < ConfigRandomWalkMinDelayInMS)
-        ConfigRandomWalkMaxDelayInMS = ConfigRandomWalkMinDelayInMS;
-    if (ConfigChaseRepathIntervalInMS < 50)
-        ConfigChaseRepathIntervalInMS = 50;
     if (ConfigGroundSnapCheckIntervalInMS < 100)
         ConfigGroundSnapCheckIntervalInMS = 100;
-    if (ConfigOutOfReachGiveUpTimeInMS < 1000)
-        ConfigOutOfReachGiveUpTimeInMS = 1000;
 }
 
 void ROWOWMod::LoadCreatureTemplateData()
@@ -108,15 +86,14 @@ void ROWOWMod::LoadCreatureTemplateData()
         LOG_INFO("module.ROWOW", "ROWOWMod::LoadCreatureTemplateData found no mod_rowow_creature_template table, so every creature is a melee attacker");
         return;
     }
-    QueryResult result = WorldDatabase.Query("SELECT `CreatureTemplateID`, `AttackRange`, `AttackVisualSpellID` FROM `mod_rowow_creature_template`");
+    QueryResult result = WorldDatabase.Query("SELECT `CreatureTemplateID`, `AttackVisualSpellID` FROM `mod_rowow_creature_template`");
     if (!result)
         return;
     do
     {
         Field* fields = result->Fetch();
         ROWOWCreatureTemplate creatureTemplate;
-        creatureTemplate.AttackRange = fields[1].Get<float>();
-        creatureTemplate.AttackVisualSpellID = fields[2].Get<uint32>();
+        creatureTemplate.AttackVisualSpellID = fields[1].Get<uint32>();
         CreatureTemplatesByEntry[fields[0].Get<uint32>()] = creatureTemplate;
     } while (result->NextRow());
     LOG_INFO("module.ROWOW", "ROWOWMod::LoadCreatureTemplateData loaded {} creature templates", CreatureTemplatesByEntry.size());
@@ -135,7 +112,7 @@ void ROWOWMod::LoadMapGridData()
         LOG_INFO("module.ROWOW", "ROWOWMod::LoadMapGridData found no mod_rowow_map_grid table, so no map has an RO cell grid");
         return;
     }
-    QueryResult result = WorldDatabase.Query("SELECT `MapID`, `OriginX`, `OriginY`, `CellSize` FROM `mod_rowow_map_grid`");
+    QueryResult result = WorldDatabase.Query("SELECT `MapID`, `OriginX`, `OriginY`, `CellSize`, `Width`, `Height`, `Cells` FROM `mod_rowow_map_grid`");
     if (!result)
         return;
     do
@@ -151,7 +128,31 @@ void ROWOWMod::LoadMapGridData()
             continue;
         }
         CellSize = mapGrid.CellSize;
-        MapGridsByMapID[fields[0].Get<uint32>()] = mapGrid;
+
+        // The GAT, deflated: two bits a cell, then the height of each cell's ground in tenths of a yard (int16, little endian)
+        mapGrid.Width = int32(fields[4].Get<uint32>());
+        mapGrid.Height = int32(fields[5].Get<uint32>());
+        std::string cellsHex = fields[6].Get<std::string>();
+        size_t cellCount = size_t(mapGrid.Width) * size_t(mapGrid.Height);
+        size_t packedSize = (cellCount + 3) / 4;
+        std::vector<uint8> packedBytes(cellsHex.size() / 2);
+        for (size_t byteIndex = 0; byteIndex < packedBytes.size(); byteIndex++)
+            packedBytes[byteIndex] = uint8(strtoul(cellsHex.substr(byteIndex * 2, 2).c_str(), nullptr, 16));
+        std::vector<uint8> unpackedBytes(packedSize + cellCount * 2);
+        uLongf unpackedSize = uLongf(unpackedBytes.size());
+        if (cellCount == 0 || uncompress(unpackedBytes.data(), &unpackedSize, packedBytes.data(), uLong(packedBytes.size())) != Z_OK || unpackedSize != unpackedBytes.size())
+        {
+            LOG_ERROR("module.ROWOW", "ROWOWMod::LoadMapGridData can't read the cells of map {}, so they're skipped", fields[0].Get<uint32>());
+            mapGrid.Width = 0;
+            mapGrid.Height = 0;
+        }
+        else
+        {
+            mapGrid.Cells.assign(unpackedBytes.begin(), unpackedBytes.begin() + packedSize);
+            mapGrid.GroundHeights.resize(cellCount);
+            memcpy(mapGrid.GroundHeights.data(), unpackedBytes.data() + packedSize, cellCount * 2);
+        }
+        MapGridsByMapID[fields[0].Get<uint32>()] = std::move(mapGrid);
     } while (result->NextRow());
     LOG_INFO("module.ROWOW", "ROWOWMod::LoadMapGridData loaded the cell grids of {} maps", MapGridsByMapID.size());
 }

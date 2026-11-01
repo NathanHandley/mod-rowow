@@ -57,7 +57,6 @@ struct ROWOWScriptContext;
 // Per creature template values from mod_rowow_creature_template
 struct ROWOWCreatureTemplate
 {
-    float AttackRange = 0; // Yards a ranged attacker attacks from, 0 for melee
     uint32 AttackVisualSpellID = 0; // Visual-only spell cast on the target with each attack, 0 for none
 };
 
@@ -106,17 +105,50 @@ struct ROWOWItemVisual
 #define ROWOW_SKILL_CELL_GROUND_SEARCH_HEIGHT       3.0f    // How far above a ground skill's spot the ground search for its units' cells starts
 #define ROWOW_SKILL_CELL_GROUND_SEARCH_DISTANCE     10.0f   // How far down it looks
 
+// A cell of an RO map, as the server keeps its GAT (map_gat2cell's walkable and shootable), and what a path search stops at
+#define ROWOW_CELL_WALL                             0       // Not walkable, and shots don't pass
+#define ROWOW_CELL_WALKABLE                         1
+#define ROWOW_CELL_WATER                            2       // Walkable water
+#define ROWOW_CELL_GAP                              3       // Not walkable, but shots pass
+#define ROWOW_CELL_CHKNOPASS                        0
+#define ROWOW_CELL_CHKWALL                          1
+
 // The RO cell grid of an RO map (from mod_rowow_map_grid).  RO's x runs against WoW's Y, and RO's y along WoW's X
 struct ROWOWMapGrid
 {
     float OriginX = 0; // WoW position of the corner of cell 0,0
     float OriginY = 0;
     float CellSize = 1.05f; // Yards
+    int32 Width = 0; // The GAT: its cells in x and y, two bits a cell (ROWOW_CELL_*), and the height of each cell's ground in tenths of a yard
+    int32 Height = 0;
+    std::vector<uint8> Cells;
+    std::vector<int16> GroundHeights;
 
     int32 GetCellX(float worldY) const { return int32(std::floor((OriginY - worldY) / CellSize)); }
     int32 GetCellY(float worldX) const { return int32(std::floor((worldX - OriginX) / CellSize)); }
     float GetCellCenterWorldX(int32 cellY) const { return OriginX + (float(cellY) + 0.5f) * CellSize; }
     float GetCellCenterWorldY(int32 cellX) const { return OriginY - (float(cellX) + 0.5f) * CellSize; }
+    bool HasCells() const { return Cells.empty() == false; }
+    bool IsCellOnMap(int32 x, int32 y) const { return x >= 0 && y >= 0 && x < Width && y < Height; }
+    uint8 GetCell(int32 x, int32 y) const // ROWOW_CELL_WALL for one off the map
+    {
+        if (IsCellOnMap(x, y) == false)
+            return ROWOW_CELL_WALL;
+        int32 cellIndex = y * Width + x;
+        return (Cells[cellIndex / 4] >> ((cellIndex % 4) * 2)) & 3;
+    }
+    bool IsCellWalkable(int32 x, int32 y) const // CELL_CHKPASS and CELL_CHKREACH, but for what stands on the cell
+    {
+        uint8 cell = GetCell(x, y);
+        return cell == ROWOW_CELL_WALKABLE || cell == ROWOW_CELL_WATER;
+    }
+    bool IsCellShootable(int32 x, int32 y) const { return GetCell(x, y) != ROWOW_CELL_WALL; } // !CELL_CHKWALL
+    float GetCellGroundZ(int32 x, int32 y) const // The GAT's height of the cell's center
+    {
+        if (IsCellOnMap(x, y) == false)
+            return 0;
+        return float(GroundHeights[y * Width + x]) * 0.1f;
+    }
 };
 
 // A monster's steal state (mob_data's state.steal_flag and state.steal_coin_flag): the steal tries made on it, UCHAR_MAX once it can't be
@@ -356,15 +388,30 @@ struct ROWOWDataTable
 #define ROWOW_MAX_REFINE                            10
 #define ROWOW_MAX_SLOTS                             4       // Card slots on an item
 
-// The monster modes the battle and status rules read (rAthena's e_mode bits).  The AI modes come with the monster AI (R10)
+// The monster modes (rAthena's e_mode bits)
 #define ROWOW_MODE_CANMOVE                          0x0000001
+#define ROWOW_MODE_LOOTER                           0x0000002
+#define ROWOW_MODE_AGGRESSIVE                       0x0000004
+#define ROWOW_MODE_ASSIST                           0x0000008
+#define ROWOW_MODE_CASTSENSORIDLE                   0x0000010
+#define ROWOW_MODE_NORANDOMWALK                     0x0000020
+#define ROWOW_MODE_NOCAST                           0x0000040
 #define ROWOW_MODE_CANATTACK                        0x0000080
+#define ROWOW_MODE_CASTSENSORCHASE                  0x0000200
+#define ROWOW_MODE_CHANGECHASE                      0x0000400
+#define ROWOW_MODE_ANGRY                            0x0000800
+#define ROWOW_MODE_CHANGETARGETMELEE                0x0001000
+#define ROWOW_MODE_CHANGETARGETCHASE                0x0002000
+#define ROWOW_MODE_TARGETWEAK                       0x0004000
+#define ROWOW_MODE_RANDOMTARGET                     0x0008000
 #define ROWOW_MODE_IGNORE_MELEE                     0x0010000
 #define ROWOW_MODE_IGNORE_MAGIC                     0x0020000
 #define ROWOW_MODE_IGNORE_RANGED                    0x0040000
 #define ROWOW_MODE_MVP                              0x0080000
 #define ROWOW_MODE_IGNORE_MISC                      0x0100000
 #define ROWOW_MODE_KNOCKBACK_IMMUNE                 0x0200000
+#define ROWOW_MODE_TELEPORTBLOCK                    0x0400000
+#define ROWOW_MODE_FIXEDITEMDROP                    0x1000000
 #define ROWOW_MODE_DETECTOR                         0x2000000
 #define ROWOW_MODE_STATUS_IMMUNE                    0x4000000
 #define ROWOW_MODE_SKILL_IMMUNE                     0x8000000
@@ -622,6 +669,32 @@ struct ROWOWBattleConfig
     int32 MonsterHPRate = 100;
     int32 MvpHPRate = 100;
     int32 MonsterDamageDelayRate = 100;
+    int32 MobAI = 0; // monster_ai
+    int32 MobChaseRefresh = 32; // monster_chase_refresh
+    int32 AssistRange = 11; // assist_range
+    int32 LootRange = 12; // loot_range
+    int32 ViewRangeRate = 100; // view_range_rate
+    int32 ChaseRangeRate = 100; // chase_range_rate
+    int32 MonsterActiveEnable = 1; // monster_active_enable
+    int32 MobUnlockTime = 2000; // mob_unlock_time
+    int32 MobRespawnTime = 1000; // mob_respawn_time
+    int32 MobSpawnVariance = 1; // mob_spawn_variance
+    int32 MobSpawnDelay = 100; // mob_spawn_delay
+    int32 PlantSpawnDelay = 100; // plant_spawn_delay
+    int32 BossSpawnDelay = 100; // boss_spawn_delay
+    int32 MobNoPCMoveRate = 100; // mob_nopc_move_rate
+    int32 BossNoPCMoveRate = 100; // boss_nopc_move_rate
+    int32 MobNoPCIdleSkillRate = 100; // mob_nopc_idleskill_rate
+    int32 BossNoPCIdleSkillRate = 100; // boss_nopc_idleskill_rate
+    int32 RetaliateToMaster = 1; // retaliate_to_master
+    int32 WalkDelayRate = 100; // damage_walk_delay_rate
+    int32 PCWalkDelayRate = 20; // pc_damage_walk_delay_rate
+    int32 MultihitDelay = 200; // multihit_delay
+    int32 MaxWalkPath = 17; // max_walk_path
+    int32 MapEdgeSize = 15; // map_edge_size
+    int32 SkillWallCheck = 1; // skill_wall_check
+    int32 DamageWalkDelay = 0; // damage_walk_delay
+    int32 SDelayAttackEnable = 0; // sdelay_attack_enable
     int32 AreaSize = 14; // The cells around a unit it sees (area_size)
     int32 ItemUseInterval = 100;
     int32 AmmoUnequip = 1;
@@ -885,6 +958,8 @@ struct ROWOWStatus
     int32 DamageMotion = 800;
     int32 AspdRate = 1000;
     int32 Range = 1; // Attack range in cells
+    int32 Range2 = 0; // A monster's view range in cells (mob_db's SkillRange, range2)
+    int32 Range3 = 0; // A monster's chase range in cells (ChaseRange, range3)
     uint8 WeaponType = ROWOW_WEAPON_TYPE_FIST; // status.weapon, which is a dual wield type when two weapons are held
     uint8 RightWeaponType = ROWOW_WEAPON_TYPE_FIST; // weapontype1
     uint8 LeftWeaponType = ROWOW_WEAPON_TYPE_FIST; // weapontype2
@@ -934,6 +1009,82 @@ struct ROWOWDamageLogEntry
 struct ROWOWDamageLog : public DataMap::Base
 {
     std::deque<ROWOWDamageLogEntry> Entries; // Oldest first
+};
+
+// What a monster is doing (rAthena's MobSkillState, mob_data's state.skillstate)
+#define ROWOW_MSS_IDLE                              0
+#define ROWOW_MSS_WALK                              1
+#define ROWOW_MSS_LOOT                              2
+#define ROWOW_MSS_DEAD                              3
+#define ROWOW_MSS_BERSERK                           4       // Aggressive mob attacking
+#define ROWOW_MSS_ANGRY                             5       // Mob retaliating from being attacked.
+#define ROWOW_MSS_RUSH                              6       // Mob following a player after being attacked.
+#define ROWOW_MSS_FOLLOW                            7       // Mob following a player without being attacked.
+
+// An attack that connected, waiting out the walk delay before the monster answers it (the mob_attacked and mob_norm_attacked timers)
+struct ROWOWMobAttackedEvent
+{
+    uint64 Tick = 0;
+    ObjectGuid SrcGUID;
+    bool IsNormAttacked = false;
+};
+
+// An RO monster's AI (mob_data and its unit_data, under rAthena's names), kept on the creature as "ROWOWMobData".  Only its map's thread touches it
+struct ROWOWMobData : public DataMap::Base
+{
+    ObjectGuid TargetID; // target_id
+    ObjectGuid AttackedID; // attacked_id
+    ObjectGuid NormAttackedID; // norm_attacked_id
+    ObjectGuid ProvokeFlag; // state.provoke_flag
+    ObjectGuid MasterID; // master_id: the monster a slave follows (R10.2), not a summon's player (ROWOWMobSummon)
+    uint8 SkillState = ROWOW_MSS_IDLE; // state.skillstate
+    bool IsAggressive = false; // state.aggressive: the Angry state, which the first hit ends
+    uint8 AttackedCount = 0; // state.attacked_count: for rude attacked
+    uint64 NextThinkTime = 0; // next_thinktime
+    uint64 NextWalkTime = 0; // next_walktime
+    uint64 LastLinkTime = 0; // last_linktime
+    uint64 LastCanMove = 0; // last_canmove
+    uint64 LastSkillCheck = 0; // last_skillcheck
+    uint64 LastPCNearTime = 0; // last_pcneartime
+    std::vector<ObjectGuid> SpottedLog; // spotted_log: the players that came near it
+    std::vector<ROWOWMobAttackedEvent> AttackedEvents;
+    uint32 ThinkTimer = 0; // To the next think (MIN_MOBTHINKTIME)
+    uint32 LazyTimer = 0; // To the next lazy think, away from players
+    uint64 SpawnTime = 0; // spawn_timer: when it comes back, 0 when not waiting to
+    uint64 DeadTime = 0; // When it last died
+    uint32 LastSpawnDelay = 0; // How long it was gone the last time, and what that time was to be, for `.ro mob`
+    uint32 LastSpawnTime = 0;
+
+    // unit_data
+    uint64 CanMoveTime = 0; // canmove_tick
+    bool IsWalking = false; // walktimer: its path is being walked
+    uint64 WalkStartTime = 0; // When the path started
+    uint32 WalkPathTime = 0; // unit_get_walkpath_time of the path
+    uint32 WalkPathLength = 0; // walkpath.path_len
+    ObjectGuid TargetToID; // target_to: who it's walking to
+    int32 ChaseRange = 0; // chaserange
+    bool IsAttackContinue = false; // state.attack_continue
+    ObjectGuid AttackTargetID; // target, with attacktimer: who it's swinging at, empty when not
+};
+
+// One line of the monster spawns, as npc_parse_mob leaves it (from mod_rowow_db_mob_spawn)
+struct ROWOWMobSpawnLine
+{
+    int32 X = 0;
+    int32 Y = 0;
+    int32 XS = 0;
+    int32 YS = 0;
+    uint32 Delay1 = 5000;
+    uint32 Delay2 = 0;
+    bool IsBoss = false; // state.boss: a boss_monster line
+};
+
+// A monster of a spawn line and its center (mob_data's spawn, centerX and centerY), from mod_rowow_creature_spawn.  -1 is anywhere on the map
+struct ROWOWCreatureSpawn
+{
+    ROWOWMobSpawnLine const* Line = nullptr;
+    int32 CenterX = 0;
+    int32 CenterY = 0;
 };
 
 // A position in the world (an RO identity's save point, last RO position and WoW return position)
@@ -1167,8 +1318,7 @@ struct ROWOWIdentity : public DataMap::Base
 };
 
 #define ROWOW_ARRIVAL_FLOOR_TOLERANCE               3.0f    // Yards above the floor an arrival may be before it's put down on it
-#define ROWOW_MOVE_MAX_PATH_NODES                   256     // Longest contoured path (in steps) built for one move
-#define ROWOW_MOVE_LINE_OF_SIGHT_HEIGHT             1.0f    // Height above the ground that each step checks for a wall at
+#define ROWOW_MOVE_LINE_OF_SIGHT_HEIGHT             1.0f    // Height above the ground that a cell of no GAT checks for a wall at
 
 class ROWOWMod
 {
@@ -1184,21 +1334,13 @@ public:
 
     // Config
     bool IsEnabled = true;
-    float ConfigMoveStepDistance = 1.0f;
     float ConfigMoveMaxRisePerStep = 1.2f;
     float ConfigMoveFloorSearchHeight = 3.0f;
     float ConfigMoveFloorSearchDistance = 30.0f;
-    float ConfigRandomWalkMaxDistance = 7.35f;
-    uint32 ConfigRandomWalkMinDelayInMS = 4000;
-    uint32 ConfigRandomWalkMaxDelayInMS = 5000;
-    uint32 ConfigChaseRepathIntervalInMS = 250;
-    float ConfigChaseRepathTargetMoveDistance = 1.0f;
     uint32 ConfigGroundSnapCheckIntervalInMS = 1000;
     float ConfigGroundSnapTolerance = 0.15f;
-    uint32 ConfigUnreachableAfterTimeInMS = 2000;
-    uint32 ConfigOutOfReachGiveUpTimeInMS = 8000;
-    float ConfigRangedAttackApproachFraction = 0.8f;
-    bool ConfigCellPathing = true;
+    uint32 ConfigCorpseTimeInMS = 3000; // How long a monster's body stays, as RO's fades
+    uint32 ConfigCorpseLootHoldTimeInSec = 30; // How long a body with loot on it can stay.  The ground drops (R10.4) end this
     float CellSize = 1.05f; // Yards in an RO cell (from the map grids), for placing skill cells off the RO maps
 
     // Loaded once at startup, and only read after that (so the map threads can read it without a lock)
@@ -1240,6 +1382,8 @@ public:
     int32 SizeFixByWeaponType[ROWOW_WEAPON_TYPE_MAX][ROWOW_SIZE_COUNT] = { }; // size_fix.yml: each weapon type's damage against each size, in percent
     int32 AttrFix[ROWOW_ELEMENT_LEVEL_MAX][ROWOW_ELEMENT_COUNT][ROWOW_ELEMENT_COUNT] = { }; // attr_fix.yml: by defense element level, attack element and defense element
     std::unordered_map<uint32, ROWOWStatus> MobStatusesByMobID; // Each RO monster's status, as rAthena's mob_db loading leaves it
+    std::vector<ROWOWMobSpawnLine> MobSpawnLines; // The monster spawn lines (their rows in mod_rowow_db_mob_spawn)
+    std::unordered_map<uint32, ROWOWCreatureSpawn> CreatureSpawnsBySpawnID; // Each spawned monster's line and center
     std::unordered_map<std::string, uint32> ItemIDsByAegisName; // Every converted RO item, by its lowercase AegisName
     std::unordered_map<std::string, ROWOWItemGroup> ItemGroupsByName; // By the uppercase group name (IG_ without the prefix)
     std::mutex ItemGroupSharedPoolMutex; // The shared pools' given counts are shared by every map thread
@@ -1794,7 +1938,7 @@ public:
     Unit const* BattleGetMaster(Unit const* bl) const; // battle_get_master: the player a summoned monster answers to (on its map), or itself
     int32 SkillCheckConditionMobMaster(Player* sd, uint16 skillID, uint32 mobClass, int32& countOut); // skill_check_condition_mob_master_sub's count
     void MobDeadFindingOre(Creature* md); // mob_dead's Ore Discovery: an ore in the loot for the player with the loot priority who knows it
-    void UpdateMobSummon(Creature* md); // A summoned monster's own AI: a plant's search for its master's enemies, a hit Marine Sphere's blast
+    void UpdateMobSummon(Creature* md); // A summoned monster's own part of the AI: a hit Marine Sphere's blast
     int32 PCSkillHealBonus(Unit const* unit, uint16 skillID) const; // pc_skillheal_bonus: bHealPower (by skill_add_heal_rate) and bSkillHeal
     int32 PCSkillHeal2Bonus(Unit const* unit, uint16 skillID) const; // pc_skillheal2_bonus: bHealPower2 and bSkillHeal2
 
@@ -1810,7 +1954,72 @@ public:
     bool UnitWarpNear(Unit* bl, Position const& center); // unit_warp to a free cell next to a spot of its map (map_search_freecell 1 x 1)
     void SkillSit(Player* sd, bool sitting); // skill_sit: Gangster's Paradise for the Rogues sitting together
     void UpdateSkillSit(Player* sd); // skill_sit as the player sits down or stands up, from its update
-    bool MobCanTarget(Creature const* md, Unit const* target) const; // mob_ai_sub_hard's target checks the WoW AI doesn't make (Gangster's Paradise)
+    bool MobCanTarget(Creature const* md, Unit const* target) const; // mob_ai_sub_hard's target checks: Gangster's Paradise
+
+    // RO monster AI (ROWOW_Mob.cpp), a port of mob.cpp's: a monster's target, states and thinking.  All of it runs in the monster's map thread
+    ROWOWMobData* GetMobData(Creature* md) const;
+    static bool MobIsChasing(uint8 skillState); // mob_is_chasing
+    void MobSetState(Creature* md, ROWOWMobData* mob, uint8 skillState) const; // mob_setstate
+    void MobSpawnReset(Creature* md); // mob_spawn's reset of its state
+    void MobAddSpotted(ROWOWMobData* mob, ObjectGuid const& guid) const; // mob_add_spotted
+    void MobCleanSpotted(Creature* md, ROWOWMobData* mob) const; // mob_clean_spotted
+    bool CheckDistanceBL(Unit const* src, Unit const* target, int32 distance) const; // check_distance_bl
+    bool BattleCheckRange(Unit const* src, Unit const* bl, int32 range) const; // battle_check_range, for a monster
+    bool MobCheckVisibility(Creature* md, Unit const* target, bool isCheckBlind) const; // status_check_visibility
+    bool MobCanReach(Creature* md, Unit const* bl, int32 range) const; // mob_can_reach
+    int32 MobLinkSearch(Creature* md, Unit* target, uint64 tick); // mob_linksearch over assist_range
+    bool MobCanChangeTarget(Creature* md, ROWOWMobData* mob, Unit const* target, uint32 mode) const; // mob_can_changetarget
+    bool MobRandomTarget(Creature* md, Unit*& target); // mob_randomtarget
+    void MobTarget(Creature* md, Unit* bl); // mob_target
+    void MobSetProvoked(Creature* md, Unit* src); // SkillProvoke's provoke_flag and mob_target
+    void MobCastSensor(Creature* md, Unit* src, uint64 tick); // unit_skilluse_id2's cast sensor
+    bool MobSkillUse(Creature* md, uint64 tick, int32 event); // mobskill_use: the seam for R10.2
+    void MobSkillEvent(Creature* md, Unit* src, uint64 tick, int32 flag, int64 damage); // mobskill_event: the seam for R10.2
+    bool MobLootSearch(Creature* md, ROWOWMobData* mob, uint64 tick); // The looter part of mob_ai_sub_hard: the seam for R10.4
+    bool MobAISubHardSlaveMob(Creature* md, ROWOWMobData* mob, uint64 tick); // mob_ai_sub_hard_slavemob: the seam for R10.2 and R10.3
+    void MobForEachEnemyInRange(Creature* md, int32 range, std::function<void(Unit*)> const& func); // map_foreachinallrange over DEFAULT_ENEMY_TYPE
+    void MobAISubHardActiveSearch(Creature* md, ROWOWMobData* mob, Unit* bl, Unit*& target, uint32 mode, int32 range2, int32 range3) const; // mob_ai_sub_hard_activesearch
+    void MobAISubHardChangeChase(Creature* md, ROWOWMobData* mob, Unit* bl, Unit*& target, int32 attackRange) const; // mob_ai_sub_hard_changechase
+    void MobUnlockTarget(Creature* md, uint64 tick); // mob_unlocktarget
+    bool MobRandomWalk(Creature* md, uint64 tick); // mob_randomwalk
+    bool MobAISubHard(Creature* md, uint64 tick); // mob_ai_sub_hard
+    void MobAISubLazy(Creature* md, ROWOWMobData* mob, uint64 tick); // mob_ai_sub_lazy
+    bool MobIsNearPC(Creature* md, ROWOWMobData* mob) const; // mob_ai_sub_foreachclient
+    void MobSetAttackedID(Creature* md, Unit* src, uint64 tick, bool isNormAttacked); // mob_set_attacked_id
+    int64 BattleCalcWalkDelay(Unit const* bl, int64 damage, int16 div) const; // battle_calc_walkdelay
+    void MobBattleAttacked(Unit* src, Unit* target, int64 damage, int16 div, uint64 tick, int32 amotion, bool isNormAttacked); // battle_damage's monster events
+    void MobReleaseCombat(Creature* md, ROWOWMobData* mob); // Leaves WoW's combat state, RO having none
+    void MobSyncVictim(Creature* md, ROWOWMobData* mob); // The WoW victim follows the RO target
+    void MobUpdate(Creature* md, uint32 diff); // The monster's update (mob_ai_hard, mob_ai_lazy)
+
+    // Respawn (ROWOW_Mob.cpp): mob_setdelayspawn's time and mob_spawn's placement, on the core's death and respawn
+    void LoadMobSpawnData();
+    ROWOWCreatureSpawn const* GetCreatureSpawn(Creature const* md) const; // Null for a monster of no spawn line
+    int64 MobSpawnTimeOf(Creature const* md, ROWOWMobSpawnLine const& line) const; // mob_setdelayspawn's time
+    void MobSetDelaySpawn(Creature* md); // mob_setdelayspawn, at death
+    void UpdateMobCorpse(Creature* md); // A dead monster's body going, from its update
+    bool MapSearchFreeCellOfSpawn(ROWOWMapGrid const& mapGrid, Map* map, int32 baseX, int32 baseY, int32 rx, int32 ry, int32 tries, int32& xOut, int32& yOut) const; // map_search_freecell, flag 1
+    bool MobSpawn(Creature* md); // mob_spawn's placement: false holds the respawn
+    bool MobCanRespawn(Creature* md); // CreatureAI::CanRespawn
+    bool WriteMobDump(std::string const& filePath) const; // Each monster's modes and ranges and each spawn line, as the oracle's @oraclemobs writes them
+
+    // Walking and attacking (ROWOW_Movement.cpp), a port of unit.cpp's for monsters, and path.cpp's path search on the map's cells
+    bool MapGetCellNoPass(Map* map, ROWOWMapGrid const& mapGrid, int32 x, int32 y) const; // map_getcell(CELL_CHKNOPASS)
+    bool PathSearchLong(ROWOWMapGrid const& mapGrid, int32 x0, int32 y0, int32 x1, int32 y1) const; // path_search_long(CELL_CHKWALL)
+    bool PathSearch(std::vector<uint8>& pathOut, Map* map, ROWOWMapGrid const& mapGrid, int32 x0, int32 y0, int32 x1, int32 y1, uint8 cell) const; // path_search (A*), directions in pathOut
+    bool IsMobMovementBlocked(Creature* md, bool isIgnoreDisableMove = false) const; // Movement the core controls, or that's impossible right now
+    bool UnitCanMove(Creature* md, ROWOWMobData const* mob, uint64 tick) const; // unit_can_move
+    bool UnitCanReachBL(Creature* md, Unit const* tbl, int32 range, int32& xOut, int32& yOut) const; // unit_can_reach_bl
+    uint32 UnitWalkPathPos(Creature* md, ROWOWMobData const* mob, uint64 tick) const; // walkpath.path_pos
+    bool UnitWalkPath(Creature* md, ROWOWMobData* mob, std::vector<uint8> const& path, int32 x0, int32 y0, bool isRun); // Starts walking a path
+    bool UnitWalkToXY(Creature* md, int32 x, int32 y); // unit_walktoxy
+    bool UnitWalkToBL(Creature* md, ROWOWMobData* mob, Unit* tbl, int32 range, bool isAttackContinue); // unit_walktobl
+    bool UnitUpdateChase(Creature* md, ROWOWMobData* mob, uint64 tick); // unit_update_chase
+    void UnitStopWalking(Creature* md); // unit_stop_walking, leaving movement the core controls alone
+    void UnitSetWalkDelay(Creature* md, ROWOWMobData* mob, uint64 tick, int64 delay); // unit_set_walkdelay, for damage
+    bool UnitAttack(Creature* md, ROWOWMobData* mob, Unit* target); // unit_attack: false when the walking may go on
+    void UnitUnattackable(Creature* md, ROWOWMobData* mob, uint64 tick); // unit_unattackable
+    void UnitAttackTimerSub(Creature* md, ROWOWMobData* mob, uint64 tick); // unit_attack_timer_sub
     void ClifGraffiti(Map* map, ROWOWSkillUnitGroup& group); // clif_graffiti: Graffiti's message to the players it comes into view of
     void ClifGraffitiClear(ROWOWSkillUnitGroup& group); // The Graffiti gone: its message off the ground of the players that see it
     void ClifGospelInfo(Unit* bl, int32 type); // clif_gospel_info (ZC_SKILLMSG): Battle Chant's message to a player it blesses
@@ -1916,7 +2125,6 @@ public:
     // Builds a path from the creature toward a target, one small step at a time with every step pulled onto the ground, so the
     // creature follows the terrain like an RO monster does.  The path stops early at a wall, a cliff, or missing ground, and
     // stops short of the target by stopShortDistance.  Returns false if not even one step could be made
-    bool BuildGroundContouredPath(Creature* creature, float targetX, float targetY, float stopShortDistance, Movement::PointsArray& pathNodesOut);
 
     // RO NPC scripts (ROWOW_NpcScript.cpp, R7): rAthena's NPC script files read at startup into NPCs and functions, the NPC runs (one per
     // player, waiting for its answers), NPC timers and events, and the variables the scripts keep.  Runs with a player happen in that
@@ -2080,13 +2288,10 @@ private:
 
     // On an RO map (with cell pathing on), the path goes from cell center to cell center as an RO monster walks: diagonally until
     // in line with the target's cell, then straight, stepping around what's in the way where it can
-    bool BuildCellPath(Creature* creature, ROWOWMapGrid const& mapGrid, float targetX, float targetY, float stopShortDistance, Movement::PointsArray& pathNodesOut);
 
     // Whether a creature can step from one spot to another on the ground (no wall, cliff or missing ground), and the ground height there
-    bool CanStepTo(Creature* creature, float priorX, float priorY, float priorZ, float stepX, float stepY, float stepDistance, float& stepZOut);
 
     // The ground height under a creature to start a path from
-    float GetPathStartGroundZ(Creature* creature);
 };
 
 #define ROWOW ROWOWMod::instance()

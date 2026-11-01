@@ -213,6 +213,8 @@ void ROWOWMod::LoadBattleData()
         for (uint8 statIndex = 0; statIndex < ROWOW_STAT_COUNT; statIndex++)
             status.Stats[statIndex] = std::max<int32>(0, int32(mobTable->GetInt(rowIndex, mobTable->GetColumnIndex(statColumnNames[statIndex]), 1)));
         status.Range = int32(mobTable->GetInt(rowIndex, attackRangeColumnIndex, 0));
+        status.Range2 = int32(mobTable->GetInt(rowIndex, mobTable->GetColumnIndex("SkillRange"), 0));
+        status.Range3 = int32(mobTable->GetInt(rowIndex, mobTable->GetColumnIndex("ChaseRange"), 0));
         status.Size = uint8(std::max(0, GetNameIndex(SizeNames, ROWOW_SIZE_COUNT, mobTable->GetCell(rowIndex, sizeColumnIndex))));
         status.Race = uint8(std::max(0, GetNameIndex(RaceNames, std::size(RaceNames), mobTable->GetCell(rowIndex, raceColumnIndex))));
         status.DefElement = uint8(std::max(0, GetElementByName(mobTable->GetCell(rowIndex, elementColumnIndex))));
@@ -235,8 +237,38 @@ void ROWOWMod::LoadBattleData()
             uint32 mode = 0;
             if (modeField.first == "CanMove")
                 mode = ROWOW_MODE_CANMOVE;
+            else if (modeField.first == "Looter")
+                mode = ROWOW_MODE_LOOTER;
+            else if (modeField.first == "Aggressive")
+                mode = ROWOW_MODE_AGGRESSIVE;
+            else if (modeField.first == "Assist")
+                mode = ROWOW_MODE_ASSIST;
+            else if (modeField.first == "CastSensorIdle")
+                mode = ROWOW_MODE_CASTSENSORIDLE;
+            else if (modeField.first == "NoRandomWalk")
+                mode = ROWOW_MODE_NORANDOMWALK;
+            else if (modeField.first == "NoCast")
+                mode = ROWOW_MODE_NOCAST;
             else if (modeField.first == "CanAttack")
                 mode = ROWOW_MODE_CANATTACK;
+            else if (modeField.first == "CastSensorChase")
+                mode = ROWOW_MODE_CASTSENSORCHASE;
+            else if (modeField.first == "ChangeChase")
+                mode = ROWOW_MODE_CHANGECHASE;
+            else if (modeField.first == "Angry")
+                mode = ROWOW_MODE_ANGRY;
+            else if (modeField.first == "ChangeTargetMelee")
+                mode = ROWOW_MODE_CHANGETARGETMELEE;
+            else if (modeField.first == "ChangeTargetChase")
+                mode = ROWOW_MODE_CHANGETARGETCHASE;
+            else if (modeField.first == "TargetWeak")
+                mode = ROWOW_MODE_TARGETWEAK;
+            else if (modeField.first == "RandomTarget")
+                mode = ROWOW_MODE_RANDOMTARGET;
+            else if (modeField.first == "TeleportBlock")
+                mode = ROWOW_MODE_TELEPORTBLOCK;
+            else if (modeField.first == "FixedItemDrop")
+                mode = ROWOW_MODE_FIXEDITEMDROP;
             else if (modeField.first == "Detector")
                 mode = ROWOW_MODE_DETECTOR;
             else if (modeField.first == "StatusImmune")
@@ -274,9 +306,18 @@ void ROWOWMod::LoadBattleData()
             case ROWOW_CLASS_BATTLEFIELD:
                 status.Mode |= ROWOW_MODE_STATUS_IMMUNE | ROWOW_MODE_SKILL_IMMUNE;
                 break;
+            case ROWOW_CLASS_EVENT:
+                status.Mode |= ROWOW_MODE_FIXEDITEMDROP;
+                break;
         }
+        if (BattleConfig.ViewRangeRate != 100)
+            status.Range2 = std::max(1, status.Range2 * BattleConfig.ViewRangeRate / 100);
+        if (BattleConfig.ChaseRangeRate != 100)
+            status.Range3 = std::max(status.Range2, status.Range3 * BattleConfig.ChaseRangeRate / 100);
         status.AttackDelay = std::max(status.AttackDelay, status.AttackMotion);
         status.AspdRate = 1000;
+        if (BattleConfig.MonsterActiveEnable == 0)
+            status.Mode &= ~ROWOW_MODE_AGGRESSIVE;
         StatusCalcMisc(status, status.Level);
         double maxHP = double(status.MaxHP);
         if ((status.Mode & ROWOW_MODE_MVP) != 0)
@@ -531,7 +572,10 @@ uint8 ROWOWMod::BattleWeaponAttack(Unit* src, Unit* target, ROWOWDamage& wdOut)
             // Next normal attack will receive a damage boost
             sce->Val4 = 1;
             // The target will start attacking instead of the source (unit_attack)
-            target->Attack(src, true);
+            if (Creature* tmd = target->ToCreature(); tmd != nullptr && GetROMobID(tmd) != 0)
+                GetMobData(tmd)->TargetID = src->GetGUID();
+            else
+                target->Attack(src, true);
             return ROWOW_ATK_BLOCK;
         }
     }
@@ -641,6 +685,17 @@ uint8 ROWOWMod::BattleWeaponAttack(Unit* src, Unit* target, ROWOWDamage& wdOut)
         }
         else
             StatusChangeEnd(target, ROWOW_SC_DEVOTION);
+    }
+
+    // Monsters trigger a special event when they are hit in Berserk state by a normal attack within [attack range+1].  Certain AI types only switch
+    // target on this trigger.  This event only triggers if the target is not already the current attacker.  We need to do this here because it needs
+    // to be calculated before waiting for attack motion
+    if (wdOut.DmgLv > ROWOW_ATK_BLOCK && target->IsCreature() == true && GetROMobID(target->ToCreature()) != 0)
+    {
+        ROWOWMobData const* tmob = GetMobData(target->ToCreature());
+        bool isNormAttacked = tmob->SkillState == ROWOW_MSS_BERSERK && tmob->TargetID != src->GetGUID() &&
+            ((BattleConfig.MobAI & 0x4) != 0 || CheckDistanceBL(src, target, tstatus->Range + 1) == true);
+        MobBattleAttacked(src, target, wdOut.Damage + wdOut.Damage2, wdOut.Div, tick, wdOut.AMotion, isNormAttacked);
     }
 
     // battle_delay_damage's additional effects: WoW deals the swing right after this, and they follow it in the target's update (where the

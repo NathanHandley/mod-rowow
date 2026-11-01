@@ -174,7 +174,7 @@ namespace
             if (Creature* dstmd = bl->ToCreature())
             {
                 src->AtTargetAttacked(dstmd, true);
-                dstmd->GetThreatMgr().FixateTarget(src);
+                ROWOW->MobSetProvoked(dstmd, src);
             }
         }
     };

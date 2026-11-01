@@ -49,6 +49,7 @@ public:
         ROWOW->LoadIdentityData();
         ROWOW->LoadStatusData();
         ROWOW->LoadBattleData();
+        ROWOW->LoadMobSpawnData();
         ROWOW->LoadItemScriptData();
         ROWOW->LoadBonusData();
         ROWOW->LoadProduceData(); // After the items, which its recipes make and use

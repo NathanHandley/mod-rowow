@@ -1016,8 +1016,10 @@ bool ROWOWMod::MobClassChange(Creature* md, uint32 mobID)
     StatusChangeEnd(md, ROWOW_SC_BARRIER);
     md->AttackStop();
     md->StopMoving();
+    MobUnlockTarget(md, GetTick());
     if (md->UpdateEntry(entry) == false)
         return false;
+    md->SetRegeneratingHealth(false);
     StatusCalcBL(md, std::bitset<ROWOW_SCB_MAX>().set());
     md->SetHealth(uint32(std::max<uint64>(1, uint64(md->GetMaxHealth()) * hpRate / 100)));
     return true;
@@ -1426,9 +1428,8 @@ void ROWOWMod::MobDeadFindingOre(Creature* md)
 
 void ROWOWMod::UpdateMobSummon(Creature* md)
 {
-    // A summoned monster's own part of mob_ai_sub_hard, from its update: a plant (AI_FLORA) that isn't fighting looks for its master's enemies
-    // within its attack reach (it can't move), and a Marine Sphere that was hit uses Self Destruction (its mob skill, at once on any damage:
-    // the "alchemist" condition).  The rest of monster AI and mob skills come with R10
+    // A summoned monster's own part of mob_ai_sub_hard, from its update: a Marine Sphere that was hit uses Self Destruction (its mob skill, at
+    // once on any damage: the "alchemist" condition; R10.2 runs this through its skill list).  A plant (AI_FLORA) looks for its enemies in the AI
     ROWOWMobSummon* summon = md->CustomData.Get<ROWOWMobSummon>("ROWOWMobSummon");
     if (summon == nullptr || md->IsAlive() == false || md->IsInWorld() == false)
         return;
@@ -1439,36 +1440,7 @@ void ROWOWMod::UpdateMobSummon(Creature* md)
             summon->IsSelfDestructPending = false;
             SkillCastendNoDamageID(md, md, ROWOW_SKILL_NPC_SELFDESTRUCTION, 1, GetTick(), 0);
         }
-        return;
     }
-    if (summon->AI != ROWOW_AI_FLORA || md->GetVictim() != nullptr || md->HasUnitState(UNIT_STATE_CASTING) == true)
-        return;
-    ROWOWStatus const* status = GetROStatus(md);
-    if (status == nullptr)
-        return;
-    // mob_ai_sub_hard_activesearch: the closest enemy it can see.  It searches its view range, but can't chase, so it only attacks the
-    // closest when that one is within its attack range (one further is locked until mob_unlock_time, and nothing is attacked): the closest
-    // within the attack range is the same
-    Unit* target = nullptr;
-    int32 targetDistance = 0;
-    MapForEachInRange(md, status->Range, [this, md, &target, &targetDistance](Unit* bl)
-    {
-        if (bl == md || StatusCheckSkillUse(md, bl, 0, 0) == false || BattleCheckTarget(md, bl, ROWOW_BCT_ENEMY) <= 0 ||
-            md->IsValidAttackTarget(bl) == false || md->IsWithinLOSInMap(bl) == false)
-            return 0;
-        int32 distance = DistanceBL(md, bl);
-        if (target == nullptr || distance < targetDistance)
-        {
-            target = bl;
-            targetDistance = distance;
-        }
-        return 0;
-    });
-    if (target == nullptr || md->AI() == nullptr)
-        return;
-    // A WoW creature fights what it has threat on (its victim is picked from its threat list)
-    md->AddThreat(target, 1.0f);
-    md->AI()->AttackStart(target);
 }
 
 int8 ROWOWMod::SkillIsCopyable(Player* sd, uint16 skillID) const

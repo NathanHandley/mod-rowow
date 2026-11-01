@@ -937,6 +937,10 @@ int32 ROWOWMod::UnitSkillCastTime(Unit* src, Unit* target, uint16 skillID, uint1
 
     // SC_MAGICPOWER needs to switch states at start of cast
     SkillToggleMagicPower(src, skillID);
+
+    // A player's skill cast at a monster: a cast sensor monster turns on the caster, also when it takes no cast time in a combo
+    if (src->IsPlayer() == true && target != nullptr && target->IsCreature() == true && GetROMobID(target->ToCreature()) != 0 && (casttime > 0 || isCombo == true))
+        MobCastSensor(target->ToCreature(), src, tick);
     if (casttime <= 0)
         ud->IsSkillCastCancel = false;
     ud->SkillID = skillID;
@@ -2562,6 +2566,8 @@ bool ROWOWMod::IsCellNoPass(Unit const* unit, ROWOWMapGrid const& mapGrid, int32
 {
     // map_getcell(CELL_CHKNOPASS) beside the unit: a cell is a wall when there's no ground there, or it's too steep from the unit's ground to
     // step to (a wall or a cliff), or something solid stands between (the same rules as a monster's cell path)
+    if (mapGrid.HasCells() == true)
+        return MapGetCellNoPass(unit->GetMap(), mapGrid, cellX, cellY);
     float x = mapGrid.GetCellCenterWorldX(cellY);
     float y = mapGrid.GetCellCenterWorldY(cellX);
     if (MapGetCellIceWall(unit->GetMap(), cellX, cellY) == true)
@@ -3178,7 +3184,7 @@ void ROWOWMod::BattleDelayDamage(uint64 tick, int32 amotion, Unit* src, Unit* ta
     }, Milliseconds(std::max<int64>(1, int64(amotion) - int64(GetTick() - tick))));
 }
 
-void ROWOWMod::BattleDamage(Unit* src, Unit* target, int64 damage, int16 /*div*/, uint16 skillLevel, uint16 skillID, uint8 dmgLv, int32 attackType, bool additionalEffects,
+void ROWOWMod::BattleDamage(Unit* src, Unit* target, int64 damage, int16 div, uint16 skillLevel, uint16 skillID, uint8 dmgLv, int32 attackType, bool additionalEffects,
     uint64 tick, bool isCritical)
 {
     // battle_damage: status_fix_damage as WoW damage carrying the RO number (the client's RO digits, MobLogDamage through the damage hook,
@@ -3221,6 +3227,10 @@ void ROWOWMod::BattleDamage(Unit* src, Unit* target, int64 damage, int16 /*div*/
         SkillAdditionalEffect(src, target, skillID, skillLevel, attackType, dmgLv, tick);
     if (dmgLv > ROWOW_ATK_BLOCK && attackType != 0 && additionalEffects == true)
         SkillCounterAdditionalEffect(src, target, skillID, skillLevel, attackType, tick);
+
+    // These events trigger when the attack connects
+    if (dmgLv > ROWOW_ATK_BLOCK)
+        MobBattleAttacked(src, target, damage, div, tick, 0, false);
 }
 
 bool ROWOWMod::BattleCheckComa(Unit const* src, Unit const* target, int32 attackType) const
