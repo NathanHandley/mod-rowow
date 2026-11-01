@@ -31,24 +31,30 @@
 
 using namespace std;
 
-// Waiting rooms (R8.3): RO's chat rooms over NPCs, which the job tests (Knight, Crusader, Hunter, Assassin, Wizard, Sage, Dancer...) use as
-// their queue: a player joins, and when enough have joined (the trigger) and the event is enabled, the NPC's event runs (OnStartArena),
-// which warps the waiting players into the test (warpwaitingpc) and disables the event until the test is over.  rAthena's player-made
-// chat rooms aren't here; only NPCs own rooms.
+// RO's chat rooms (R8.3, R11).  An NPC's is what the job tests (Knight, Crusader, Hunter, Assassin, Wizard, Sage, Dancer...) use as their
+// queue: a player joins, and when enough have joined (the trigger) and the event is enabled, the NPC's event runs (OnStartArena), which warps
+// the waiting players into the test (warpwaitingpc) and disables the event until the test is over.  A player's room is made with the room
+// window (Alt+C, ".ro room create"): the first of its users owns it and can change it, kick or hand it on, it can have a password, and it
+// goes when the last one leaves.
 //
-// The room is server state (WaitingRoomsByNpcID, under NpcStateMutex).  The client draws each room near the player as RO's bubble over its
-// NPC (even a hidden one, as RO does) through the RO_Identity addon (RO_Identity_WaitingRoom.lua, the ROWOWROOM messages below); a click
-// on the bubble joins (".ro room join <id>"), and the joined room's window lists its members with a Leave button (".ro room leave").  RO
-// keeps a player in a chat room from walking; here walking off the cell it joined on leaves the room instead.  Leaving the map or the game
-// leaves it too.  See RONotes\R8-content.md "Waiting rooms"
+// A room is server state (WaitingRoomsByNpcID, under NpcStateMutex).  The client draws each room near the player as RO's bubble over its
+// NPC (even a hidden one, as RO does) or owner through the RO_Identity addon (RO_Identity_WaitingRoom.lua, the ROWOWROOM messages below),
+// with the signs of the open shops (ROWOWShopSign); a click on a bubble joins (".ro room join <id> [password]"), and the joined room's window
+// lists its members with a Leave button (".ro room leave").  A player in a room can't move, attack, or use skills or items (pc_cant_act,
+// PCCanMoveAt): the Leave button is the way out, and leaving the map or the game leaves it too.  What it says goes to the room alone.  See
+// RONotes\R8-content.md "Waiting rooms" and R11-systems.md "Chat rooms"
 
 namespace
 {
     // How often a player's update looks at the rooms around it (its bubbles, and whether it walked out of its room)
     constexpr uint32 WAITING_ROOM_CHECK_INTERVAL_IN_MS = 500;
 
-    // CHATROOM_TITLE_SIZE less its terminator
+    // CHATROOM_TITLE_SIZE and CHATROOM_PASS_SIZE less their terminators
     constexpr size_t WAITING_ROOM_TITLE_LENGTH = 36;
+    constexpr size_t WAITING_ROOM_PASSWORD_LENGTH = 8;
+
+    // How much of the member list goes in one message
+    constexpr size_t WAITING_ROOM_MEMBERS_CHUNK_LENGTH = 200;
 
     // rAthena's e_refuse_enter_room, the answers to a join (clif_joinchatfail), with RO's message for each
     enum ROWOWEnterRoomResult : int32
@@ -135,47 +141,10 @@ void ROWOWMod::ChatDeleteNpcChat(ROWOWNpc const* npc)
     WaitingRoomsByNpcID.erase(npc->ID);
 }
 
-int32 ROWOWMod::ChatJoinChat(Player* player, uint32 npcID)
+namespace
 {
-    // chat_joinchat, and clif_joinchatfail's message when it can't
-    int32 result = ChatJoinChatSub(player, npcID);
-    if (result != ROWOW_ENTERROOM_SUCCESS && player->GetSession() != nullptr)
-        ChatHandler(player->GetSession()).SendSysMessage(GetEnterRoomFailText(result));
-    return result;
-}
-
-int32 ROWOWMod::ChatJoinChatSub(Player* player, uint32 npcID)
-{
-    // chat_joinchat: a room on the player's map (in sight: the client only shows those), not full (the NPC counts as one), the player in none
-    // already, of its level and with its zeny; then the event if enough have joined (chat_triggerevent).  The player's session thread
-    ROWOWIdentity* identity = GetIdentity(player);
-    ROWOWNpc const* npc = GetNpc(npcID);
-    if (identity->Exists == false || npc == nullptr || npc->MapID != player->GetMapId())
-        return ROWOW_ENTERROOM_FULL;
-    int32 x = 0, y = 0;
-    GetUnitCell(player, x, y);
-    int32 range = BattleConfig.AreaSize + 1;
-    if (std::abs(x - npc->X) > range || std::abs(y - npc->Y) > range)
-        return ROWOW_ENTERROOM_FULL;
-    std::string event;
+    ROWOWWaitingRoomUser MakeWaitingRoomUser(Player* player, int32 x, int32 y)
     {
-        std::lock_guard<std::mutex> lock(NpcStateMutex);
-        auto roomIter = WaitingRoomsByNpcID.find(npcID);
-        if (roomIter == WaitingRoomsByNpcID.end() || npc->IsEnabled == false)
-            return ROWOW_ENTERROOM_FULL;
-        for (auto const& otherRoom : WaitingRoomsByNpcID)
-            for (ROWOWWaitingRoomUser const& user : otherRoom.second.Users)
-                if (user.PlayerGUID == player->GetGUID())
-                    return ROWOW_ENTERROOM_FULL;
-        ROWOWWaitingRoom& room = roomIter->second;
-        if (int32(room.Users.size()) + 1 >= room.Limit)
-            return ROWOW_ENTERROOM_FULL;
-        if (int32(identity->BaseLevel) < room.MinLevel)
-            return ROWOW_ENTERROOM_TOO_LOW_LEVEL;
-        if (int32(identity->BaseLevel) > room.MaxLevel)
-            return ROWOW_ENTERROOM_TOO_HIGH_LEVEL;
-        if (int64(player->GetMoney()) < room.Zeny)
-            return ROWOW_ENTERROOM_NO_ZENY;
         ROWOWWaitingRoomUser user;
         user.PlayerGUID = player->GetGUID();
         user.AccountID = player->GetSession()->GetAccountId();
@@ -183,12 +152,131 @@ int32 ROWOWMod::ChatJoinChatSub(Player* player, uint32 npcID)
         user.MapID = player->GetMapId();
         user.X = x;
         user.Y = y;
-        room.Users.push_back(user);
-        if (int32(room.Users.size()) >= room.Trigger)
+        user.PositionX = player->GetPositionX();
+        user.PositionY = player->GetPositionY();
+        user.PositionZ = player->GetPositionZ();
+        return user;
+    }
+
+    // chat_createchat's place: where the owner stands
+    void SetRoomPlace(ROWOWWaitingRoom& room, ROWOWWaitingRoomUser const& owner)
+    {
+        room.MapID = owner.MapID;
+        room.X = owner.X;
+        room.Y = owner.Y;
+        room.HasPosition = true;
+        room.PositionX = owner.PositionX;
+        room.PositionY = owner.PositionY;
+        room.PositionZ = owner.PositionZ;
+    }
+}
+
+bool ROWOWMod::ChatCreatePCChat(Player* player, std::string const& title, std::string const& password, int32 limit, bool isPublic)
+{
+    // clif_parse_CreateChatRoom and chat_createpcchat: Basic Skill level 4, no NPC beside it, no shop open, none on a nochat map; then a room
+    // with the player as its only user and owner
+    ROWOWIdentity* identity = GetIdentity(player);
+    ChatHandler handler(player->GetSession());
+    if (BattleConfig.BasicSkillCheck != 0 && PCCheckSkill(player, ROWOW_SKILL_NV_BASIC) < 4)
+    {
+        ClifSkillFail(player, ROWOW_SKILL_NV_BASIC, ROWOW_USESKILL_FAIL_LEVEL, 3);
+        return false;
+    }
+    if (NpcIsNear(player) == true)
+    {
+        handler.SendNotification("You can't do that this close to an NPC.");
+        return false;
+    }
+    if (title.empty() == true)
+        return false; // invalid input
+    if (identity->ChatRoomID != 0)
+        return false; // Prevent people abusing the chat system by creating multiple chats, as pointed out by End of Exam. [Skotlex]
+    if (identity->IsVending == true || identity->BuyingStore != nullptr)
+        return false; // not chat, when you already have a store open
+    auto mapIDsIter = MapIDsByMapFlag.find("nochat");
+    if (mapIDsIter != MapIDsByMapFlag.end() && mapIDsIter->second.find(player->GetMapId()) != mapIDsIter->second.end())
+    {
+        handler.SendSysMessage("You can't create chat rooms on this map.");
+        return false; // Can't create chatrooms on this map.
+    }
+    player->StopMoving(); // unit_stop_walking
+    player->AttackStop(); // unit_stop_attack
+    int32 x = 0, y = 0;
+    GetUnitCell(player, x, y);
+    {
+        std::lock_guard<std::mutex> lock(NpcStateMutex);
+        uint32 roomID = NextPlayerRoomID++;
+        ROWOWWaitingRoom& room = WaitingRoomsByNpcID[roomID];
+        room.NpcID = roomID;
+        room.IsPlayerRoom = true;
+        room.Title = title.substr(0, WAITING_ROOM_TITLE_LENGTH);
+        room.Password = password.substr(0, WAITING_ROOM_PASSWORD_LENGTH);
+        room.IsPublic = isPublic;
+        room.Limit = std::clamp(limit, 1, int32(ROWOW_MAX_WAITING_ROOM_USERS));
+        room.Trigger = 0;
+        room.MaxLevel = std::numeric_limits<int32>::max();
+        room.Users.push_back(MakeWaitingRoomUser(player, x, y));
+        SetRoomPlace(room, room.Users.front());
+        identity->ChatRoomID = roomID;
+    }
+    identity->SentWaitingRoomMessage.clear();
+    PCUpdateMoveLock(player);
+    return true;
+}
+
+int32 ROWOWMod::ChatJoinChat(Player* player, uint32 roomID, std::string const& password)
+{
+    // chat_joinchat, and clif_joinchatfail's message when it can't
+    int32 result = ChatJoinChatSub(player, roomID, password);
+    if (result != ROWOW_ENTERROOM_SUCCESS && player->GetSession() != nullptr)
+        ChatHandler(player->GetSession()).SendSysMessage(GetEnterRoomFailText(result));
+    return result;
+}
+
+int32 ROWOWMod::ChatJoinChatSub(Player* player, uint32 roomID, std::string const& password)
+{
+    // chat_joinchat: a room on the player's map (in sight: the client only shows those), not full (an NPC counts as one), the player in none
+    // already and keeping no shop, with the password of a private room, of its level and with its zeny, and not kicked from it; then the event
+    // if enough have joined (chat_triggerevent).  The player's session thread
+    ROWOWIdentity* identity = GetIdentity(player);
+    if (identity->Exists == false || identity->ChatRoomID != 0 || identity->IsVending == true || identity->BuyingStore != nullptr)
+        return ROWOW_ENTERROOM_FULL;
+    ROWOWNpc const* npc = GetNpc(roomID);
+    int32 x = 0, y = 0;
+    GetUnitCell(player, x, y);
+    int32 range = BattleConfig.AreaSize + 1;
+    std::string event;
+    {
+        std::lock_guard<std::mutex> lock(NpcStateMutex);
+        auto roomIter = WaitingRoomsByNpcID.find(roomID);
+        if (roomIter == WaitingRoomsByNpcID.end())
+            return ROWOW_ENTERROOM_FULL;
+        ROWOWWaitingRoom& room = roomIter->second;
+        uint32 mapID = room.IsPlayerRoom == true ? room.MapID : (npc != nullptr ? npc->MapID : 0);
+        int32 roomX = room.IsPlayerRoom == true ? room.X : (npc != nullptr ? npc->X : 0);
+        int32 roomY = room.IsPlayerRoom == true ? room.Y : (npc != nullptr ? npc->Y : 0);
+        if (mapID != player->GetMapId() || std::abs(x - roomX) > range || std::abs(y - roomY) > range || (room.IsPlayerRoom == false && (npc == nullptr || npc->IsEnabled == false)))
+            return ROWOW_ENTERROOM_FULL;
+        if ((room.IsPlayerRoom == true ? int32(room.Users.size()) : int32(room.Users.size()) + 1) >= room.Limit)
+            return ROWOW_ENTERROOM_FULL;
+        if (room.IsPublic == false && password != room.Password)
+            return ROWOW_ENTERROOM_WRONG_PASSWORD;
+        if (int32(identity->BaseLevel) < room.MinLevel)
+            return ROWOW_ENTERROOM_TOO_LOW_LEVEL;
+        if (int32(identity->BaseLevel) > room.MaxLevel)
+            return ROWOW_ENTERROOM_TOO_HIGH_LEVEL;
+        if (int64(player->GetMoney()) < room.Zeny)
+            return ROWOW_ENTERROOM_NO_ZENY;
+        if (room.KickList.find(player->GetGUID()) != room.KickList.end())
+            return ROWOW_ENTERROOM_KICKED;
+        room.Users.push_back(MakeWaitingRoomUser(player, x, y));
+        identity->ChatRoomID = roomID;
+        if (room.IsPlayerRoom == false && int32(room.Users.size()) >= room.Trigger)
             event = room.Event;
     }
     player->StopMoving(); // unit_stop_walking
     identity->SentWaitingRoomMessage.clear();
+    PCUpdateMoveLock(player);
     if (event.empty() == false)
         QueueNpcEvent(event); // npc_event_do, at the next world update
     return ROWOW_ENTERROOM_SUCCESS;
@@ -196,27 +284,177 @@ int32 ROWOWMod::ChatJoinChatSub(Player* player, uint32 npcID)
 
 bool ROWOWMod::ChatLeaveChat(Player* player, bool isKicked)
 {
-    // chat_leavechat: out of its room (an NPC's room stays when it empties).  False when it was in none
+    // chat_leavechat: out of its room.  An NPC's room stays when it empties; a player's goes, and when its owner leaves the next user owns it
+    // and it moves to that one (cd->owner, the room's place).  False when it was in none
+    ROWOWIdentity* identity = GetIdentity(player);
     bool isFound = false;
     {
         std::lock_guard<std::mutex> lock(NpcStateMutex);
-        for (auto& roomByNpcID : WaitingRoomsByNpcID)
+        for (auto roomIter = WaitingRoomsByNpcID.begin(); roomIter != WaitingRoomsByNpcID.end(); ++roomIter)
         {
-            std::vector<ROWOWWaitingRoomUser>& users = roomByNpcID.second.Users;
+            ROWOWWaitingRoom& room = roomIter->second;
+            std::vector<ROWOWWaitingRoomUser>& users = room.Users;
             auto userIter = std::find_if(users.begin(), users.end(), [player](ROWOWWaitingRoomUser const& user) { return user.PlayerGUID == player->GetGUID(); });
             if (userIter == users.end())
                 continue;
+            bool wasOwner = userIter == users.begin();
             users.erase(userIter);
             isFound = true;
+            if (room.IsPlayerRoom == true)
+            {
+                if (users.empty() == true)
+                    WaitingRoomsByNpcID.erase(roomIter); // Delete empty chatroom
+                else if (wasOwner == true)
+                    SetRoomPlace(room, users.front()); // Set and announce new owner
+            }
             break;
         }
     }
+    bool wasHeld = identity->ChatRoomID != 0;
+    identity->ChatRoomID = 0;
+    identity->SentWaitingRoomMessage.clear();
+    if (wasHeld == true)
+        PCUpdateMoveLock(player);
     if (isFound == false)
         return false;
-    GetIdentity(player)->SentWaitingRoomMessage.clear();
     if (isKicked == true && player->GetSession() != nullptr)
         ChatHandler(player->GetSession()).SendSysMessage(GetEnterRoomFailText(ROWOW_ENTERROOM_KICKED));
     return true;
+}
+
+void ROWOWMod::ChatChangeChatOwner(Player* player, std::string const& nextOwnerName)
+{
+    // chat_changechatowner: the owner hands the room to a user, the two swapping places in the list, and the room moves to the new owner
+    ROWOWIdentity* identity = GetIdentity(player);
+    std::lock_guard<std::mutex> lock(NpcStateMutex);
+    auto roomIter = WaitingRoomsByNpcID.find(identity->ChatRoomID);
+    if (roomIter == WaitingRoomsByNpcID.end() || roomIter->second.IsPlayerRoom == false || roomIter->second.Users.front().PlayerGUID != player->GetGUID())
+        return;
+    ROWOWWaitingRoom& room = roomIter->second;
+    for (size_t index = 1; index < room.Users.size(); index++)
+    {
+        if (room.Users[index].Name != nextOwnerName)
+            continue;
+        std::swap(room.Users[0], room.Users[index]);
+        SetRoomPlace(room, room.Users.front());
+        return;
+    }
+}
+
+void ROWOWMod::ChatChangeChatStatus(Player* player, std::string const& title, std::string const& password, int32 limit, bool isPublic)
+{
+    // chat_changechatstatus: the owner's new title, password, limit and public flag
+    ROWOWIdentity* identity = GetIdentity(player);
+    std::lock_guard<std::mutex> lock(NpcStateMutex);
+    auto roomIter = WaitingRoomsByNpcID.find(identity->ChatRoomID);
+    if (roomIter == WaitingRoomsByNpcID.end() || roomIter->second.IsPlayerRoom == false || roomIter->second.Users.front().PlayerGUID != player->GetGUID())
+        return;
+    ROWOWWaitingRoom& room = roomIter->second;
+    room.Title = title.substr(0, WAITING_ROOM_TITLE_LENGTH);
+    room.Password = password.substr(0, WAITING_ROOM_PASSWORD_LENGTH);
+    room.Limit = std::clamp(limit, 1, int32(ROWOW_MAX_WAITING_ROOM_USERS));
+    room.IsPublic = isPublic;
+}
+
+void ROWOWMod::ChatKickChat(Player* player, std::string const& kickUserName)
+{
+    // chat_kickchat: the owner puts a user out, for good.  From a chat command, in the world update with the maps idle, so the other player can
+    // be touched
+    ROWOWIdentity* identity = GetIdentity(player);
+    ObjectGuid kickedGUID;
+    {
+        std::lock_guard<std::mutex> lock(NpcStateMutex);
+        auto roomIter = WaitingRoomsByNpcID.find(identity->ChatRoomID);
+        if (roomIter == WaitingRoomsByNpcID.end() || roomIter->second.IsPlayerRoom == false || roomIter->second.Users.front().PlayerGUID != player->GetGUID())
+            return;
+        ROWOWWaitingRoom& room = roomIter->second;
+        for (size_t index = 1; index < room.Users.size(); index++)
+        {
+            if (room.Users[index].Name != kickUserName)
+                continue;
+            kickedGUID = room.Users[index].PlayerGUID;
+            room.KickList.insert(kickedGUID);
+            break;
+        }
+    }
+    if (kickedGUID.IsEmpty() == true)
+        return;
+    if (Player* kicked = ObjectAccessor::FindPlayer(kickedGUID))
+        ChatLeaveChat(kicked, true);
+}
+
+void ROWOWMod::ChatRoomSay(Player* player, std::string const& text)
+{
+    // clif_parse_GlobalMessage in a room: CHAT, to the room's users alone.  "M\t<name>\t<text>".  From a chat command, in the world update
+    ROWOWIdentity* identity = GetIdentity(player);
+    std::vector<ObjectGuid> userGUIDs;
+    {
+        std::lock_guard<std::mutex> lock(NpcStateMutex);
+        auto roomIter = WaitingRoomsByNpcID.find(identity->ChatRoomID);
+        if (roomIter == WaitingRoomsByNpcID.end())
+            return;
+        for (ROWOWWaitingRoomUser const& user : roomIter->second.Users)
+            userGUIDs.push_back(user.PlayerGUID);
+    }
+    std::string message = fmt::format("M\t{}\t{}", player->GetName(), GetWaitingRoomText(text));
+    for (ObjectGuid const& userGUID : userGUIDs)
+        if (Player* user = ObjectAccessor::FindPlayer(userGUID))
+            SendWaitingRoomMessage(user, message);
+}
+
+bool ROWOWMod::PCCanMoveAt(Player* player) const
+{
+    // unit_can_move's sd->state.vending and buyingstore, and the chat room's pc_cant_act
+    ROWOWIdentity const* identity = player->CustomData.Get<ROWOWIdentity>("ROWOWIdentity");
+    return identity == nullptr || (identity->ChatRoomID == 0 && identity->IsVending == false && identity->BuyingStore == nullptr);
+}
+
+void ROWOWMod::PCUpdateMoveLock(Player* player)
+{
+    // The WoW root is the statuses', which read PCCanMoveAt
+    UpdateStatusChangeOptions(player, *player->CustomData.GetDefault<ROWOWStatusChange>("ROWOWStatusChange"));
+}
+
+bool ROWOWMod::NpcIsNear(Player* player)
+{
+    // npc_isnear: a shown NPC within min_npc_vendchat_distance cells
+    if (BattleConfig.MinNpcVendChatDistance <= 0)
+        return false;
+    auto npcIDsIter = NpcIDsByMapID.find(player->GetMapId());
+    if (npcIDsIter == NpcIDsByMapID.end())
+        return false;
+    int32 x = 0, y = 0;
+    GetUnitCell(player, x, y);
+    std::lock_guard<std::mutex> lock(NpcStateMutex);
+    for (uint32 npcID : npcIDsIter->second)
+    {
+        ROWOWNpc const* npc = GetNpc(npcID);
+        if (npc != nullptr && npc->IsEnabled == true && npc->IsHidden == false && std::abs(npc->X - x) <= BattleConfig.MinNpcVendChatDistance &&
+            std::abs(npc->Y - y) <= BattleConfig.MinNpcVendChatDistance)
+            return true;
+    }
+    return false;
+}
+
+void ROWOWMod::SetShopSign(Player* player, std::string const& title, bool isBuyingStore)
+{
+    // clif_showvendingboard, clif_buyingstore_entry: each player's update tells its client of the signs in sight
+    ROWOWShopSign sign;
+    sign.MapID = player->GetMapId();
+    GetUnitCell(player, sign.X, sign.Y);
+    sign.PositionX = player->GetPositionX();
+    sign.PositionY = player->GetPositionY();
+    sign.PositionZ = player->GetPositionZ();
+    sign.Title = GetWaitingRoomText(title);
+    sign.IsBuyingStore = isBuyingStore;
+    std::lock_guard<std::mutex> lock(NpcStateMutex);
+    ShopSignsByPlayerGUID[player->GetGUID().GetCounter()] = sign;
+}
+
+void ROWOWMod::RemoveShopSign(Player* player)
+{
+    std::lock_guard<std::mutex> lock(NpcStateMutex);
+    ShopSignsByPlayerGUID.erase(player->GetGUID().GetCounter());
 }
 
 void ROWOWMod::ChatTriggerEvent(ROWOWNpc const* npc)
@@ -275,7 +513,7 @@ void ROWOWMod::WarpWaitingPlayer(ObjectGuid const& playerGUID, int64 zeny, std::
             return;
         player->ModifyMoney(-int32(zeny));
     }
-    GetIdentity(player)->SentWaitingRoomMessage.clear();
+    ChatLeaveChat(player, false); // Out of the room's list already: this ends what the room held it to
     WarpPlayerToCell(player, mapName, x, y);
 }
 
@@ -293,8 +531,8 @@ void ROWOWMod::WarpPendingWaitingPlayers()
 
 void ROWOWMod::UpdatePlayerWaitingRooms(Player* player, uint32 diff)
 {
-    // The player's update (its map's thread), every half second: walking off the cell it joined on leaves its room, and the rooms in sight
-    // on its map (AREA_SIZE, as clif_dispchat's area) go to its client when they changed
+    // The player's update (its map's thread), every half second: the rooms and shop signs in sight on its map (AREA_SIZE, as clif_dispchat's
+    // area) go to its client when they changed, and its room, unless a script put it out of it
     ROWOWIdentity* identity = GetIdentity(player);
     identity->WaitingRoomCheckTimer += diff;
     if (identity->WaitingRoomCheckTimer < WAITING_ROOM_CHECK_INTERVAL_IN_MS)
@@ -312,30 +550,47 @@ void ROWOWMod::UpdatePlayerWaitingRooms(Player* player, uint32 diff)
         std::string Line;
     };
     std::vector<ShownRoom> shownRooms;
+    std::vector<std::string> shopLines;
     std::string joinedLine;
-    bool isWalkedOut = false;
+    std::vector<std::string> memberLines;
+    bool isInRoom = false;
     {
         std::lock_guard<std::mutex> lock(NpcStateMutex);
         for (auto& roomByNpcID : WaitingRoomsByNpcID)
         {
             ROWOWWaitingRoom& room = roomByNpcID.second;
             ROWOWNpc const* npc = GetNpc(room.NpcID);
+            int32 userCount = int32(room.Users.size()) + (room.IsPlayerRoom == true ? 0 : 1); // Users counting the NPC, as clif_chat_usercount does
             for (ROWOWWaitingRoomUser const& user : room.Users)
             {
                 if (user.PlayerGUID != player->GetGUID())
                     continue;
-                if (user.MapID != mapID || user.X != x || user.Y != y)
-                    isWalkedOut = true;
-                else
+
+                // The joined room's window: "J<tab><id><tab><users><tab><limit><tab><title><tab><1 for its owner><tab><1 for public><tab><password>",
+                // then its people, the owner (an NPC or the first user) first and the users in the order they came
+                isInRoom = true;
+                bool isOwner = room.IsPlayerRoom == true && room.Users.front().PlayerGUID == player->GetGUID();
+                joinedLine = fmt::format("J\t{}\t{}\t{}\t{}\t{}\t{}\t{}", room.NpcID, userCount, room.Limit, GetWaitingRoomText(room.Title), isOwner == true ? 1 : 0,
+                    room.IsPublic == true ? 1 : 0, isOwner == true ? GetWaitingRoomText(room.Password) : std::string());
+                std::string members = npc != nullptr ? GetWaitingRoomText(npc->Name) : std::string();
+                for (ROWOWWaitingRoomUser const& member : room.Users)
                 {
-                    // The joined room's window: the NPC (its owner) first, then the users in the order they came
-                    joinedLine = fmt::format("J\t{}\t{}\t{}\t{}\t{}", room.NpcID, room.Users.size() + 1, room.Limit, GetWaitingRoomText(room.Title),
-                        npc != nullptr ? GetWaitingRoomText(npc->Name) : std::string());
-                    for (ROWOWWaitingRoomUser const& member : room.Users)
-                        joinedLine += "," + GetWaitingRoomText(member.Name);
+                    std::string memberName = GetWaitingRoomText(member.Name);
+                    if (members.empty() == false && members.size() + 1 + memberName.size() > WAITING_ROOM_MEMBERS_CHUNK_LENGTH)
+                    {
+                        memberLines.push_back("U\t" + members);
+                        members.clear();
+                    }
+                    members += (members.empty() == true ? "" : ",") + memberName;
                 }
+                memberLines.push_back("U\t" + members);
             }
-            if (npc == nullptr || npc->MapID != mapID || npc->IsEnabled == false || std::abs(npc->X - x) > BattleConfig.AreaSize ||
+            if (room.IsPlayerRoom == true)
+            {
+                if (room.MapID != mapID || std::abs(room.X - x) > BattleConfig.AreaSize || std::abs(room.Y - y) > BattleConfig.AreaSize)
+                    continue;
+            }
+            else if (npc == nullptr || npc->MapID != mapID || npc->IsEnabled == false || std::abs(npc->X - x) > BattleConfig.AreaSize ||
                 std::abs(npc->Y - y) > BattleConfig.AreaSize)
                 continue;
             ShownRoom shownRoom;
@@ -344,15 +599,23 @@ void ROWOWMod::UpdatePlayerWaitingRooms(Player* player, uint32 diff)
             shownRoom.Position.X = room.PositionX;
             shownRoom.Position.Y = room.PositionY;
             shownRoom.Position.Z = room.PositionZ;
-            shownRoom.Line = fmt::format("{}\t{}\t{}", room.Users.size() + 1, room.Limit, GetWaitingRoomText(room.Title));
+            shownRoom.Line = fmt::format("{}\t{}\t{}\t{}", userCount, room.Limit, GetWaitingRoomText(room.Title), room.IsPublic == true ? 1 : 0);
             shownRooms.push_back(shownRoom);
         }
+        for (auto const& signByPlayerGUID : ShopSignsByPlayerGUID)
+        {
+            ROWOWShopSign const& sign = signByPlayerGUID.second;
+            if (sign.MapID == mapID && std::abs(sign.X - x) <= BattleConfig.AreaSize && std::abs(sign.Y - y) <= BattleConfig.AreaSize)
+                shopLines.push_back(fmt::format("{}\t{}\t{:.2f}\t{:.2f}\t{:.2f}\t{}", sign.IsBuyingStore == true ? "Y" : "V", signByPlayerGUID.first, sign.PositionX,
+                    sign.PositionY, sign.PositionZ, sign.Title));
+        }
     }
-    if (isWalkedOut == true)
-    {
+
+    // A script put it out of its room (waitingroomkick, kickwaitingroomall, a warp waiting in the world update)
+    if (isInRoom == false && identity->ChatRoomID != 0)
         ChatLeaveChat(player, false);
-        joinedLine.clear();
-    }
+    else if (identity->ChatRoomID != 0 && PCCanMoveAt(player) == false && player->IsAlive() == true && player->HasUnitState(UNIT_STATE_ROOT) == false)
+        PCUpdateMoveLock(player); // Back from the dead in its room
 
     // The bubble stands over the NPC: its creature (shown or hidden) where it has one, else its cell's floor.  Found once, on this map's
     // thread
@@ -391,15 +654,20 @@ void ROWOWMod::UpdatePlayerWaitingRooms(Player* player, uint32 diff)
         }
         message += fmt::format("R\t{}\t{:.2f}\t{:.2f}\t{:.2f}\t{}\n", shownRoom.NpcID, shownRoom.Position.X, shownRoom.Position.Y, shownRoom.Position.Z, shownRoom.Line);
     }
+    for (std::string const& shopLine : shopLines)
+        message += shopLine + "\n";
     if (joinedLine.empty() == false)
         message += joinedLine + "\n";
+    for (std::string const& memberLine : memberLines)
+        message += memberLine + "\n";
     // (marked, so an empty list (no rooms any more) differs from the cleared "send again")
     if ("S" + message == identity->SentWaitingRoomMessage)
         return;
     identity->SentWaitingRoomMessage = "S" + message;
 
-    // "B", then a line per room in sight ("R<tab><id><tab><x><tab><y><tab><z><tab><users><tab><limit><tab><title>", users counting the NPC
-    // as clif_chat_usercount does), and the joined room ("J<tab><id><tab><users><tab><limit><tab><title><tab><NPC>,<member>,..."), then "E"
+    // "B", then a line per room in sight ("R<tab><id><tab><x><tab><y><tab><z><tab><users><tab><limit><tab><title><tab><1 for public>"), a line per
+    // shop ("V<tab><vendor GUID>..." or "Y<tab><buyer GUID>...<tab><x><tab><y><tab><z><tab><title>"), the joined room ("J..." and "U<tab><name>,..."
+    // lines), then "E"
     SendWaitingRoomMessage(player, "B");
     size_t start = 0;
     while (start < message.size())
@@ -590,7 +858,16 @@ public:
 class ROWOW_WaitingRoomPlayerScript : public PlayerScript
 {
 public:
-    ROWOW_WaitingRoomPlayerScript() : PlayerScript("ROWOW_WaitingRoomPlayerScript", { PLAYERHOOK_ON_MAP_CHANGED, PLAYERHOOK_ON_LOGOUT }) {}
+    ROWOW_WaitingRoomPlayerScript() : PlayerScript("ROWOW_WaitingRoomPlayerScript", { PLAYERHOOK_ON_MAP_CHANGED, PLAYERHOOK_ON_LOGOUT, PLAYERHOOK_CAN_PLAYER_USE_CHAT }) {}
+
+    bool OnPlayerCanUseChat(Player* player, uint32 type, uint32 language, std::string& msg) override
+    {
+        // clif_parse_GlobalMessage: in a room, what it says goes to the room alone
+        if (ROWOW->IsEnabled == false || type != CHAT_MSG_SAY || language == LANG_ADDON || ROWOW->IsInROForm(player) == false || ROWOW->GetIdentity(player)->ChatRoomID == 0)
+            return true;
+        ROWOW->ChatRoomSay(player, msg);
+        return false;
+    }
 
     void OnPlayerMapChanged(Player* player) override
     {

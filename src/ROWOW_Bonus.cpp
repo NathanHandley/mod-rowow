@@ -407,20 +407,20 @@ void ROWOWMod::LoadBonusData()
             return true;
         });
     }
-    for (char const* deferredCommandName : { "skill" })
+    for (char const* skillCommandName : { "skill", "addtoskill" })
     {
-        // The skills cards grant come with the skills, which read them from the deferred bonuses
-        std::string commandName = deferredCommandName;
-        ROWOWSCRIPT->RegisterCommand(deferredCommandName, [commandName](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+        // The skills equipment and cards grant (buildin_skill, pc_skill): ADDSKILL_TEMP by default, ADDSKILL_TEMP_ADDLEVEL for addtoskill.  An item
+        // script's copy of the command, compiled before the NPC scripts' (ROWOW_ScriptCommands.cpp).  In a status calculation it's a part of it,
+        // and StatusCalcPCItems clears them first
+        bool isAddToSkill = strcmp(skillCommandName, "addtoskill") == 0;
+        ROWOWSCRIPT->RegisterCommand(skillCommandName, [this, isAddToSkill](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
         {
-            if (context.BonusStatus == nullptr)
+            if (context.Identity == nullptr || arguments.empty() == true)
                 return ROWOWScriptValue::FromNumber(0);
-            ROWOWDeferredBonus deferredBonus;
-            deferredBonus.Type = commandName;
-            deferredBonus.LRFlag = context.BonusLRFlag;
-            for (ROWOWScriptValue const& argument : arguments)
-                deferredBonus.Values.push_back(argument.IsString == true ? GetSkillValue(argument.Text) : argument.Number);
-            context.BonusStatus->Bonus.Deferred.push_back(deferredBonus);
+            uint16 skillID = uint16(arguments[0].IsString == true ? GetSkillIDByName(arguments[0].Text) : arguments[0].GetNumber());
+            int64 flag = arguments.size() > 2 ? arguments[2].GetNumber() : (isAddToSkill == true ? ROWOW_ADDSKILL_TEMP_ADDLEVEL : ROWOW_ADDSKILL_TEMP);
+            if (flag == ROWOW_ADDSKILL_TEMP || flag == ROWOW_ADDSKILL_TEMP_ADDLEVEL)
+                PCAddTempSkill(*context.Identity, skillID, int32(arguments.size() > 1 ? arguments[1].GetNumber() : 1), flag == ROWOW_ADDSKILL_TEMP_ADDLEVEL);
             return ROWOWScriptValue::FromNumber(0);
         });
     }
@@ -564,6 +564,8 @@ void ROWOWMod::LoadBonusData()
         RefreshROForm(context.AttachedPlayer);
         SendItemCardsToClient(context.AttachedPlayer, *context.Identity, true);
         ChatHandler(context.AttachedPlayer->GetSession()).SendSysMessage(fmt::format("Upgrade success!! ({} is now +{})", item->GetTemplate()->Name1, refine)); // clif_refine success
+        if (int32(refine) == BattleConfig.BlacksmithFameRefineThreshold)
+            PCFameRefine(context.AttachedPlayer, item);
         return ROWOWScriptValue::FromNumber(int64(refine));
     });
     ROWOWSCRIPT->RegisterCommand("failedrefitem", [this, getEquipIndexItem](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
@@ -1087,6 +1089,7 @@ void ROWOWMod::StatusCalcPCItems(Player* player, ROWOWIdentity const& identity, 
 {
     // The item part of status_calc_pc_sub: each worn item's DEF, weapon ATK, refine and script (an item worn in two positions counts
     // once, as pc_is_same_equip_index skips it), then the ammo's, the combos', and the cards'.  Costumes only change the look
+    const_cast<ROWOWIdentity&>(identity).ItemSkillLevelsByID.clear(); // pc_calc_skilltree's skill_flag clean: the scripts below give them again
     ROWOWScriptContext context;
     context.AttachedPlayer = player;
     context.Identity = const_cast<ROWOWIdentity*>(&identity);
@@ -1189,8 +1192,7 @@ void ROWOWMod::StatusCalcPCItems(Player* player, ROWOWIdentity const& identity, 
             lrFlag = wornItem.RO->IsWeapon == true ? ROWOW_LR_FLAG_WEAPON : ROWOW_LR_FLAG_SHIELD;
         runScript(wornItem.RO->BonusScript.get(), wornItem.ItemObject, lrFlag, wornItem.Positions, 0);
 
-        // A forged weapon (CARD0_FORGE): its Star Crumbs' ATK, and its element unless its script gave it one.  (A famous smith's +10 needs
-        // the fame ranking, which isn't in)
+        // A forged weapon (CARD0_FORGE): its Star Crumbs' ATK, a famous smith's +10, and its element unless its script gave it one
         int32 starCrumbs = 0, forgeElement = ROWOW_ELEMENT_NEUTRAL;
         if (wornItem.RO->IsWeapon == true && GetItemForge(wornItem.ItemObject, starCrumbs, forgeElement) == true)
         {
@@ -1199,6 +1201,8 @@ void ROWOWMod::StatusCalcPCItems(Player* player, ROWOWIdentity const& identity, 
             wd.Star += starCrumbs * 5;
             if (wd.Star >= 15)
                 wd.Star = 40; // 3 Star Crumbs now give +40 dmg
+            if (PCFameRank(wornItem.ItemObject->GetGuidValue(ITEM_FIELD_CREATOR).GetCounter(), ROWOW_FAME_BLACKSMITH) != 0)
+                wd.Star += 10;
             uint8& weaponElement = isLeftHand == true ? status.LeftWeaponElement : status.WeaponElement;
             if (weaponElement == ROWOW_ELEMENT_NEUTRAL) // Do not overwrite element from previous bonuses.
                 weaponElement = uint8(forgeElement);

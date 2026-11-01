@@ -41,23 +41,17 @@ namespace
     // item_db's ammo SubTypes (e_ammo_type) the equipping rules check
     constexpr uint8 AMMO_TYPE_DAGGER = 2;
 
-    // The skills itemskill can use so far: the Fly and Butterfly Wings' Teleport, and the Magnifier's Item Appraisal.  The rest come with
-    // the skills (R6)
+    // The skills itemskill has a way of its own for: the Fly and Butterfly Wings' Teleport, and the Magnifier's Item Appraisal
     std::pair<char const*, uint16> const ItemSkills[] = { { "AL_TELEPORT", ROWOW_SKILL_AL_TELEPORT }, { "MC_IDENTIFY", ROWOW_SKILL_MC_IDENTIFY } };
 
     uint16 GetItemSkillID(ROWOWScriptValue const& skill)
     {
         if (skill.IsString == false)
-        {
-            for (auto const& itemSkill : ItemSkills)
-                if (int64(itemSkill.second) == skill.Number)
-                    return itemSkill.second;
-            return 0;
-        }
+            return uint16(skill.Number);
         for (auto const& itemSkill : ItemSkills)
             if (skill.Text == itemSkill.first)
                 return itemSkill.second;
-        return 0;
+        return ROWOW->GetSkillIDByName(skill.Text);
     }
 
     std::string ToUpper(std::string text)
@@ -469,6 +463,26 @@ void ROWOWMod::LoadItemScriptData()
             ClifSkillProduceMixList(context.AttachedPlayer, -1, GetArgumentNumber(arguments, 0, 0));
         return ROWOWScriptValue::FromNumber(0);
     });
+    ROWOWSCRIPT->RegisterCommand("cooking", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // cooking <kit level>: a cooking kit's list of dishes
+        if (context.AttachedPlayer != nullptr)
+            ClifCookingList(context.AttachedPlayer, GetArgumentNumber(arguments, 0, 0));
+        return ROWOWScriptValue::FromNumber(0);
+    });
+    ROWOWSCRIPT->RegisterCommand("buyingstore", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // buyingstore <slots>: a Bulk Buyer Shop License's store (not beside an NPC)
+        if (context.AttachedPlayer == nullptr)
+            return ROWOWScriptValue::FromNumber(0);
+        if (NpcIsNear(context.AttachedPlayer) == true)
+        {
+            ChatHandler(context.AttachedPlayer->GetSession()).SendNotification("You can't do that this close to an NPC.");
+            return ROWOWScriptValue::FromNumber(0);
+        }
+        BuyingStoreSetup(context.AttachedPlayer, uint8(GetArgumentNumber(arguments, 0, 0)));
+        return ROWOWScriptValue::FromNumber(0);
+    });
     ROWOWSCRIPT->RegisterCommand("getitem", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
     {
         if (context.AttachedPlayer != nullptr && arguments.empty() == false)
@@ -532,8 +546,18 @@ void ROWOWMod::LoadItemScriptData()
             if (context.Identity != nullptr && context.Identity->IsIdentifyMenuOpen == true)
                 consumeUsedItem();
         }
+        else if (GetSkill(skillID) != nullptr)
+        {
+            // Any other skill (a scroll, a box's blessing): sd->skillitem and clif_item_skill, cast as Abracadabra's pick is, aimed at the selection, with
+            // no skill to know and nothing paid but the item
+            ROWOWSkillUnitData* ud = GetSkillUnitData(context.AttachedPlayer);
+            ud->SkillItemID = skillID;
+            ud->SkillItemLevel = uint16(skillLevel);
+            if (SkillCastAbraSkill(context.AttachedPlayer, skillID, uint16(skillLevel)) == true)
+                consumeUsedItem();
+        }
         return ROWOWScriptValue::FromNumber(0);
-    }, [](std::vector<ROWOWScriptValue> const& arguments) { return arguments.empty() == false && GetItemSkillID(arguments[0]) != 0; });
+    }, [](std::vector<ROWOWScriptValue> const& arguments) { return arguments.empty() == false; }); // Skills load after the items' scripts compile
     ROWOWSCRIPT->RegisterCommand("warp", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
     {
         // warp "<map>",<x>,<y>: "SavePoint" and "Random" are the save point and a random spot on the map
@@ -998,6 +1022,14 @@ bool ROWOWMod::PCIsUseItem(Player* player, Item const* item, bool isReporting)
     if (IsItemUseBlockedByNpc(player) == true)
         return false;
 
+    // clif_parse_UseItem: pc_istrading or a chat room
+    if (PCCantAct(player) == true)
+    {
+        if (isReporting == true)
+            SendItemMessage(player, "You are busy.");
+        return false;
+    }
+
     // Statuses that keep the player from using items (Hiding, Stomach Ache...)
     if (ROWOWStatusChange const* sc = GetStatusChange(static_cast<Unit const*>(player)); sc != nullptr && sc->Cant.Consume == true)
         return false;
@@ -1093,6 +1125,11 @@ void ROWOWMod::WarpPlayerToCell(Player* player, std::string const& mapName, int3
     }
 }
 
+uint32 ROWOWMod::GetItemIDOfScriptValue(ROWOWScriptValue const& item) const
+{
+    return GetScriptItemID(item);
+}
+
 void ROWOWMod::PCUseItem(Player* player, ObjectGuid itemGUID)
 {
     // pc_useitem: after the use item spell (which can't use the item up itself, as the spell still holds it), so the item is found again
@@ -1113,18 +1150,22 @@ void ROWOWMod::PCUseItem(Player* player, ObjectGuid itemGUID)
     identity->CanUseItemTime = now + uint32(std::max(0, BattleConfig.ItemUseInterval));
     if (roItem->DelayDuration > 0)
         identity->ItemDelayEndTimes[roItem->ItemID] = now + roItem->DelayDuration;
+    ObjectGuid::LowType creatorGUID = item->GetGuidValue(ITEM_FIELD_CREATOR).GetCounter();
     if (roItem->IsDelayConsume == false)
     {
         uint32 count = 1;
         player->DestroyItemCount(item, count, true);
     }
 
+    // Famous player's potions have 50% more efficiency
+    identity->IsFamousPotion = creatorGUID != 0 && PCFameRank(creatorGUID, ROWOW_FAME_ALCHEMIST) != 0;
     ROWOWScriptContext context;
     context.AttachedPlayer = player;
     context.Identity = identity;
     context.UsedItemGUID = itemGUID;
     context.UsedItemTemplateID = itemTemplateID;
     ROWOWSCRIPT->Run(*roItem->UseScript, context);
+    identity->IsFamousPotion = false;
 }
 
 void ROWOWMod::PCItemHeal(Player* player, uint32 /*itemID*/, int32 hp, int32 sp)
@@ -1136,6 +1177,13 @@ void ROWOWMod::PCItemHeal(Player* player, uint32 /*itemID*/, int32 hp, int32 sp)
     if (hp != 0)
     {
         int32 bonus = 100 + identity->Status.Stats[ROWOW_STAT_VIT] * 2 + PCCheckSkill(player, ROWOW_SKILL_SM_RECOVERY) * 10 + PCCheckSkill(player, ROWOW_SKILL_AM_LEARNINGPOTION) * 5;
+        // A potion produced by an Alchemist in the Fame Top 10 gets +50% effect [DracoRPG]
+        if (identity->IsFamousPotion == true)
+        {
+            bonus += bonus * 50 / 100;
+            if (ROWOWStatusChangeEntry const* spirit = sc != nullptr ? sc->GetSCE(ROWOW_SC_SPIRIT) : nullptr; spirit != nullptr && spirit->Val2 == ROWOW_SKILL_SL_ROGUE)
+                bonus += bonus; // Receive an additional +100% effect from ranked potions to HP only
+        }
         // Recovery Potion
         if (ROWOWStatusChangeEntry const* sce = sc != nullptr ? sc->GetSCE(ROWOW_SC_INCHEALRATE) : nullptr)
             bonus += bonus * sce->Val1 / 100;
@@ -1146,6 +1194,9 @@ void ROWOWMod::PCItemHeal(Player* player, uint32 /*itemID*/, int32 hp, int32 sp)
     if (sp != 0)
     {
         int32 bonus = 100 + identity->Status.Stats[ROWOW_STAT_INT] * 2 + PCCheckSkill(player, ROWOW_SKILL_MG_SRECOVERY) * 10 + PCCheckSkill(player, ROWOW_SKILL_AM_LEARNINGPOTION) * 5;
+        // A potion produced by an Alchemist in the Fame Top 10 gets +50% effect [DracoRPG]
+        if (identity->IsFamousPotion == true)
+            bonus += bonus * 50 / 100;
         int32 boostedSP = sp * bonus / 100;
         if (bonus != 100 && boostedSP > sp)
             sp = boostedSP;

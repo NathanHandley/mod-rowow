@@ -1389,7 +1389,7 @@ int32 ROWOWMod::SkillUnitOnPlace(Map* map, ROWOWSkillUnitGroup& group, int32 ind
             // A player walking onto the portal goes through (rAthena also needs it to be the cell it walked to, which the server doesn't know
             // here), a monster only with mob_warp's 2
             int32 working = group.Val1 & 0xFFFF;
-            if (Player* sd = bl->ToPlayer(); sd != nullptr && working == 0)
+            if (Player* sd = bl->ToPlayer(); sd != nullptr && working == 0 && (GetIdentity(sd)->ChatRoomID == 0 || BattleConfig.ChatWarpPortal != 0))
             {
                 int32 x = group.Val2 >> 16;
                 int32 y = group.Val2 & 0xFFFF;
@@ -1694,8 +1694,8 @@ int32 ROWOWMod::SkillUnitOnPlaceTimer(Map* map, ROWOWSkillUnitGroup& group, int3
         case ROWOW_UNT_CLAYMORETRAP:
         {
             // A trap goes off: it hits what set it off, or (with a splash) everything around its cell, or around the one that set it off for
-            // Sandman and Freezing Trap (skill_trap_splash, each its attack), then stays a used trap for 1.5 s.  (Claymore Trap's blast also
-            // springs other traps in it: traps aren't attack targets here)
+            // Sandman and Freezing Trap (skill_trap_splash, each its attack), then stays a used trap for 1.5 s.  Claymore Trap's blast also
+            // springs other traps in it
             if (GetSCE(bl, ROWOW_SC__MANHOLE) != nullptr)
                 break;
             int32 centerX = unit.X, centerY = unit.Y;
@@ -1717,6 +1717,8 @@ int32 ROWOWMod::SkillUnitOnPlaceTimer(Map* map, ROWOWSkillUnitGroup& group, int3
                 {
                     return SkillTrapSplash(map, target, trapGroup, index, tick);
                 });
+                if (group.UnitID == ROWOW_UNT_CLAYMORETRAP)
+                    SkillClaymoreSpringTraps(map, group, centerX, centerY, splashRange);
             }
             if (group.UnitID != ROWOW_UNT_FIREPILLAR_ACTIVE && (BattleConfig.MultiTriggerTrap == 0 || unit.Range >= 0))
                 ClifChangeTrapLook(map, group, index, bl);
@@ -2400,6 +2402,22 @@ void ROWOWMod::UpdateSkillUnitMove(Unit* unit)
             lastY = stepY;
         }
     }
+    // ... and a Warp Portal's one cell walked over between two of those positions still takes a player through
+    if (unit->IsPlayer() == true && stepCount > 1 && stepCount <= ROWOW_ICEWALL_WALK_CHECK_CELLS)
+    {
+        Map* map = unit->GetMap();
+        for (int32 step = 1; step < stepCount && unit->ToPlayer()->IsBeingTeleported() == false; step++)
+        {
+            int32 stepX = ud->SkillUnitCellX + int32(std::lround(double(x - ud->SkillUnitCellX) * step / stepCount));
+            int32 stepY = ud->SkillUnitCellY + int32(std::lround(double(y - ud->SkillUnitCellY) * step / stepCount));
+            MapForEachSkillUnitInArea(map, stepX, stepY, stepX, stepY, [this, map, unit, tick](ROWOWSkillUnitGroup& group, int32 index)
+            {
+                if (group.UnitID == ROWOW_UNT_WARP_WAITING)
+                    SkillUnitOnPlace(map, group, index, unit, tick);
+                return 0;
+            });
+        }
+    }
     int32 dx = x - ud->SkillUnitCellX, dy = y - ud->SkillUnitCellY;
     SkillUnitMove(unit, tick, 2, ud->SkillUnitCellX, ud->SkillUnitCellY, skillUnitCell);
     ud->SkillUnitCellX = x;
@@ -2709,10 +2727,93 @@ namespace
     }
 }
 
+void ROWOWMod::SkillTrapsInSplash(Unit* src, uint16 skillID, uint16 skillLevel, int32 centerX, int32 centerY, int32 range)
+{
+    // battle_check_target's BL_SKILL for a skill that reaches traps (INF2_TARGETTRAP) with a splash, and skill_additional_effect's skill_blown of
+    // one: each live trap in the splash is pushed by the skill's knockback, a Blast Mine 3 cells whatever the skill, Arrow Shower from its center
+    // (arrow_shower_knockback) and the others from the caster.  A trap isn't a target a WoW client can pick and has no status, so only that
+    // part of a hit is in: a trap's HP (skill_unit_ondamaged) isn't taken.  The map's thread
+    ROWOWSkill const* skill = GetSkill(skillID);
+    Map* map = src->GetMap();
+    ROWOWMapSkillUnits* mapUnits = GetMapSkillUnits(map, false);
+    if (skill == nullptr || skill->Inf2[ROWOW_INF2_TARGETTRAP] == false || mapUnits == nullptr)
+        return;
+    ROWOWMapGrid const* mapGrid = GetMapGrid(map->GetId());
+    int32 fromX = 0, fromY = 0;
+    GetUnitCell(src, fromX, fromY);
+    if (skillID == ROWOW_SKILL_AC_SHOWER && BattleConfig.ArrowShowerKnockback != 0)
+    {
+        fromX = centerX;
+        fromY = centerY;
+    }
+    std::vector<std::shared_ptr<ROWOWSkillUnitGroup>> trapGroups; // Moving one changes the map's lists
+    for (auto const& groupByID : mapUnits->GroupsByID)
+    {
+        ROWOWSkill const* groupSkill = GetSkill(groupByID.second->SkillID);
+        if (groupSkill == nullptr || groupSkill->Inf2[ROWOW_INF2_ISTRAP] == false || groupByID.second->UnitID == ROWOW_UNT_USED_TRAPS || groupByID.second->Units.empty() == true)
+            continue;
+        ROWOWSkillUnit const& unit = groupByID.second->Units.front();
+        if (unit.IsAlive == true && std::abs(unit.X - centerX) <= range && std::abs(unit.Y - centerY) <= range)
+            trapGroups.push_back(groupByID.second);
+    }
+    for (std::shared_ptr<ROWOWSkillUnitGroup> const& group : trapGroups)
+    {
+        ROWOWSkillUnit const& unit = group->Units.front();
+        int32 count = group->SkillID == ROWOW_SKILL_HT_BLASTMINE ? 3 : ROWOWSkill::GetLevelValue(skill->Knockback, skillLevel);
+        int32 stepX = unit.X > fromX ? 1 : (unit.X < fromX ? -1 : 0);
+        int32 stepY = unit.Y > fromY ? 1 : (unit.Y < fromY ? -1 : 0);
+        if (stepX == 0 && stepY == 0)
+            stepX = 1;
+        int32 x = unit.X, y = unit.Y;
+        for (int32 step = 0; step < count; step++)
+        {
+            // path_blownpos: a wall stops it
+            if (mapGrid == nullptr || mapGrid->HasCells() == false || mapGrid->GetCell(x + stepX, y + stepY) == ROWOW_CELL_WALL)
+                break;
+            x += stepX;
+            y += stepY;
+        }
+        if (x != unit.X || y != unit.Y)
+            SkillUnitMoveUnitGroup(map, group, x - unit.X, y - unit.Y);
+    }
+}
+
+void ROWOWMod::SkillClaymoreSpringTraps(Map* map, ROWOWSkillUnitGroup& group, int32 centerX, int32 centerY, int32 range)
+{
+    // skill_trap_splash's UNT_CLAYMORETRAP: the traps in its blast go off with no effect of their own, each now a used trap
+    ROWOWMapSkillUnits* mapUnits = GetMapSkillUnits(map, false);
+    if (mapUnits == nullptr)
+        return;
+    uint64 tick = GetTick();
+    for (auto const& groupByID : mapUnits->GroupsByID)
+    {
+        ROWOWSkillUnitGroup& other = *groupByID.second;
+        if (&other == &group || other.Units.empty() == true || other.Units.front().IsAlive == false || std::abs(other.Units.front().X - centerX) > range ||
+            std::abs(other.Units.front().Y - centerY) > range)
+            continue;
+        switch (other.UnitID)
+        {
+            case ROWOW_UNT_CLAYMORETRAP:
+            case ROWOW_UNT_LANDMINE:
+            case ROWOW_UNT_BLASTMINE:
+            case ROWOW_UNT_SHOCKWAVE:
+            case ROWOW_UNT_SANDMAN:
+            case ROWOW_UNT_FLASHER:
+            case ROWOW_UNT_FREEZINGTRAP:
+                ClifChangeTrapLook(map, other, 0, nullptr);
+                other.Limit = int64(tick - other.Tick) + ROWOW_TRAP_USED_LIMIT;
+                other.UnitID = ROWOW_UNT_USED_TRAPS;
+                break;
+            default:
+                break;
+        }
+    }
+}
+
 int32 ROWOWMod::SkillTrapSplash(Map* map, Unit* bl, ROWOWSkillUnitGroup& group, int32 index, uint64 tick)
 {
     // skill_trap_splash: what a trap that went off does to each char in its splash: Sandman's sleep, the others' attack (split among those
-    // around for a split skill), from the trap's cell.  (Claymore Trap springing the other traps in its blast needs traps as targets)
+    // around for a split skill), from the trap's cell
     ROWOWSkillUnit const& unit = group.Units[index];
     if (unit.IsAlive == false || bl->IsInWorld() == false)
         return 0;

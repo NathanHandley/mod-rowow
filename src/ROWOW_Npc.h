@@ -145,12 +145,13 @@ struct ROWOWNpcMapWarp
     int32 DestY = 0;
     int32 DestX2 = -1;
     int32 DestY2 = -1;
+    ObjectGuid GroupGUID; // warpparty: only its members
 };
 
 // MAX_CHAT_USERS: the most a waiting room holds
 #define ROWOW_MAX_WAITING_ROOM_USERS 20
 
-// A player in a waiting room (chat_data's usersd), and the cell it joined on (walking off it leaves the room)
+// A player in a room (chat_data's usersd), and where it stands (a player's room moves to its new owner when the old one leaves)
 struct ROWOWWaitingRoomUser
 {
     ObjectGuid PlayerGUID;
@@ -159,13 +160,27 @@ struct ROWOWWaitingRoomUser
     uint32 MapID = 0;
     int32 X = 0;
     int32 Y = 0;
+    float PositionX = 0.0f;
+    float PositionY = 0.0f;
+    float PositionZ = 0.0f;
 };
 
-// An NPC's waiting room (rAthena's chat_data owned by an NPC, chat.cpp): players join it, and its event runs once enough have (the job
-// tests' queues).  Under ROWOWMod's NpcStateMutex
+// The rooms of players take their ids from here, past every NPC's
+#define ROWOW_PLAYER_ROOM_ID_START 0x40000000
+
+// A room (rAthena's chat_data, chat.cpp).  An NPC's: players join it, and its event runs once enough have (the job tests' queues).  A
+// player's (chat_createpcchat): Users[0] owns it, with a password when it isn't public, and it goes when the last one leaves.  Under
+// ROWOWMod's NpcStateMutex
 struct ROWOWWaitingRoom
 {
-    uint32 NpcID = 0;
+    uint32 NpcID = 0; // Its NPC, and its id; a player's room has an id of its own from ROWOW_PLAYER_ROOM_ID_START
+    bool IsPlayerRoom = false;
+    std::string Password; // pass, when IsPublic is off
+    bool IsPublic = true; // pub
+    std::set<ObjectGuid> KickList; // kick_list: who can't come back into a player's room
+    uint32 MapID = 0; // A player's room's place (an NPC's is its NPC's)
+    int32 X = 0;
+    int32 Y = 0;
     std::string Title;
     int32 Limit = 0; // The NPC counts as one, so Limit - 1 players fit
     int32 Trigger = 0; // The users that set off the event, with 0x80 while the event is disabled
@@ -178,6 +193,20 @@ struct ROWOWWaitingRoom
     float PositionX = 0.0f;
     float PositionY = 0.0f;
     float PositionZ = 0.0f;
+};
+
+// The sign over an open shop (clif_showvendingboard) or buying store (clif_buyingstore_entry), which the players in sight are told of with the
+// rooms.  Under ROWOWMod's NpcStateMutex
+struct ROWOWShopSign
+{
+    uint32 MapID = 0;
+    int32 X = 0;
+    int32 Y = 0;
+    float PositionX = 0.0f;
+    float PositionY = 0.0f;
+    float PositionZ = 0.0f;
+    std::string Title;
+    bool IsBuyingStore = false;
 };
 
 // A warpwaitingpc warp for the world update (one run in a map's thread)

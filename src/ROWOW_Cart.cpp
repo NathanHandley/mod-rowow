@@ -136,7 +136,7 @@ int32 ROWOWMod::PCCartAddItem(Player* player, ROWOWIdentity& identity, ROWOWCart
     if (IsStackable(*roItem) == true)
     {
         for (i = 0; i < ROWOW_MAX_CART; i++)
-            if (identity.CartItems[i].ItemTemplateID == item.ItemTemplateID && identity.CartItems[i].Enchantments == item.Enchantments)
+            if (identity.CartItems[i].ItemTemplateID == item.ItemTemplateID && identity.CartItems[i].Enchantments == item.Enchantments && identity.CartItems[i].CreatorGUID == item.CreatorGUID)
                 break;
     }
     if (i < ROWOW_MAX_CART)
@@ -196,6 +196,7 @@ void ROWOWMod::PCPutItemToCart(Player* player, Item* item, int32 amount)
     cartItem.ItemTemplateID = item->GetEntry();
     for (uint8 slot = 0; slot < MAX_ENCHANTMENT_SLOT; slot++)
         cartItem.Enchantments[slot] = item->GetEnchantmentId(EnchantmentSlot(slot));
+    cartItem.CreatorGUID = item->GetGuidValue(ITEM_FIELD_CREATOR).GetCounter();
     int32 flag = PCCartAddItem(player, *identity, cartItem, amount);
     if (flag == ADDITEM_SUCCESS)
     {
@@ -218,20 +219,13 @@ bool ROWOWMod::PCGetItemFromCart(Player* player, int32 slot, int32 amount)
     ROWOWCartItem cartItem = identity->CartItems[slot];
     if (cartItem.ItemTemplateID == 0 || amount < 1 || int32(cartItem.Count) < amount || identity->IsVending == true)
         return false;
-    ItemPosCountVec destination;
-    if (player->CanStoreNewItem(NULL_BAG, NULL_SLOT, destination, cartItem.ItemTemplateID, uint32(amount)) != EQUIP_ERR_OK)
+    if (CanStoreROItem(player, cartItem.ItemTemplateID, uint32(amount), cartItem.CreatorGUID) == false)
     {
         ChatHandler(player->GetSession()).SendNotification("Your bags are full.");
         return true;
     }
-    Item* item = player->StoreNewItem(destination, cartItem.ItemTemplateID, true);
-    if (item == nullptr)
+    if (StoreROItem(player, cartItem.ItemTemplateID, uint32(amount), &cartItem.Enchantments, cartItem.CreatorGUID) == nullptr)
         return true;
-    for (uint8 enchantmentSlot = 0; enchantmentSlot < MAX_ENCHANTMENT_SLOT; enchantmentSlot++)
-        if (cartItem.Enchantments[enchantmentSlot] != 0)
-            item->SetEnchantment(EnchantmentSlot(enchantmentSlot), cartItem.Enchantments[enchantmentSlot], 0, 0);
-    item->SetState(ITEM_CHANGED, player);
-    player->SendNewItem(item, uint32(amount), true, false);
     PCCartDelItem(player, *identity, slot, amount);
     SendCartToClient(player, *identity, false);
     return true;
@@ -280,7 +274,7 @@ void ROWOWMod::SendCartToClient(Player* player, ROWOWIdentity& identity, bool is
 
 void ROWOWMod::LoadIdentityCart(Player* player, ROWOWIdentity& identity) const
 {
-    if (QueryResult cartResult = CharacterDatabase.Query("SELECT `slot`, `item_template`, `count`, `enchantments` FROM `mod_rowow_identity_cart` WHERE `guid` = {}",
+    if (QueryResult cartResult = CharacterDatabase.Query("SELECT `slot`, `item_template`, `count`, `enchantments`, `creator` FROM `mod_rowow_identity_cart` WHERE `guid` = {}",
         player->GetGUID().GetCounter()))
     {
         do
@@ -296,6 +290,7 @@ void ROWOWMod::LoadIdentityCart(Player* player, ROWOWIdentity& identity) const
             std::vector<std::string_view> enchantmentTokens = Acore::Tokenize(enchantmentIDs, ' ', false);
             for (size_t enchantmentSlot = 0; enchantmentSlot < enchantmentTokens.size() && enchantmentSlot < MAX_ENCHANTMENT_SLOT; enchantmentSlot++)
                 cartItem.Enchantments[enchantmentSlot] = uint32(strtoul(std::string(enchantmentTokens[enchantmentSlot]).c_str(), nullptr, 10));
+            cartItem.CreatorGUID = fields[4].Get<uint32>();
         } while (cartResult->NextRow());
     }
     StatusCalcCartWeight(player, identity);
@@ -315,8 +310,8 @@ void ROWOWMod::SaveIdentityCart(Player* player, ROWOWIdentity& identity, Charact
         std::string enchantmentIDs;
         for (uint32 enchantmentID : cartItem.Enchantments)
             enchantmentIDs += fmt::format("{}{}", enchantmentIDs.empty() == true ? "" : " ", enchantmentID);
-        trans->Append("INSERT INTO `mod_rowow_identity_cart` (`guid`, `slot`, `item_template`, `count`, `enchantments`) VALUES ({}, {}, {}, {}, '{}')", guid, slot,
-            cartItem.ItemTemplateID, cartItem.Count, enchantmentIDs);
+        trans->Append("INSERT INTO `mod_rowow_identity_cart` (`guid`, `slot`, `item_template`, `count`, `enchantments`, `creator`) VALUES ({}, {}, {}, {}, '{}', {})", guid, slot,
+            cartItem.ItemTemplateID, cartItem.Count, enchantmentIDs, cartItem.CreatorGUID);
     }
     identity.AreCartItemsChanged = false;
 }

@@ -667,11 +667,55 @@ bool ROWOWMod::PCAddItem(Player* player, uint32 itemTemplateID, uint32 amount, b
     return true;
 }
 
+bool ROWOWMod::CanStoreROItem(Player* player, uint32 itemTemplateID, uint32 amount, ObjectGuid::LowType creatorGUID) const
+{
+    // Room in the bags, among the stacks of its maker
+    if (creatorGUID == 0)
+    {
+        ItemPosCountVec destination;
+        return player->CanStoreNewItem(NULL_BAG, NULL_SLOT, destination, itemTemplateID, amount) == EQUIP_ERR_OK;
+    }
+    Item* item = Item::CreateItem(itemTemplateID, amount, player);
+    if (item == nullptr)
+        return false;
+    item->SetGuidValue(ITEM_FIELD_CREATOR, ObjectGuid::Create<HighGuid::Player>(creatorGUID));
+    ItemPosCountVec destination;
+    bool canStore = player->CanStoreItem(NULL_BAG, NULL_SLOT, destination, item, false) == EQUIP_ERR_OK;
+    delete item;
+    return canStore;
+}
+
+Item* ROWOWMod::StoreROItem(Player* player, uint32 itemTemplateID, uint32 amount, std::array<uint32, ROWOW_ITEM_ENCHANTMENT_SLOT_COUNT> const* enchantments, ObjectGuid::LowType creatorGUID)
+{
+    // An item into the bags with what makes it that item (a cart's or a shop's, a made one): its enchantments and its maker, whose stacks are
+    // its own (CanBeMergedPartlyWith).  Null when there's no room
+    Item* item = Item::CreateItem(itemTemplateID, amount, player);
+    if (item == nullptr)
+        return nullptr;
+    if (creatorGUID != 0)
+        item->SetGuidValue(ITEM_FIELD_CREATOR, ObjectGuid::Create<HighGuid::Player>(creatorGUID));
+    ItemPosCountVec destination;
+    if (player->CanStoreItem(NULL_BAG, NULL_SLOT, destination, item, false) != EQUIP_ERR_OK)
+    {
+        delete item;
+        return nullptr;
+    }
+    item = player->StoreItem(destination, item, true);
+    if (item == nullptr)
+        return nullptr;
+    if (enchantments != nullptr)
+        for (uint8 enchantmentSlot = 0; enchantmentSlot < MAX_ENCHANTMENT_SLOT; enchantmentSlot++)
+            if ((*enchantments)[enchantmentSlot] != 0)
+                item->SetEnchantment(EnchantmentSlot(enchantmentSlot), (*enchantments)[enchantmentSlot], 0, 0);
+    item->SetState(ITEM_CHANGED, player);
+    player->SendNewItem(item, amount, true, false);
+    return item;
+}
+
 bool ROWOWMod::PCCantAct(Player* sd) const
 {
-    // pc_cant_act: a shop open or a trade going.  An NPC's window doesn't hold a Warcraft character back, nor its waiting room, which only sits it down
-    ROWOWIdentity const* identity = sd->CustomData.Get<ROWOWIdentity>("ROWOWIdentity");
-    return (identity != nullptr && identity->IsVending == true) || sd->GetTradeData() != nullptr;
+    // pc_cant_act: a shop open, a room, or a trade going.  (An NPC's window doesn't hold a Warcraft character back)
+    return PCCanMoveAt(sd) == false || sd->GetTradeData() != nullptr;
 }
 
 bool ROWOWMod::PCTakeItem(Player* sd, ObjectGuid const& guid, bool isGreed)

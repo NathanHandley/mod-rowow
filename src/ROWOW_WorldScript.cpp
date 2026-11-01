@@ -53,6 +53,7 @@ public:
         ROWOW->LoadItemScriptData();
         ROWOW->LoadBonusData();
         ROWOW->LoadProduceData(); // After the items, which its recipes make and use
+        ROWOW->LoadFameLists();
         ROWOW->LoadPetData(); // After the items and the bonus engine, which its rows and scripts use
         ROWOW->LoadPartyData();
         ROWOW->LoadSkillData(); // After the items, whose names the skills' item costs use

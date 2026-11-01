@@ -33,8 +33,10 @@ using namespace std;
 
 // Vending: a Merchant sits down with a shop of its cart's items (vending_openvending), which the players around list (vending_vendinglistreq,
 // the RO_Identity addon's shop window on targeting the vendor) and buy from (vending_purchasereq); standing up or moving closes it
-// (vending_closevending).  The vendor and the buyer are on one map, so it all runs in that map's thread.  (Autotrade, the vending search and
-// the shops' database rows are left out)
+// (vending_closevending), and a vendor can't move.  The shop's sign is the rooms' (SetShopSign): each player in sight is told of it from its
+// own update, and a click on it lists the shop.  The vendor and the buyer are on one map, and what they do comes as chat commands, which run
+// in the world update with the maps idle, so no lock is needed here.  (Autotrade, the vending search and the shops' database rows are left
+// out)
 
 namespace
 {
@@ -55,17 +57,6 @@ namespace
             zeny -= zeny * (ROWOW->BattleConfig.VendingTax / 10000.);
         return zeny;
     }
-
-    // clif_showvendingboard / clif_closevendingboard: the players around are told of the shop's sign (an empty title when it closes)
-    void SendVendingBoard(Player* vendor, std::string const& title)
-    {
-        std::list<Player*> players;
-        Acore::AnyPlayerInObjectRangeCheck check(vendor, vendor->GetVisibilityRange(), false);
-        Acore::PlayerListSearcher<Acore::AnyPlayerInObjectRangeCheck> searcher(vendor, players, check);
-        Cell::VisitObjects(vendor, searcher, vendor->GetVisibilityRange());
-        for (Player* player : players)
-            SendAddonMessage(player, fmt::format("ROWOWVENDBOARD\t{}\t{}", vendor->GetGUID().GetCounter(), title));
-    }
 }
 
 void ROWOWMod::VendingOpenVendingReq(Player* player, uint8 skillLevel)
@@ -83,7 +74,7 @@ bool ROWOWMod::VendingOpenVending(Player* player, std::string const& title, std:
     // vending_openvending: a shop of the cart items chosen, at a price each (at most vending_max_value).  It fails without the skill or the
     // cart, or with an item that can't be sold (unidentified, broken, untradeable)
     ROWOWIdentity* identity = GetIdentity(player);
-    if (player->IsAlive() == false || identity->MenuSkillID != ROWOW_SKILL_MC_VENDING || identity->IsVending == true)
+    if (player->IsAlive() == false || identity->MenuSkillID != ROWOW_SKILL_MC_VENDING || identity->IsVending == true || PCCantAct(player) == true)
         return false; // can't open vendings lying dead || didn't use via the skill (wpe/hack) || can't have 2 shops at once
     identity->MenuSkillID = 0;
     int32 vendingSkillLevel = PCCheckSkill(player, ROWOW_SKILL_MC_VENDING);
@@ -140,7 +131,10 @@ bool ROWOWMod::VendingOpenVending(Player* player, std::string const& title, std:
     // A vendor sits by its shop (the client's vending state)
     player->SetStandState(UNIT_STAND_STATE_SIT);
     SendAddonMessage(player, "ROWOWVENDOPEN\t" + identity->VendingTitle);
-    SendVendingBoard(player, identity->VendingTitle);
+    player->StopMoving();
+    player->AttackStop();
+    SetShopSign(player, identity->VendingTitle, false);
+    PCUpdateMoveLock(player);
     return true;
 }
 
@@ -153,7 +147,8 @@ void ROWOWMod::VendingCloseVending(Player* player)
     identity->IsVending = false;
     identity->VendingItems.clear();
     SendAddonMessage(player, "ROWOWVENDOPEN\t");
-    SendVendingBoard(player, "");
+    RemoveShopSign(player);
+    PCUpdateMoveLock(player);
 }
 
 void ROWOWMod::VendingVendingListReq(Player* player, Player* vendor)
@@ -164,6 +159,12 @@ void ROWOWMod::VendingVendingListReq(Player* player, Player* vendor)
     if (vendorIdentity == nullptr || vendorIdentity->IsVending == false || vendor == player || vendor->GetMap() != player->GetMap())
     {
         SendAddonMessage(player, fmt::format("ROWOWVENDLIST\tB\t{}\t", vendor != nullptr ? vendor->GetGUID().GetCounter() : 0));
+        SendAddonMessage(player, "ROWOWVENDLIST\tE");
+        return;
+    }
+    if (DistanceBL(player, vendor) > BattleConfig.AreaSize)
+    {
+        SendAddonMessage(player, fmt::format("ROWOWVENDLIST\tB\t{}\t", vendor->GetGUID().GetCounter()));
         SendAddonMessage(player, "ROWOWVENDLIST\tE");
         return;
     }
@@ -227,8 +228,7 @@ void ROWOWMod::VendingPurchaseReq(Player* player, Player* vendor, std::vector<st
             return;
         }
         vendingItem.Amount -= amount;
-        ItemPosCountVec destination;
-        if (player->CanStoreNewItem(NULL_BAG, NULL_SLOT, destination, cartItem.ItemTemplateID, amount) != EQUIP_ERR_OK)
+        if (CanStoreROItem(player, cartItem.ItemTemplateID, amount, cartItem.CreatorGUID) == false)
         {
             ChatHandler(player->GetSession()).SendNotification("Your bags are full."); // Buyer has no space in his inventory
             return;
@@ -243,24 +243,13 @@ void ROWOWMod::VendingPurchaseReq(Player* player, Player* vendor, std::vector<st
         uint32 amount = purchase.second;
         ROWOWVendingItem& vendingItem = vendorIdentity->VendingItems[purchase.first];
         ROWOWCartItem cartItem = vendorIdentity->CartItems[vendingItem.CartSlot];
-        ItemPosCountVec destination;
-        if (player->CanStoreNewItem(NULL_BAG, NULL_SLOT, destination, cartItem.ItemTemplateID, amount) == EQUIP_ERR_OK)
-        {
-            if (Item* item = player->StoreNewItem(destination, cartItem.ItemTemplateID, true))
-            {
-                for (uint8 enchantmentSlot = 0; enchantmentSlot < MAX_ENCHANTMENT_SLOT; enchantmentSlot++)
-                    if (cartItem.Enchantments[enchantmentSlot] != 0)
-                        item->SetEnchantment(EnchantmentSlot(enchantmentSlot), cartItem.Enchantments[enchantmentSlot], 0, 0);
-                item->SetState(ITEM_CHANGED, player);
-                player->SendNewItem(item, amount, true, false);
-            }
-        }
+        StoreROItem(player, cartItem.ItemTemplateID, amount, &cartItem.Enchantments, cartItem.CreatorGUID);
         vendingItem.Amount -= amount;
         double itemZeny = VendingCalcTax(double(vendingItem.Value) * double(amount));
         PCCartDelItem(vendor, *vendorIdentity, vendingItem.CartSlot, int32(amount));
         // clif_vendingreport
         ItemTemplate const* itemTemplate = sObjectMgr->GetItemTemplate(cartItem.ItemTemplateID);
-        ChatHandler(vendor->GetSession()).PSendSysMessage("{} sold {} x {} for {} zeny.", player->GetName(), itemTemplate != nullptr ? itemTemplate->Name1 : "an item",
+        ChatHandler(vendor->GetSession()).PSendSysMessage("{} bought {} x {} for {} zeny.", player->GetName(), itemTemplate != nullptr ? itemTemplate->Name1 : "an item",
             amount, int64(itemZeny));
     }
 

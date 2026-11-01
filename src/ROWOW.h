@@ -565,6 +565,7 @@ struct ROWOWItem
     int32 Weight = 0; // In tenths
     int32 Buy = 0; // The NPC shops' price (zeny)
     bool IsNoTrade = false; // item_db's Trade restrictions the cart and the shops read (itemdb_cantrade, itemdb_cancartstore)
+    bool IsBuyingStore = false; // flag.buyingstore: a buying store may ask for it
     bool IsNoCart = false;
     std::vector<std::string> HatEffectNames; // The hat effects (HAT_EF_*, in upper case) it shows while worn (only the post-renewal looks have them)
 };
@@ -817,6 +818,21 @@ struct ROWOWBattleConfig
     int32 VendingOverMax = 1; // A sale may take the vendor past the zeny cap (what's over is lost)
     int32 VendingTax = 500; // In hundredths of a percent, on sales of vending_tax_min and up
     int32 VendingTaxMin = 100000000;
+    int32 MinNpcVendChatDistance = 3; // No shop or room closer to an NPC
+    int32 ChatWarpPortal = 0; // Warp Portals take a player out of a room
+    int32 SGAngelSkillRatio = 10; // The chance in 10000 of /doridori's Angel of the Sun, Moon and Star
+    int32 TaekwonRankerMinLv = 90;
+    int32 FameTaekwonMission = 1;
+    int32 FameRefineLv1 = 1;
+    int32 FameRefineLv2 = 25;
+    int32 FameRefineLv3 = 1000;
+    int32 FameForge = 10;
+    int32 BlacksmithFameRefineThreshold = 10;
+    int32 FamePharmacy3 = 1;
+    int32 FamePharmacy5 = 3;
+    int32 FamePharmacy7 = 10;
+    int32 FamePharmacy10 = 50;
+    int32 ProduceItemNameInput = 0x03; // Whose products carry the maker's name: 0x1 forged, 0x2 brewed, 0x8 Holy Water, 0x10 poison bottles, 0x80 others
     int32 SkillStealMaxTries = 0; // How often a monster can be tried (0: until stolen from)
     int32 AutospellCheckRange = 0; // Autospells check their range to the target
     int32 AutospellStacking = 0; // Several autospells of one skill can go off on the same hit
@@ -1394,6 +1410,7 @@ struct ROWOWCartItem
     uint32 ItemTemplateID = 0; // 0 for an empty slot
     uint32 Count = 0;
     std::array<uint32, ROWOW_ITEM_ENCHANTMENT_SLOT_COUNT> Enchantments = { };
+    ObjectGuid::LowType CreatorGUID = 0; // Who made it (card[2] and card[3]: the item's ITEM_FIELD_CREATOR)
 };
 
 // A shop a Merchant opened from its cart (rAthena's s_vending): the cart slot, how many and the price of each item for sale
@@ -1403,6 +1420,47 @@ struct ROWOWVendingItem
     uint16 CartSlot = 0;
     uint32 Amount = 0;
     uint32 Value = 0; // Zeny each
+};
+
+// e_addskill_type, skill's flag
+#define ROWOW_ADDSKILL_PERMANENT                    0
+#define ROWOW_ADDSKILL_TEMP                         1
+#define ROWOW_ADDSKILL_TEMP_ADDLEVEL                2
+#define ROWOW_ADDSKILL_PERMANENT_GRANTED            3
+constexpr char const* GrantedSkillVariableFormat = "granted_skill_{}"; // SKILL_FLAG_PERM_GRANTED: the skill keeps off the job's tree (a character variable)
+
+// The fame rankings (rAthena's e_rank), and one ranked character (s_fame_list)
+#define ROWOW_FAME_BLACKSMITH                       0
+#define ROWOW_FAME_ALCHEMIST                        1
+#define ROWOW_FAME_TAEKWON                          2
+#define ROWOW_FAME_COUNT                            3
+#define ROWOW_MAPID_UPPERMASK                       0x0FFF  // MAPID_UPPERMASK
+#define ROWOW_MAPID_TAEKWON                         0x7     // MAPID_TAEKWON
+#define ROWOW_MAPID_STAR_GLADIATOR                  0x107   // MAPID_STAR_GLADIATOR
+#define ROWOW_MAPID_SOUL_LINKER                     0x207   // MAPID_SOUL_LINKER
+#define ROWOW_MAPID_SUPER_NOVICE                    0x0100  // MAPID_SUPER_NOVICE
+#define ROWOW_MAX_FAME_LIST                         10      // MAX_FAME_LIST
+struct ROWOWFameEntry
+{
+    ObjectGuid::LowType CharacterGUID = 0;
+    int32 Fame = 0;
+    std::string Name;
+};
+
+// A buying store (rAthena's s_buyingstore, buyingstore.cpp): what it buys, and the zeny it may still spend
+#define ROWOW_MAX_BUYINGSTORE_SLOTS                 5       // MAX_BUYINGSTORE_SLOTS
+struct ROWOWBuyingStoreItem
+{
+    uint32 ItemTemplateID = 0;
+    uint32 Amount = 0;
+    uint32 Price = 0;
+};
+struct ROWOWBuyingStore
+{
+    uint32 BuyerID = 0; // buyer_id: one store's id, so a sale can't reach the next store
+    int64 ZenyLimit = 0;
+    std::string Title;
+    std::vector<ROWOWBuyingStoreItem> Items;
 };
 
 // A memorized Warp Portal destination (rAthena's s_point_str memo_point)
@@ -1772,6 +1830,7 @@ struct ROWOWStartItem
 // thread (its session's and map's updates) touches it
 struct ROWOWIdentity : public DataMap::Base
 {
+    ObjectGuid::LowType CharacterGUID = 0; // status.char_id
     bool IsLoaded = false;
     bool Exists = false; // Made on the first entry into the RO world
     uint16 JobID = ROWOW_JOB_NOVICE;
@@ -1822,7 +1881,8 @@ struct ROWOWIdentity : public DataMap::Base
     std::vector<uint32> OnTouchNpcIDs; // npc_ontouch_: the NPCs whose OnTouch_ it set off and whose area it's still on
     uint32 NpcRangeCheckTimer = 0;
     uint32 WaitingRoomCheckTimer = 0;
-    std::string SentWaitingRoomMessage; // What its client was last told of the waiting rooms in sight (cleared to send them again)
+    std::string SentWaitingRoomMessage; // What its client was last told of the rooms and shop signs in sight (cleared to send them again)
+    uint32 ChatRoomID = 0; // chatID: the room it's in, which keeps it from moving (pc_cant_act).  Its own thread or the world update's
     int64 KillerRID = 0; // killerrid, killedrid and killedgid: who last killed it, and what it last killed (the die and kill events read them)
     int64 KilledRID = 0;
     int64 KilledGID = 0;
@@ -1842,6 +1902,8 @@ struct ROWOWIdentity : public DataMap::Base
     ObjectGuid MenuSkillTargetGUID; // menuskill_val as a unit: whose items Weapon Repair's list shows
     float MenuSkillZ = 0; // The ground height of a Warp Portal's cell
     bool IsVending = false; // state.vending: its shop is open
+    std::unique_ptr<ROWOWBuyingStore> BuyingStore; // state.buyingstore: its buying store is open
+    uint8 BuyingStoreSlots = 0; // buyingstore.slots: the setup window is open, for that many items
     std::string VendingTitle; // message
     std::vector<ROWOWVendingItem> VendingItems; // vending (vend_num items)
     uint8 VendSkillLevel = 0; // vend_skill_lv
@@ -1854,6 +1916,13 @@ struct ROWOWIdentity : public DataMap::Base
     bool IsTaekwonRest = false; // state.rest: a Taekwon sitting with another (Peaceful Break, Happy Break's regen)
     std::map<uint16, uint16> TempSkillLevelsByID; // SKILL_FLAG_TEMPORARY: skills it has for now, unsaved and not raised (a spirit link's, a Bard's or
                                                   // Dancer's linked songs), worked out by pc_calc_skilltree
+    std::map<uint16, uint16> ItemSkillLevelsByID; // ADDSKILL_TEMP and ADDSKILL_TEMP_ADDLEVEL: the skills its equipment's scripts grant, and their levels with them
+                                                  // (StatusCalcPCItems redoes them on each status calculation), which overrule the learned level
+    std::map<uint16, uint16> SentItemSkillLevelsByID; // ... as its spells and skill window last had them
+    bool IsFamousPotion = false; // potion_flag 2: the potion used now is a Fame Top 10 Alchemist's
+    bool IsDoriDori = false; // state.doridori: /doridori doubles the next skill SP regen
+    int32 Fame = 0; // status.fame
+    int32 PotionSuccessCounter = 0; // potion_success_counter: condensed potions brewed in a row
     uint8 SuperNoviceCallFlag = 0; // state.snovice_call_flag: how far a Super Novice is in the Guardian Angel prayer (its lines said)
     uint16 SpiritSkillID = 0; // The spirit linking it (its SC_SPIRIT's val2), which pc_calc_skilltree reads for the spirit skills
     bool IsSuperNoviceDeadFlag = false; // state.snovice_dead_flag: its angel saved it from death, until its next base level
@@ -2233,6 +2302,7 @@ public:
     void LoadSkillRow(ROWOWDataTable const& skillTable, size_t rowIndex, ROWOWSkill& skill) const; // A skill_db row's values for the engine
     ROWOWSkill const* GetSkill(uint16 skillID) const;
     uint16 GetSkillIDByName(std::string const& skillName) const; // 0 for none
+    uint32 GetItemIDOfScriptValue(ROWOWScriptValue const& item) const; // The item a script's argument names: an item_db Id, or an AegisName
     ROWOWSkillTreeEntry const* GetSkillTreeEntry(uint16 jobID, uint16 skillID) const;
     int32 PCCheckSkill(ROWOWIdentity const& identity, uint16 skillID) const; // pc_checkskill
     uint16 SkillTreeGetMax(uint16 skillID, uint16 jobID) const; // skill_tree_get_max
@@ -2241,6 +2311,9 @@ public:
     void PCCalcSkillTree(ROWOWIdentity& identity) const; // pc_calc_skilltree
     bool PCSkillUp(Player* player, uint16 skillID); // pc_skillup
     void PCSkill(Player* player, uint16 skillID, uint16 level); // pc_skill (ADDSKILL_PERMANENT): a quest NPC or a GM sets a skill's level
+    void PCAddTempSkill(ROWOWIdentity& identity, uint16 skillID, int32 level, bool isAddLevel) const; // pc_skill's ADDSKILL_TEMP and ADDSKILL_TEMP_ADDLEVEL
+    void PCRefreshItemSkills(Player* player, ROWOWIdentity& identity); // After a status calculation: the skills equipment grants, to its spells and window
+    bool PCCheckSkillIsGranted(ROWOWIdentity const& identity, uint16 skillID) const; // pc_checkskill_flag > SKILL_FLAG_PERMANENT
     void PCJobChange(Player* player, uint16 jobID); // pc_jobchange
     int64 PCJobIDToMapID(int32 jobID) const; // pc_jobid2mapid: the job's class (MAPID, EAJ_), -1 for none
     int32 PCMapIDToJobID(uint64 mapID, bool isMale) const; // pc_mapid2jobid: -1 for none
@@ -2495,6 +2568,24 @@ public:
     void VendingOpenVendingReq(Player* player, uint8 skillLevel); // clif_openvendingreq (ROWOWVENDREQ)
     bool VendingOpenVending(Player* player, std::string const& title, std::vector<ROWOWVendingItem> const& items); // vending_openvending
     void VendingCloseVending(Player* player); // vending_closevending
+    // The buying store (ROWOW_BuyingStore.cpp)
+    bool BuyingStoreSetup(Player* player, uint8 slots); // buyingstore_setup
+    bool BuyingStoreCreate(Player* player, int64 zenyLimit, std::string const& title, std::vector<ROWOWBuyingStoreItem> const& items); // buyingstore_create
+    void BuyingStoreClose(Player* player); // buyingstore_close
+    void BuyingStoreOpen(Player* player, Player* buyer); // buyingstore_open
+    void BuyingStoreTrade(Player* player, Player* buyer, uint32 buyerID, std::vector<std::pair<uint32, uint32>> const& sales); // buyingstore_trade (item template, amount)
+    uint32 BuyingStoreNextID = 0; // buyingstore_nextid.  Chat commands only (the world update)
+    // Fame (ROWOW_Fame.cpp).  FameLists under FameMutex
+    int32 GetFameType(uint16 jobID) const; // A job's ranking (class_ & MAPID_SECONDMASK), -1 for none
+    void LoadFameLists(ObjectGuid::LowType skippedGUID = 0); // chrif_buildfamelist
+    void UpdateFameList(int32 fameType, ObjectGuid::LowType characterGUID, int32 fame, std::string const& name);
+    bool PCAddFame(Player* player, int32 count); // pc_addfame
+    void PCFameRefine(Player* player, Item const* item); // The Fame point system: +10 on a weapon of its own forge
+    uint8 PCFameRank(ObjectGuid::LowType characterGUID, int32 fameType) const; // pc_famerank
+    bool PCIsTaekwonRanker(ROWOWIdentity const& identity) const; // pc_is_taekwon_ranker
+    void ClifSubRanklist(Player* player, int32 fameType); // clif_sub_ranklist
+    std::array<std::vector<ROWOWFameEntry>, ROWOW_FAME_COUNT> FameLists;
+    mutable std::mutex FameMutex;
     void VendingVendingListReq(Player* player, Player* vendor); // vending_vendinglistreq (ROWOWVENDLIST)
     void VendingPurchaseReq(Player* player, Player* vendor, std::vector<std::pair<uint16, uint32>> const& purchases); // vending_purchasereq (index, amount)
 
@@ -2514,6 +2605,7 @@ public:
     std::vector<ROWOWProduce> ProduceDB; // skill_produce_db (startup)
     void LoadProduceData(); // produce_db, after the items
     int32 SkillCanProduceMix(Player* player, uint32 nameID, int32 trigger, int32 qty); // skill_can_produce_mix: the recipe's index plus 1, 0 for none
+    void ClifCookingList(Player* player, int32 trigger); // clif_cooking_list
     bool SkillProduceMix(Player* player, uint16 skillID, uint32 nameID, int32 slot1, int32 slot2, int32 slot3, int32 qty, int32 produceIndex); // skill_produce_mix
     int32 SkillProduceMixRate(Player* player, uint16 skillID, uint32 nameID, int32 sc, int32 ele); // skill_produce_mix's make_per for one try (in 10000)
     void ClifSkillProduceMixList(Player* player, int32 skillID, int32 trigger); // clif_skill_produce_mix_list (ROWOWPRODUCE; skillID -1 for an item's list)
@@ -2620,6 +2712,8 @@ public:
     void PCSetFalcon(Player* player, bool isFalcon); // pc_setfalcon, with pc_setoption's EFST_FALCON message
     void SkillRevealTrapInArea(Unit* src, int32 range, int32 x, int32 y); // skill_reveal_trap_inarea
     int32 SkillTrapSplash(Map* map, Unit* bl, ROWOWSkillUnitGroup& group, int32 index, uint64 tick); // skill_trap_splash
+    void SkillTrapsInSplash(Unit* src, uint16 skillID, uint16 skillLevel, int32 centerX, int32 centerY, int32 range); // A splash reaching traps: their knockback
+    void SkillClaymoreSpringTraps(Map* map, ROWOWSkillUnitGroup& group, int32 centerX, int32 centerY, int32 range); // skill_trap_splash's other traps
     void ClifChangeTrapLook(Map* map, ROWOWSkillUnitGroup& group, int32 index, Unit* target); // clif_changetraplook (UNT_USED_TRAPS): the trap's spring look on what set it off
     void SkillTrapGiveBack(Unit* src, ROWOWSkillUnitGroup const& group); // The trap item a removed trap gives back (pc_additem)
     void SkillTrapRevert(Map* map, Unit* src, ROWOWSkillUnitGroup const& group, int32 x, int32 y); // The trap item an expired trap leaves on the ground (map_addflooritem)
@@ -2718,6 +2812,9 @@ public:
     bool IsGroundItem(GameObject const* go) const; // A gameobject of a floor item
     bool PCAddItem(Player* player, uint32 itemTemplateID, uint32 amount, bool isIdentified, Item** itemOut = nullptr); // pc_additem: all of it into the bags, or false
     bool PCCantAct(Player* sd) const; // pc_cant_act
+    bool CanStoreROItem(Player* player, uint32 itemTemplateID, uint32 amount, ObjectGuid::LowType creatorGUID) const; // pc_checkadditem, its maker's stacks apart
+    Item* StoreROItem(Player* player, uint32 itemTemplateID, uint32 amount, std::array<uint32, ROWOW_ITEM_ENCHANTMENT_SLOT_COUNT> const* enchantments,
+        ObjectGuid::LowType creatorGUID); // pc_additem of an item with its enchantments and maker
     bool PCTakeItem(Player* sd, ObjectGuid const& guid, bool isGreed); // pc_takeitem
     void ClifParseTakeItem(Player* sd, GameObject* go); // clif_parse_TakeItem
     void SkillGreed(Player* sd); // skill_greed around a player
@@ -3028,6 +3125,7 @@ public:
     std::unordered_map<uint32, uint32> MapUserCounts; // Under NpcStateMutex: the players on each RO map as of the last world update (getmapusers)
     void WarpPlayerToCell(Player* player, std::string const& mapName, int32 x, int32 y); // The warp command's destination: a cell, SavePoint or Random
     std::unordered_map<uint32, std::vector<uint32>> TouchNpcIDsByMapID; // The NPCs with an OnTouch area, by WoW map (startup data)
+    std::unordered_map<uint32, std::vector<uint32>> NpcIDsByMapID; // Every NPC on a WoW map (startup data), for npc_isnear
     std::vector<ROWOWNpcEvent> PlayerEventLabels[ROWOW_NPC_EVENT_COUNT]; // script_event: each player event's labels (startup data)
     std::unordered_map<std::string, std::vector<ROWOWNpcEvent>> ClockEventsByLabel; // OnClock/OnHour/OnMinute/On<day>/OnDay labels, lowercase
     int64 LastClockMinute = 0; // The minute (since the epoch) npc_event_do_clock last ran for
@@ -3053,22 +3151,34 @@ public:
     void StorageClose(Player* player); // Leaving the map: the storage ends (storage_storageclose, storage_guild_storageclose)
     void OpenPendingGuildStorages(); // The world update, with the maps idle: the guild bank windows asked for
     std::set<ObjectGuid> PendingGuildStorageOpens; // Under NpcStateMutex
-    // Waiting rooms (ROWOW_WaitingRoom.cpp, R8.3): rAthena's chat.cpp for the rooms NPCs own, the job tests' queues.  The rooms are under
-    // NpcStateMutex; a player's join and leave run in its thread, the rooms' events in the world update
+    // Rooms (ROWOW_WaitingRoom.cpp, R8.3 and R11): rAthena's chat.cpp, the rooms NPCs own (the job tests' queues) and those players make.  The
+    // rooms are under NpcStateMutex; a player's join and leave run in its thread or the world update, the rooms' events in the world update
     void RegisterWaitingRoomCommands(); // From RegisterNpcScriptCommands
     void ChatCreateNpcChat(ROWOWNpc const* npc, std::string const& title, int32 limit, int32 trigger, std::string const& event, int64 zeny, int32 minLevel,
         int32 maxLevel); // chat_createnpcchat
     void ChatDeleteNpcChat(ROWOWNpc const* npc); // chat_deletenpcchat
-    int32 ChatJoinChat(Player* player, uint32 npcID); // chat_joinchat: rAthena's e_refuse_enter_room (3 ENTERROOM_SUCCESS), saying why not
-    int32 ChatJoinChatSub(Player* player, uint32 npcID);
+    bool ChatCreatePCChat(Player* player, std::string const& title, std::string const& password, int32 limit, bool isPublic); // chat_createpcchat
+    int32 ChatJoinChat(Player* player, uint32 roomID, std::string const& password = std::string()); // chat_joinchat: rAthena's e_refuse_enter_room (3 ENTERROOM_SUCCESS), saying why not
+    int32 ChatJoinChatSub(Player* player, uint32 roomID, std::string const& password);
     bool ChatLeaveChat(Player* player, bool isKicked); // chat_leavechat: false when it was in none
+    void ChatChangeChatOwner(Player* player, std::string const& nextOwnerName); // chat_changechatowner
+    void ChatChangeChatStatus(Player* player, std::string const& title, std::string const& password, int32 limit, bool isPublic); // chat_changechatstatus
+    void ChatKickChat(Player* player, std::string const& kickUserName); // chat_kickchat
+    void ChatRoomSay(Player* player, std::string const& text); // clif_chat_message: what's said in a room goes to the room alone
+    bool PCCanMoveAt(Player* player) const; // unit_can_move's part for the rooms and shops: false while it's in a room or keeps a shop
+    void PCUpdateMoveLock(Player* player); // After that changes: the WoW root that stands for it
+    bool NpcIsNear(Player* player); // npc_isnear: an NPC within min_npc_vendchat_distance
+    void SetShopSign(Player* player, std::string const& title, bool isBuyingStore); // A shop opened: its sign is shown to the players around
+    void RemoveShopSign(Player* player);
     void ChatTriggerEvent(ROWOWNpc const* npc); // chat_triggerevent
     void ChatSetEventEnabled(ROWOWNpc const* npc, bool isEnabled); // chat_enableevent and chat_disableevent
     void ChatNpcKickAll(ROWOWNpc const* npc); // chat_npckickall
     void WarpWaitingPlayer(ObjectGuid const& playerGUID, int64 zeny, std::string const& mapName, int32 x, int32 y); // warpwaitingpc's, maps idle
     void WarpPendingWaitingPlayers(); // The world update: warpwaitingpc's warps from map threads
     void UpdatePlayerWaitingRooms(Player* player, uint32 diff); // Its update: the rooms in sight to its client, and walking out of its room
-    std::map<uint32, ROWOWWaitingRoom> WaitingRoomsByNpcID; // Under NpcStateMutex
+    std::map<uint32, ROWOWWaitingRoom> WaitingRoomsByNpcID; // By room id, an NPC's or a player's.  Under NpcStateMutex
+    uint32 NextPlayerRoomID = ROWOW_PLAYER_ROOM_ID_START; // Under NpcStateMutex
+    std::map<ObjectGuid::LowType, ROWOWShopSign> ShopSignsByPlayerGUID; // Under NpcStateMutex
     std::vector<ROWOWWaitingRoomWarp> PendingWaitingRoomWarps; // Under NpcStateMutex
     static thread_local bool IsInNpcWorldUpdate; // The world update's NPC part is running on this thread (the maps are idle)
 

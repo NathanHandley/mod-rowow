@@ -2921,7 +2921,8 @@ void ROWOWMod::UpdateStatusChangeOptions(Unit* bl, ROWOWStatusChange& sc)
     // is silenced, one that can't attack is pacified (WoW's own states, set without an aura), and the hidden ones (Hiding, Cloaking, Chase
     // Walk) are stealthed, so only detectors (and Ruwach and Sight, which end it) find them
     bool isDead = bl->IsAlive() == false;
-    bool shouldRoot = sc.Cant.Move == true && isDead == false;
+    Player* player = bl->ToPlayer();
+    bool shouldRoot = (sc.Cant.Move == true || (player != nullptr && PCCanMoveAt(player) == false)) && isDead == false;
     if (shouldRoot != sc.IsRootSet)
     {
         sc.IsRootSet = shouldRoot;
@@ -3018,7 +3019,7 @@ void ROWOWMod::SendStatusChangesToClient(Unit* unit)
         sc->IsRootSet = sc->IsSilenceSet = sc->IsPacifySet = false;
         sc->IsStealthSet = false;
         if (unit->HasUnitState(UNIT_STATE_ROOT) == true && sc->Cant.Move == false)
-            unit->SetControlled(false, UNIT_STATE_ROOT);
+            unit->SetControlled(false, UNIT_STATE_ROOT); // (A room or a shop sets it again below)
         unit->RemoveUnitFlag(UNIT_FLAG_SILENCED);
         unit->RemoveUnitFlag(UNIT_FLAG_PACIFIED);
         UpdateStatusChangeOptions(unit, *sc);

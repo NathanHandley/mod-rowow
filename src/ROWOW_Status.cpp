@@ -367,6 +367,21 @@ void ROWOWMod::LoadStatusData()
         readValue("vending_over_max", BattleConfig.VendingOverMax);
         readValue("vending_tax", BattleConfig.VendingTax);
         readValue("vending_tax_min", BattleConfig.VendingTaxMin);
+        readValue("min_npc_vendchat_distance", BattleConfig.MinNpcVendChatDistance);
+        readValue("chat_warpportal", BattleConfig.ChatWarpPortal);
+        readValue("sg_angel_skill_ratio", BattleConfig.SGAngelSkillRatio);
+        readValue("taekwon_ranker_min_lv", BattleConfig.TaekwonRankerMinLv);
+        readValue("fame_taekwon_mission", BattleConfig.FameTaekwonMission);
+        readValue("fame_refine_lv1", BattleConfig.FameRefineLv1);
+        readValue("fame_refine_lv2", BattleConfig.FameRefineLv2);
+        readValue("fame_refine_lv3", BattleConfig.FameRefineLv3);
+        readValue("fame_forge", BattleConfig.FameForge);
+        readValue("blacksmith_fame_refine_threshold", BattleConfig.BlacksmithFameRefineThreshold);
+        readValue("fame_pharmacy_3", BattleConfig.FamePharmacy3);
+        readValue("fame_pharmacy_5", BattleConfig.FamePharmacy5);
+        readValue("fame_pharmacy_7", BattleConfig.FamePharmacy7);
+        readValue("fame_pharmacy_10", BattleConfig.FamePharmacy10);
+        readValue("produce_item_name_input", BattleConfig.ProduceItemNameInput);
         readValue("skill_steal_max_tries", BattleConfig.SkillStealMaxTries);
         readValue("autospell_check_range", BattleConfig.AutospellCheckRange);
         readValue("autospell_stacking", BattleConfig.AutospellStacking);
@@ -626,6 +641,8 @@ void ROWOWMod::LoadStatusData()
                     item.IsContainer = flagField.second == "true";
                 else if (flagField.first == "DeadBranch")
                     item.IsDeadBranch = flagField.second == "true";
+                else if (flagField.first == "BuyingStore")
+                    item.IsBuyingStore = flagField.second == "true";
             }
             for (auto const& delayField : ROWOWDataTable::ParseMap(itemTable->GetCell(rowIndex, delayColumnIndex)))
                 if (delayField.first == "Duration")
@@ -1015,6 +1032,8 @@ uint32 ROWOWMod::StatusCalcMaxHPPC(ROWOWIdentity const& identity, ROWOWStatus co
         dmax *= (1.0 + vit * 0.01);
     if (job->IsUpper == true)
         dmax *= 1.25;
+    else if (PCIsTaekwonRanker(identity) == true)
+        dmax *= 3;
     // Vit from equip gives +1 additional HP
     dmax += status.Bonus.ParamEquip[ROWOW_STAT_VIT];
     int32 skill = PCCheckSkill(identity, ROWOW_SKILL_CR_TRUST);
@@ -1041,6 +1060,8 @@ uint32 ROWOWMod::StatusCalcMaxSPPC(ROWOWIdentity const& identity, ROWOWStatus co
         dmax *= (1.0 + int_ * 0.01);
     if (job->IsUpper == true)
         dmax *= 1.25;
+    else if (PCIsTaekwonRanker(identity) == true)
+        dmax *= 3;
     // Int from equip gives +1 additional SP
     dmax += status.Bonus.ParamEquip[ROWOW_STAT_INT];
     int32 skill = PCCheckSkill(identity, ROWOW_SKILL_SL_KAINA);
@@ -1642,7 +1663,29 @@ void ROWOWMod::UpdateNaturalRegen(Player* player, uint32 diff)
     if ((flag & ROWOW_RGN_SHP) != 0 && status.SkillRegenHP != 0)
         skillRegen(identity->SkillRegenHPTimer, diff, 100, status.SkillRegenHP, 0);
     if ((flag & ROWOW_RGN_SSP) != 0 && status.SkillRegenSP != 0)
-        skillRegen(identity->SkillRegenSPTimer, diff, 100, 0, status.SkillRegenSP);
+    {
+        identity->SkillRegenSPTimer += diff;
+        while (identity->SkillRegenSPTimer >= uint32(BattleConfig.NaturalHealSkillInterval))
+        {
+            identity->SkillRegenSPTimer -= uint32(BattleConfig.NaturalHealSkillInterval);
+            int32 val = status.SkillRegenSP;
+            if (identity->IsDoriDori == true)
+            {
+                val *= 2;
+                identity->IsDoriDori = false;
+                if (int32 rate = PCCheckSkill(player, ROWOW_SKILL_TK_SPTIME))
+                    SCStart(player, player, ROWOW_SC_EARTHSCROLL, 100, rate, SkillGetTime(ROWOW_SKILL_TK_SPTIME, uint16(rate)));
+                if ((PCJobIDToMapID(identity->JobID) & ROWOW_MAPID_UPPERMASK) == ROWOW_MAPID_STAR_GLADIATOR && int32(urand(0, 9999)) < BattleConfig.SGAngelSkillRatio)
+                {
+                    // Angel of the Sun/Moon/Star
+                    PCResetHate(player);
+                    PCResetFeel(player);
+                }
+            }
+            if (StatusHeal(player, 0, val, 3, player, 0) < val)
+                break; // Full
+        }
+    }
 
     if ((flag & ROWOW_RGN_SP) == 0)
         identity->RegenSPTimer = 0;

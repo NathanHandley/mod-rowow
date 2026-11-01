@@ -463,11 +463,12 @@ ROWOWIdentity* ROWOWMod::GetIdentity(Player* player)
     if (identity->IsLoaded == true)
         return identity;
     identity->IsLoaded = true;
+    identity->CharacterGUID = player->GetGUID().GetCounter();
 
     uint32 guid = player->GetGUID().GetCounter();
     QueryResult result = CharacterDatabase.Query("SELECT `job`, `base_level`, `base_exp`, `job_level`, `job_exp`, `status_points`, `skill_points`, `str`, `agi`, `vit`, `int`, `dex`, `luk`, "
         "`hp`, `sp`, `zeny`, `save_map`, `save_x`, `save_y`, `save_z`, `save_o`, `last_map`, `last_x`, `last_y`, `last_z`, `last_o`, `return_map`, `return_x`, `return_y`, "
-        "`return_z`, `return_o`, `hair_style`, `hair_color`, `in_form`, `option` FROM `mod_rowow_identity` WHERE `guid` = {}", guid);
+        "`return_z`, `return_o`, `hair_style`, `hair_color`, `in_form`, `option`, `fame` FROM `mod_rowow_identity` WHERE `guid` = {}", guid);
     if (!result)
         return identity;
     Field* fields = result->Fetch();
@@ -491,6 +492,7 @@ ROWOWIdentity* ROWOWMod::GetIdentity(Player* player)
     identity->HairColor = fields[32].Get<uint8>();
     identity->WasInFormAtLoad = fields[33].Get<uint8>() != 0;
     identity->Option = fields[34].Get<uint32>();
+    identity->Fame = fields[35].Get<int32>();
 
     if (QueryResult actionResult = CharacterDatabase.Query("SELECT `button`, `action` FROM `mod_rowow_identity_action` WHERE `guid` = {}", guid))
     {
@@ -566,13 +568,13 @@ void ROWOWMod::SaveIdentity(Player* player, CharacterDatabaseTransaction trans)
     ROWOWPosition const& returnPosition = identity->ReturnPosition;
     trans->Append("REPLACE INTO `mod_rowow_identity` (`guid`, `job`, `base_level`, `base_exp`, `job_level`, `job_exp`, `status_points`, `skill_points`, `str`, `agi`, `vit`, "
         "`int`, `dex`, `luk`, `hp`, `sp`, `zeny`, `save_map`, `save_x`, `save_y`, `save_z`, `save_o`, `last_map`, `last_x`, `last_y`, `last_z`, `last_o`, `return_map`, "
-        "`return_x`, `return_y`, `return_z`, `return_o`, `hair_style`, `hair_color`, `in_form`, `option`, `updated`) VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, "
-        "{}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
+        "`return_x`, `return_y`, `return_z`, `return_o`, `hair_style`, `hair_color`, `in_form`, `option`, `fame`, `updated`) VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, "
+        "{}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
         guid, identity->JobID, identity->BaseLevel, identity->BaseExp, identity->JobLevel, identity->JobExp, identity->StatusPoints, identity->SkillPoints,
         identity->Stats[0], identity->Stats[1], identity->Stats[2], identity->Stats[3], identity->Stats[4], identity->Stats[5], identity->HP, identity->SP, identity->Zeny,
         GetPositionMapValue(savePoint), savePoint.X, savePoint.Y, savePoint.Z, savePoint.O, GetPositionMapValue(lastPosition), lastPosition.X, lastPosition.Y,
         lastPosition.Z, lastPosition.O, GetPositionMapValue(returnPosition), returnPosition.X, returnPosition.Y, returnPosition.Z, returnPosition.O,
-        identity->HairStyle, identity->HairColor, identity->IsInForm == true ? 1 : 0, identity->Option, uint32(GameTime::GetGameTime().count()));
+        identity->HairStyle, identity->HairColor, identity->IsInForm == true ? 1 : 0, identity->Option, identity->Fame, uint32(GameTime::GetGameTime().count()));
 
     if (identity->AreActionsChanged == true)
     {
@@ -897,6 +899,7 @@ void ROWOWMod::RefreshROFormValues(Player* player, ROWOWIdentity& identity)
     player->SetUInt32Value(PLAYER_XP, identity.BaseExp);
     player->SetUInt32Value(PLAYER_NEXT_LEVEL_XP, uint32(std::min<uint64>(PCNextBaseExp(identity), std::numeric_limits<uint32>::max())));
     CalculateIdentityStatus(player, identity);
+    PCRefreshItemSkills(player, identity);
     player->UpdateMaxHealth();
     player->UpdateMaxPower(POWER_MANA);
     player->UpdateManaRegen(); // None of Warcraft's (the client's own guess of it included)
@@ -1128,12 +1131,13 @@ void ROWOWMod::GrantIdentitySkillSpells(Player* player, ROWOWIdentity& identity)
                 if (skill->SpellIDsByLevel[level - 1] != 0 && sSpellMgr->GetSpellInfo(skill->SpellIDsByLevel[level - 1]) != nullptr)
                     spellIDs.push_back(skill->SpellIDsByLevel[level - 1]);
         }
-        // The skills it has for now (a spirit link's), each level up to that one
-        for (auto const& levelBySkillID : identity.TempSkillLevelsByID)
-            if (ROWOWSkill const* tempSkill = GetSkill(levelBySkillID.first))
-                for (uint16 level = 1; level <= levelBySkillID.second && level <= tempSkill->SpellIDsByLevel.size(); level++)
-                    if (tempSkill->SpellIDsByLevel[level - 1] != 0 && sSpellMgr->GetSpellInfo(tempSkill->SpellIDsByLevel[level - 1]) != nullptr)
-                        spellIDs.push_back(tempSkill->SpellIDsByLevel[level - 1]);
+        // The skills it has for now (a spirit link's, its equipment's), each level up to that one
+        for (std::map<uint16, uint16> const* tempSkills : { &identity.TempSkillLevelsByID, &identity.ItemSkillLevelsByID })
+            for (auto const& levelBySkillID : *tempSkills)
+                if (ROWOWSkill const* tempSkill = GetSkill(levelBySkillID.first))
+                    for (uint16 level = 1; level <= levelBySkillID.second && level <= tempSkill->SpellIDsByLevel.size(); level++)
+                        if (tempSkill->SpellIDsByLevel[level - 1] != 0 && sSpellMgr->GetSpellInfo(tempSkill->SpellIDsByLevel[level - 1]) != nullptr)
+                            spellIDs.push_back(tempSkill->SpellIDsByLevel[level - 1]);
         // The skill Plagiarism copied, each level up to the copied one
         if (ROWOWSkill const* cloneSkill = GetSkill(identity.CloneSkillID))
             for (uint16 level = 1; level <= identity.CloneSkillLevel && level <= cloneSkill->SpellIDsByLevel.size(); level++)

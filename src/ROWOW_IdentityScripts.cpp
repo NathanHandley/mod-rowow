@@ -107,10 +107,12 @@ public:
         ROWOW->UpdatePet(player, p_time);
         ROWOW->UpdateFollowers(player, p_time);
 
-        // A vendor stays sitting by its shop: standing up or walking away closes it
+        // A vendor or buyer stays sitting by its shop: standing up closes it
         ROWOWIdentity* identity = ROWOW->GetIdentity(player);
         if (identity->IsVending == true && (player->IsSitState() == false || player->isMoving() == true))
             ROWOW->VendingCloseVending(player);
+        if (identity->BuyingStore != nullptr && (player->IsSitState() == false || player->isMoving() == true))
+            ROWOW->BuyingStoreClose(player);
     }
 
     void OnPlayerLogout(Player* player) override
@@ -119,6 +121,7 @@ public:
         if (ROWOW->IsEnabled == false || ROWOW->IsInROForm(player) == false)
             return;
         ROWOW->VendingCloseVending(player);
+        ROWOW->BuyingStoreClose(player);
         ROWOW->SkillClearUnitGroup(player);
         ROWOW->SkillClearTimerSkill(player);
         ROWOW->PetLeaveMap(player);
@@ -158,6 +161,9 @@ public:
             // A warp off the map takes the player's ground skills and its shop with it (clear_skills_on_warp); a warp on the map ends in the
             // same invincibility as an arrival (clif_parse_LoadEndAck), from the spot it lands on
             ROWOW->VendingCloseVending(player);
+            ROWOW->BuyingStoreClose(player);
+            if (ROWOW->GetIdentity(player)->ChatRoomID != 0)
+                ROWOW->ChatLeaveChat(player, false); // unit_remove_map's, on the same map too
             if (mapid != player->GetMapId())
             {
                 ROWOW->SkillClearUnitGroup(player);
@@ -475,6 +481,7 @@ public:
         if (Player* player = unit->ToPlayer())
         {
             ROWOW->VendingCloseVending(player);
+            ROWOW->BuyingStoreClose(player);
             if (ROWOW->IsInROForm(player) == true)
             {
                 // pc_dead: its devotions end, its Spirit Spheres go and it counts the death (PC_DIE_COUNTER)
@@ -597,8 +604,13 @@ public:
 
         static ChatCommandTable roomCommandTable =
         {
-            { "join",  HandleRORoomJoinCommand,  SEC_PLAYER, Console::No },
-            { "leave", HandleRORoomLeaveCommand, SEC_PLAYER, Console::No },
+            { "join",   HandleRORoomJoinCommand,   SEC_PLAYER, Console::No },
+            { "leave",  HandleRORoomLeaveCommand,  SEC_PLAYER, Console::No },
+            { "create", HandleRORoomCreateCommand, SEC_PLAYER, Console::No },
+            { "set",    HandleRORoomSetCommand,    SEC_PLAYER, Console::No },
+            { "owner",  HandleRORoomOwnerCommand,  SEC_PLAYER, Console::No },
+            { "kick",   HandleRORoomKickCommand,   SEC_PLAYER, Console::No },
+            { "say",    HandleRORoomSayCommand,    SEC_PLAYER, Console::No },
         };
 
         static ChatCommandTable roCommandTable =
@@ -649,6 +661,15 @@ public:
             { "vendclose", HandleROVendCloseCommand, SEC_PLAYER, Console::No },
             { "vendlist", HandleROVendListCommand, SEC_PLAYER,   Console::No },
             { "vendbuy",  HandleROVendBuyCommand, SEC_PLAYER,    Console::No },
+            { "buyopen",  HandleROBuyOpenCommand, SEC_PLAYER,    Console::No },
+            { "buyclose", HandleROBuyCloseCommand, SEC_PLAYER,   Console::No },
+            { "buylist",  HandleROBuyListCommand, SEC_PLAYER,    Console::No },
+            { "buysell",  HandleROBuySellCommand, SEC_PLAYER,    Console::No },
+            { "ranking",  HandleRORankingCommand, SEC_PLAYER,    Console::No },
+            { "doridori", HandleRODoriDoriCommand, SEC_PLAYER,   Console::No },
+            { "addfame",  HandleROAddFameCommand, SEC_GAMEMASTER, Console::No },
+            { "skillpoints", HandleROSkillPointsCommand, SEC_GAMEMASTER, Console::No },
+            { "script",   HandleROScriptCommand, SEC_GAMEMASTER, Console::No },
             { "memo",     HandleROMemoCommand,   SEC_PLAYER,     Console::No },
             { "warp",     HandleROWarpCommand,   SEC_PLAYER,     Console::No },
             { "makearrow", HandleROMakeArrowCommand, SEC_PLAYER, Console::No },
@@ -740,12 +761,61 @@ public:
 
     // Waiting rooms (R8.3): the RO_Identity addon's bubble joins a room (chat_joinchat, clif_parse_ChatRoomJoin) and its window's Leave button
     // leaves it (chat_leavechat, clif_parse_ChatLeave)
-    static bool HandleRORoomJoinCommand(ChatHandler* handler, uint32 npcID)
+    static bool HandleRORoomJoinCommand(ChatHandler* handler, uint32 roomID, Optional<std::string> password)
     {
         Player* player = GetFormPlayer(handler);
         if (player == nullptr)
             return false;
-        ROWOW->ChatJoinChat(player, npcID);
+        ROWOW->ChatJoinChat(player, roomID, password.has_value() == true ? *password : std::string());
+        return true;
+    }
+
+    // The room window's creation (clif_parse_CreateChatRoom) and the owner's changes (clif_parse_ChatRoomStatusChange): the limit, 1 for public, a
+    // password ("-" for none) and the title
+    static bool HandleRORoomCreateCommand(ChatHandler* handler, int32 limit, uint32 isPublic, std::string password, Tail title)
+    {
+        Player* player = GetFormPlayer(handler);
+        if (player == nullptr)
+            return false;
+        ROWOW->ChatCreatePCChat(player, std::string(title), password == "-" ? std::string() : password, limit, isPublic != 0);
+        return true;
+    }
+
+    static bool HandleRORoomSetCommand(ChatHandler* handler, int32 limit, uint32 isPublic, std::string password, Tail title)
+    {
+        Player* player = GetFormPlayer(handler);
+        if (player == nullptr)
+            return false;
+        ROWOW->ChatChangeChatStatus(player, std::string(title), password == "-" ? std::string() : password, limit, isPublic != 0);
+        return true;
+    }
+
+    static bool HandleRORoomOwnerCommand(ChatHandler* handler, Tail name)
+    {
+        // clif_parse_ChangeChatOwner
+        Player* player = GetFormPlayer(handler);
+        if (player == nullptr)
+            return false;
+        ROWOW->ChatChangeChatOwner(player, std::string(name));
+        return true;
+    }
+
+    static bool HandleRORoomKickCommand(ChatHandler* handler, Tail name)
+    {
+        // clif_parse_KickFromChat
+        Player* player = GetFormPlayer(handler);
+        if (player == nullptr)
+            return false;
+        ROWOW->ChatKickChat(player, std::string(name));
+        return true;
+    }
+
+    static bool HandleRORoomSayCommand(ChatHandler* handler, Tail text)
+    {
+        Player* player = GetFormPlayer(handler);
+        if (player == nullptr)
+            return false;
+        ROWOW->ChatRoomSay(player, std::string(text));
         return true;
     }
 
@@ -1529,6 +1599,129 @@ public:
             }
         }
         return true;
+    }
+
+    // The buying store (clif_parse_ReqOpenBuyingStore and the others): "<item template>:<amount>:<price>,...", and the sales "<item template>:<amount>,..."
+    static bool HandleROBuyOpenCommand(ChatHandler* handler, uint32 zenyLimit, std::string items, Tail title)
+    {
+        Player* player = GetFormPlayer(handler);
+        if (player == nullptr)
+            return false;
+        std::vector<ROWOWBuyingStoreItem> storeItems;
+        for (std::string_view itemText : Acore::Tokenize(items, ',', false))
+        {
+            std::vector<std::string_view> fields = Acore::Tokenize(itemText, ':', false);
+            if (fields.size() != 3)
+                return false;
+            ROWOWBuyingStoreItem storeItem;
+            storeItem.ItemTemplateID = uint32(strtoul(std::string(fields[0]).c_str(), nullptr, 10));
+            storeItem.Amount = uint32(strtoul(std::string(fields[1]).c_str(), nullptr, 10));
+            storeItem.Price = uint32(strtoul(std::string(fields[2]).c_str(), nullptr, 10));
+            storeItems.push_back(storeItem);
+        }
+        std::string storeTitle(title);
+        if (storeTitle.empty() == true)
+            storeTitle = "Buying";
+        ROWOW->BuyingStoreCreate(player, zenyLimit, storeTitle, storeItems);
+        return true;
+    }
+
+    static bool HandleROBuyCloseCommand(ChatHandler* handler)
+    {
+        Player* player = GetFormPlayer(handler);
+        if (player == nullptr)
+            return false;
+        ROWOW->BuyingStoreClose(player);
+        return true;
+    }
+
+    static bool HandleROBuyListCommand(ChatHandler* handler, uint32 buyerGUID)
+    {
+        Player* player = GetFormPlayer(handler);
+        if (player == nullptr)
+            return false;
+        ROWOW->BuyingStoreOpen(player, ObjectAccessor::GetPlayer(player->GetMap(), ObjectGuid::Create<HighGuid::Player>(buyerGUID)));
+        return true;
+    }
+
+    static bool HandleROBuySellCommand(ChatHandler* handler, uint32 buyerGUID, uint32 buyerID, std::string sales)
+    {
+        Player* player = GetFormPlayer(handler);
+        if (player == nullptr)
+            return false;
+        std::vector<std::pair<uint32, uint32>> saleList;
+        for (std::string_view saleText : Acore::Tokenize(sales, ',', false))
+        {
+            std::vector<std::string_view> fields = Acore::Tokenize(saleText, ':', false);
+            if (fields.size() != 2)
+                return false;
+            saleList.emplace_back(uint32(strtoul(std::string(fields[0]).c_str(), nullptr, 10)), uint32(strtoul(std::string(fields[1]).c_str(), nullptr, 10)));
+        }
+        ROWOW->BuyingStoreTrade(player, ObjectAccessor::GetPlayer(player->GetMap(), ObjectGuid::Create<HighGuid::Player>(buyerGUID)), buyerID, saleList);
+        return true;
+    }
+
+    // /blacksmith, /alchemist and /taekwon (clif_parse_ranklist): 0, 1 or 2
+    static bool HandleRORankingCommand(ChatHandler* handler, uint32 fameType)
+    {
+        Player* player = GetFormPlayer(handler);
+        if (player == nullptr || fameType >= ROWOW_FAME_COUNT)
+            return false;
+        ROWOW->ClifSubRanklist(player, int32(fameType));
+        return true;
+    }
+
+    // /doridori (clif_parse_NoviceDoriDori): a resting Taekwon or Star Gladiator, or a Super Novice, doubles its next skill SP regen
+    static bool HandleRODoriDoriCommand(ChatHandler* handler)
+    {
+        Player* player = GetFormPlayer(handler);
+        if (player == nullptr)
+            return false;
+        ROWOWIdentity* identity = ROWOW->GetIdentity(player);
+        int64 upperClass = ROWOW->PCJobIDToMapID(identity->JobID) & ROWOW_MAPID_UPPERMASK;
+        if (upperClass == ROWOW_MAPID_SUPER_NOVICE || ((upperClass == ROWOW_MAPID_SOUL_LINKER || upperClass == ROWOW_MAPID_STAR_GLADIATOR || upperClass == ROWOW_MAPID_TAEKWON) &&
+            identity->IsTaekwonRest == true))
+            identity->IsDoriDori = true;
+        return true;
+    }
+
+    // For testing: the skill points left, and a script line run with the player attached (dispbottom shows what it finds)
+    static bool HandleROSkillPointsCommand(ChatHandler* handler, uint32 points)
+    {
+        Player* player = GetFormPlayer(handler);
+        if (player == nullptr)
+            return false;
+        ROWOW->GetIdentity(player)->SkillPoints = points;
+        ROWOW->RefreshROForm(player);
+        return true;
+    }
+
+    static bool HandleROScriptCommand(ChatHandler* handler, Tail text)
+    {
+        Player* player = GetFormPlayer(handler);
+        if (player == nullptr)
+            return false;
+        std::shared_ptr<ROWOWScript> script = ROWOWSCRIPT->Compile(std::string(text), "GM");
+        if (script == nullptr || script->Error.empty() == false)
+        {
+            handler->PSendSysMessage("Script error: {}", script != nullptr ? script->Error : "nothing compiled");
+            return true;
+        }
+        ROWOWScriptContext context;
+        ROWOW->SetupNpcRunContext(context, player, nullptr);
+        ROWOWSCRIPT->Run(*script, context, true);
+        if (context.Error.empty() == false)
+            handler->PSendSysMessage("Script stopped: {}", context.Error);
+        return true;
+    }
+
+    // @addfame, for testing
+    static bool HandleROAddFameCommand(ChatHandler* handler, int32 fame)
+    {
+        Player* player = GetFormPlayer(handler);
+        if (player == nullptr)
+            return false;
+        return ROWOW->PCAddFame(player, fame);
     }
 
     static bool HandleROVendCommand(ChatHandler* handler, std::string items, Tail title)
@@ -2601,9 +2794,9 @@ public:
         return true;
     }
 
-    static bool HandleRORefineCommand(ChatHandler* handler, uint32 equipPosition, uint32 refine)
+    static bool HandleRORefineCommand(ChatHandler* handler, uint32 equipPosition, uint32 refine, Optional<uint32> isBroken)
     {
-        // For testing until the refiner NPCs (R8): sets the refine level of what's worn in an RO equipment position
+        // For testing: sets the refine level of what's worn in an RO equipment position, and breaks or mends it
         Player* player = handler->getSelectedPlayerOrSelf();
         Item* item = player != nullptr ? ROWOW->GetIdentityEquippedItem(player, equipPosition) : nullptr;
         if (item == nullptr || refine > ROWOW_MAX_REFINE)
@@ -2611,7 +2804,7 @@ public:
             handler->SendSysMessage("Nothing worn there, or a refine level past 10.");
             return false;
         }
-        ROWOWMod::SetItemState(player, item, refine, ROWOWMod::IsItemBroken(item), ROWOWMod::IsItemIdentified(item));
+        ROWOWMod::SetItemState(player, item, refine, isBroken.has_value() == true ? *isBroken != 0 : ROWOWMod::IsItemBroken(item), ROWOWMod::IsItemIdentified(item));
         ROWOW->RefreshROForm(player);
         handler->PSendSysMessage("{} is now +{}.", item->GetTemplate()->Name1, refine);
         return true;

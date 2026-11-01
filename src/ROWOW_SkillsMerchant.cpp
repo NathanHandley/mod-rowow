@@ -120,6 +120,19 @@ namespace
         }
     };
 
+    // SkillOpenBuyingStore (ALL_BUYING_STORE): players only, the skill allows 5 buying slots
+    class ROWOWSkillOpenBuyingStore : public ROWOWSkillImpl
+    {
+    public:
+        ROWOWSkillOpenBuyingStore() : ROWOWSkillImpl(ROWOW_SKILL_ALL_BUYING_STORE) { }
+
+        void CastendNoDamageID(Unit* src, Unit* /*target*/, uint16 /*skillLevel*/, uint64 /*tick*/, int32& /*flag*/) const override
+        {
+            if (Player* sd = src->ToPlayer())
+                ROWOW->BuyingStoreSetup(sd, ROWOW_MAX_BUYINGSTORE_SLOTS);
+        }
+    };
+
     // SkillAdrenalineRush, SkillWeaponPerfection and SkillPowerThrust: the status (val2 1 on the caster itself, whose share is bigger) on
     // the caster, or in a party on each member on the map within the skill's splash (party_foreachsamemap through skill_area_sub, which comes
     // back here with flag & 1).  A player gets it only holding one of the skill's weapons
@@ -807,6 +820,7 @@ void AddROWOWSkillsMerchant()
     ROWOW->RegisterSkillImpl(new ROWOWSkillChangeCart(ROWOW_SKILL_MC_CARTDECORATE));
     ROWOW->RegisterSkillImpl(new ROWOWSkillItemAppraisal());
     ROWOW->RegisterSkillImpl(new ROWOWSkillVending());
+    ROWOW->RegisterSkillImpl(new ROWOWSkillOpenBuyingStore());
     ROWOW->RegisterSkillImpl(new ROWOWSkillPartyWeaponStatus(ROWOW_SKILL_BS_ADRENALINE));
     ROWOW->RegisterSkillImpl(new ROWOWSkillPartyWeaponStatus(ROWOW_SKILL_BS_WEAPONPERFECT));
     ROWOW->RegisterSkillImpl(new ROWOWSkillPartyWeaponStatus(ROWOW_SKILL_BS_OVERTHRUST));

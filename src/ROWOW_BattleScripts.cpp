@@ -99,6 +99,13 @@ public:
         hasOffhandAttack = false;
         extraRange = ROWOW->GetAutoAttackExtraRange(player, victim);
 
+        // clif_parse_ActionRequest: no attacking from a shop or a room (pc_cant_act)
+        if (ROWOW->PCCanMoveAt(player) == false)
+        {
+            player->AttackStop();
+            return false;
+        }
+
         // A bow or gun without its ammo stops attacking (rAthena's clif_arrow_fail)
         if (ROWOW->HasNormalAttackAmmo(player) == true)
             return true;

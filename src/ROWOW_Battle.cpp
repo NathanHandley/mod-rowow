@@ -1975,7 +1975,9 @@ void ROWOWMod::BattleCalcMultiAttack(ROWOWDamage& wd, Unit* src, Unit* /*target*
         return;
     ROWOWStatus const* sstatus = GetROStatus(src);
     int32 skillLevel = 0;
+    ROWOWIdentity const* doubleIdentity = sd->CustomData.Get<ROWOWIdentity>("ROWOWIdentity");
     if (wd.Div == 1 && (((skillLevel = PCCheckSkill(sd, ROWOW_SKILL_TF_DOUBLE)) > 0 && sstatus->RightWeaponType == ROWOW_WEAPON_TYPE_DAGGER)
+        || (doubleIdentity != nullptr && PCCheckSkillIsGranted(*doubleIdentity, ROWOW_SKILL_TF_DOUBLE) == true && sstatus->RightWeaponType != ROWOW_WEAPON_TYPE_FIST)
         || (sstatus->Bonus.DoubleRate > 0 && sstatus->RightWeaponType != ROWOW_WEAPON_TYPE_FIST))) // Will fail bare-handed
     {
         // Success chance is not added, the higher one is used [Skotlex]

@@ -665,8 +665,9 @@ void ROWOWMod::RegisterNpcScriptCommands()
     });
     engine->RegisterCommand("skill", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
     {
-        // skill <skill id or "name">,<level>{,<flag>}: flag 0 (ADDSKILL_PERMANENT) learns it, as quest NPCs give skills.  The temporary
-        // kinds (item-granted skills) aren't in yet
+        // skill <skill id or "name">,<level>{,<flag>}: flag 0 (ADDSKILL_PERMANENT) learns it, as quest NPCs give skills, and 3
+        // (ADDSKILL_PERMANENT_GRANTED) learns it off the job's tree too.  The temporary kinds last until the next status calculation, as in
+        // rAthena; an item's script has its own copy of the command (ROWOW_Bonus.cpp)
         Player* player = GetAttachedPlayer(context, "skill");
         if (player == nullptr || arguments.empty() == true)
             return ROWOWScriptValue::FromNumber(0);
@@ -679,8 +680,19 @@ void ROWOWMod::RegisterNpcScriptCommands()
             auto skillIDIter = SkillIDsByName.find(upperName);
             skillID = skillIDIter != SkillIDsByName.end() ? skillIDIter->second : 0;
         }
-        if (GetArgument(arguments, 2, 1) == 0)
+        int64 flag = GetArgument(arguments, 2, ROWOW_ADDSKILL_TEMP);
+        if (flag == ROWOW_ADDSKILL_PERMANENT || flag == ROWOW_ADDSKILL_PERMANENT_GRANTED)
+        {
+            if (flag == ROWOW_ADDSKILL_PERMANENT_GRANTED)
+                SetIdentityVariable(*GetIdentity(player), fmt::format(GrantedSkillVariableFormat, skillID), 1);
             PCSkill(player, skillID, uint16(std::max<int64>(0, GetArgument(arguments, 1, 1))));
+        }
+        else if (flag == ROWOW_ADDSKILL_TEMP || flag == ROWOW_ADDSKILL_TEMP_ADDLEVEL)
+        {
+            ROWOWIdentity* identity = GetIdentity(player);
+            PCAddTempSkill(*identity, skillID, int32(GetArgument(arguments, 1, 1)), flag == ROWOW_ADDSKILL_TEMP_ADDLEVEL);
+            PCRefreshItemSkills(player, *identity);
+        }
         return ROWOWScriptValue::FromNumber(0);
     });
     engine->RegisterCommand("jobchange", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
@@ -2258,12 +2270,272 @@ void ROWOWMod::RegisterNpcScriptCommands()
         return ROWOWScriptValue::FromNumber(0);
     });
 
-    // Looks the client can't show yet: they do nothing, so the dialogs go on past them
-    for (char const* lookCommandName : { "viewpoint", "misceffect" })
+    engine->RegisterCommand("viewpoint", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
     {
-        engine->RegisterCommand(lookCommandName, [](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const&) { return ROWOWScriptValue::FromNumber(0); });
-        engine->SetStub(lookCommandName);
+        // viewpoint <action>,<x>,<y>,<point number>,<color>: a mark on the minimap (action 2 takes it off).  The client has one point of interest
+        // (SMSG_GOSSIP_POI), so the last one shows, not one per point number or in its color
+        Player* player = GetAttachedPlayer(context, "viewpoint");
+        if (player == nullptr)
+            return ROWOWScriptValue::FromNumber(0);
+        float x = 0, y = 0;
+        bool isOff = GetArgument(arguments, 0, 0) == 2;
+        if (isOff == false)
+            GetCellWorldPosition(player->GetMapId(), int32(GetArgument(arguments, 1, 0)), int32(GetArgument(arguments, 2, 0)), x, y);
+        WorldPacket data(SMSG_GOSSIP_POI, 4 + 4 + 4 + 4 + 4 + 2);
+        data << uint32(isOff == true ? 0 : 6);
+        data << float(x);
+        data << float(y);
+        data << uint32(7); // The cross on the map
+        data << uint32(0);
+        data << std::string(context.Npc != nullptr ? context.Npc->Name : "");
+        player->SendDirectMessage(&data);
+        return ROWOWScriptValue::FromNumber(0);
+    });
+    engine->RegisterCommand("misceffect", [](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const&) { return ROWOWScriptValue::FromNumber(0); });
+    engine->SetStub("misceffect");
+
+    // Commands of systems that aren't here: the runs go on past them.  setunitdata and areamobuseskill are only in battlegrounds and instances,
+    // openmail and openauction ask for windows an identity has none of, and freeloop only lifts the loop limit of guild castle scripts
+    for (char const* unusedCommandName : { "setunitdata", "areamobuseskill", "openmail", "openauction", "freeloop" })
+    {
+        engine->RegisterCommand(unusedCommandName, [](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const&) { return ROWOWScriptValue::FromNumber(0); });
+        engine->SetStub(unusedCommandName);
     }
+    engine->RegisterCommand("getnameditem", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // getnameditem <item>,"<character name>" or <char id>: an item with the name of its maker (card[0] 254), which must be online; 1 when given
+        Player* player = GetAttachedPlayer(context, "getnameditem");
+        if (player == nullptr || arguments.size() < 2)
+            return ROWOWScriptValue::FromNumber(0);
+        auto itemTemplateIDIter = ItemTemplateIDsByItemID.find(GetItemIDOfScriptValue(arguments[0]));
+        Player* named = arguments[1].IsString == true ? ObjectAccessor::FindPlayerByName(arguments[1].Text, false) :
+            ObjectAccessor::FindPlayerByLowGUID(ObjectGuid::LowType(arguments[1].GetNumber()));
+        if (itemTemplateIDIter == ItemTemplateIDsByItemID.end() || named == nullptr)
+            return ROWOWScriptValue::FromNumber(0);
+        return ROWOWScriptValue::FromNumber(StoreROItem(player, itemTemplateIDIter->second, 1, nullptr, named->GetGUID().GetCounter()) != nullptr ? 1 : 0);
+    });
+    engine->RegisterCommand("getitem2", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // getitem2 <item>,<amount>,<identify>,<refine>,<attribute>,<card1>,<card2>,<card3>,<card4>: an item with its refine, broken state and cards
+        Player* player = GetAttachedPlayer(context, "getitem2");
+        if (player == nullptr || arguments.size() < 9)
+            return ROWOWScriptValue::FromNumber(0);
+        uint32 itemID = GetItemIDOfScriptValue(arguments[0]);
+        Item* item = nullptr;
+        if (GiveROItem(player, itemID, uint32(std::max<int64>(1, GetArgument(arguments, 1, 1))), GetArgument(arguments, 2, 1) != 0, &item) == false || item == nullptr)
+            return ROWOWScriptValue::FromNumber(0);
+        SetItemState(player, item, uint32(std::clamp<int64>(GetArgument(arguments, 3, 0), 0, ROWOW_MAX_REFINE)), GetArgument(arguments, 4, 0) != 0, GetArgument(arguments, 2, 1) != 0);
+        for (uint8 slot = 0; slot < ROWOW_MAX_SLOTS; slot++)
+            if (uint32 cardItemID = uint32(GetArgument(arguments, 5 + slot, 0)))
+                SetItemCard(player, item, slot, cardItemID);
+        SendItemCardsToClient(player, *GetIdentity(player), true);
+        return ROWOWScriptValue::FromNumber(0);
+    });
+    auto findExactItems = [this](Player* player, std::vector<ROWOWScriptValue> const& arguments, size_t firstField)
+    {
+        // countitem2's and delitem2's match: <item>,<identify>,<refine>,<attribute>,<card1..4>, after their amount for delitem2.  card1 254
+        // (CARD0_CREATE) with card3 and card4 the maker's id is the maker's name; other cards aren't kept by these scripts
+        std::vector<Item*> items;
+        auto itemTemplateIDIter = ItemTemplateIDsByItemID.find(GetItemIDOfScriptValue(arguments[0]));
+        if (itemTemplateIDIter == ItemTemplateIDsByItemID.end() || player == nullptr)
+            return items;
+        ObjectGuid::LowType creatorGUID = 0;
+        if (GetArgument(arguments, firstField + 3, 0) == 254)
+            creatorGUID = ObjectGuid::LowType(uint32(GetArgument(arguments, firstField + 5, 0)) | (uint32(GetArgument(arguments, firstField + 6, 0)) << 16));
+        for (uint8 bag = 0; bag <= 4; bag++)
+        {
+            for (uint32 slot = 1; slot <= MAX_BAG_SIZE; slot++)
+            {
+                Item* item = GetItemByClientPosition(player, bag, slot);
+                if (item != nullptr && item->GetEntry() == itemTemplateIDIter->second && IsItemIdentified(item) == (GetArgument(arguments, firstField, 1) != 0) &&
+                    int64(GetItemRefine(item)) == GetArgument(arguments, firstField + 1, 0) && IsItemBroken(item) == (GetArgument(arguments, firstField + 2, 0) != 0) &&
+                    item->GetGuidValue(ITEM_FIELD_CREATOR).GetCounter() == creatorGUID)
+                    items.push_back(item);
+            }
+        }
+        return items;
+    };
+    engine->RegisterCommand("countitem2", [this, findExactItems](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        int64 count = 0;
+        if (arguments.size() >= 8)
+            for (Item* item : findExactItems(GetAttachedPlayer(context, "countitem2"), arguments, 1))
+                count += item->GetCount();
+        return ROWOWScriptValue::FromNumber(count);
+    });
+    engine->RegisterCommand("delitem2", [this, findExactItems](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // Stops the run when there aren't enough, as delitem
+        Player* player = GetAttachedPlayer(context, "delitem2");
+        if (player == nullptr || arguments.size() < 9)
+            return ROWOWScriptValue::FromNumber(0);
+        uint32 amount = uint32(std::max<int64>(1, GetArgument(arguments, 1, 1)));
+        std::vector<Item*> items = findExactItems(player, arguments, 2);
+        uint32 held = 0;
+        for (Item* item : items)
+            held += item->GetCount();
+        if (held < amount)
+        {
+            context.Error = "not enough items to delete";
+            context.IsStopped = true;
+            return ROWOWScriptValue::FromNumber(0);
+        }
+        for (Item* item : items)
+        {
+            uint32 count = std::min(amount, item->GetCount());
+            amount -= count;
+            player->DestroyItemCount(item, count, true);
+            if (amount == 0)
+                break;
+        }
+        return ROWOWScriptValue::FromNumber(0);
+    });
+    engine->RegisterCommand("consumeitem", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // consumeitem <item>: the item's script, without having one
+        Player* player = GetAttachedPlayer(context, "consumeitem");
+        if (player == nullptr || arguments.empty() == true)
+            return ROWOWScriptValue::FromNumber(0);
+        auto itemTemplateIDIter = ItemTemplateIDsByItemID.find(GetItemIDOfScriptValue(arguments[0]));
+        ROWOWItem const* roItem = itemTemplateIDIter != ItemTemplateIDsByItemID.end() ? GetROItemByItemTemplateID(itemTemplateIDIter->second) : nullptr;
+        if (roItem == nullptr || roItem->UseScript == nullptr || roItem->UseScript->IsRunnable() == false)
+            return ROWOWScriptValue::FromNumber(0);
+        ROWOWScriptContext itemContext;
+        itemContext.AttachedPlayer = player;
+        itemContext.Identity = GetIdentity(player);
+        itemContext.UsedItemTemplateID = itemTemplateIDIter->second;
+        ROWOWSCRIPT->Run(*roItem->UseScript, itemContext);
+        return ROWOWScriptValue::FromNumber(0);
+    });
+    engine->RegisterCommand("convertpcinfo", [this](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // convertpcinfo(<char id or account id or "name">,<CPC_*>): an online character's name (0), char id (1) or account id (2).  0 (or "") offline
+        if (arguments.size() < 2)
+            return ROWOWScriptValue::FromNumber(0);
+        Player* player = arguments[0].IsString == true ? ObjectAccessor::FindPlayerByName(arguments[0].Text, false) :
+            ObjectAccessor::FindPlayerByLowGUID(ObjectGuid::LowType(arguments[0].GetNumber()));
+        if (player == nullptr && arguments[0].IsString == false)
+            if (WorldSession* session = sWorldSessionMgr->FindSession(uint32(arguments[0].GetNumber())))
+                player = session->GetPlayer();
+        int64 type = arguments[1].GetNumber();
+        if (player == nullptr)
+            return type == 0 ? ROWOWScriptValue::FromText(std::string()) : ROWOWScriptValue::FromNumber(0);
+        switch (type)
+        {
+            case 0: return ROWOWScriptValue::FromText(player->GetName());
+            case 1: return ROWOWScriptValue::FromNumber(int64(player->GetGUID().GetCounter()));
+            default: return ROWOWScriptValue::FromNumber(int64(player->GetSession()->GetAccountId()));
+        }
+    });
+    auto getStatIndex = [](std::vector<ROWOWScriptValue> const& arguments) -> int64
+    {
+        // A base stat parameter (bStr..bLuk), a symbol to the engine
+        static char const* const StatParameterNames[ROWOW_STAT_COUNT] = { "bStr", "bAgi", "bVit", "bInt", "bDex", "bLuk" };
+        std::string name = arguments.empty() == false ? ROWOWSCRIPT->GetSymbolName(arguments[0].Number) : std::string();
+        for (int64 statIndex = 0; statIndex < ROWOW_STAT_COUNT; statIndex++)
+            if (name == StatParameterNames[statIndex])
+                return statIndex;
+        return -1;
+    };
+    engine->RegisterCommand("needed_status_point", [this, getStatIndex](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // needed_status_point(<type>,<val>): the status points it takes to raise (or lower) a stat
+        Player* player = GetAttachedPlayer(context, "needed_status_point");
+        int64 statIndex = getStatIndex(arguments);
+        if (player == nullptr || statIndex < 0)
+            return ROWOWScriptValue::FromNumber(0);
+        return ROWOWScriptValue::FromNumber(PCNeedStatusPoint(*GetIdentity(player), uint8(statIndex), int32(GetArgument(arguments, 1, 0))));
+    });
+    engine->RegisterCommand("statusup2", [this, getStatIndex](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // statusup2 <type>,<amount>: a stat raised (or lowered) with no status points paid (pc_statusup2)
+        Player* player = GetAttachedPlayer(context, "statusup2");
+        int64 statIndex = getStatIndex(arguments);
+        if (player == nullptr || statIndex < 0)
+            return ROWOWScriptValue::FromNumber(0);
+        ROWOWIdentity* identity = GetIdentity(player);
+        identity->Stats[statIndex] = uint32(std::clamp<int64>(int64(identity->Stats[statIndex]) + GetArgument(arguments, 1, 0), 1, 32767));
+        RefreshROForm(player);
+        return ROWOWScriptValue::FromNumber(0);
+    });
+    engine->RegisterCommand("unitskilluseid", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // unitskilluseid <game ID>,<skill>,<level>{,<target>...}: the attached player uses the skill on itself (the one use of it: a cash item's Endure)
+        Player* player = GetAttachedPlayer(context, "unitskilluseid");
+        if (player == nullptr || arguments.size() < 3)
+            return ROWOWScriptValue::FromNumber(0);
+        uint16 skillID = uint16(arguments[1].IsString == true ? GetSkillIDByName(arguments[1].Text) : arguments[1].GetNumber());
+        SkillCastEnd(player, player, nullptr, skillID, uint16(GetArgument(arguments, 2, 1)));
+        return ROWOWScriptValue::FromNumber(0);
+    });
+    engine->RegisterCommand("warpparty", [this, queueMapWarp](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // warpparty "<to map>",<x>,<y>,<party id>{,"<from map>",<x2>,<y2>}: the attached player's party on the map named, or on its own map, at the world
+        // update.  "SavePointAll" and "SavePoint" aren't told from a real map's warp: each goes to its own save point through warp's names
+        Player* player = GetAttachedPlayer(context, "warpparty");
+        Group* group = player != nullptr ? player->GetGroup() : nullptr;
+        if (group == nullptr)
+            return ROWOWScriptValue::FromNumber(0);
+        ROWOWNpcMapWarp mapWarp;
+        std::string fromMap = GetTextArgument(arguments, 4);
+        mapWarp.MapID = fromMap.empty() == false ? GetMapIDByMapName(fromMap) : player->GetMapId();
+        mapWarp.DestMapName = GetTextArgument(arguments, 0);
+        mapWarp.DestX = int32(GetArgument(arguments, 1, 0));
+        mapWarp.DestY = int32(GetArgument(arguments, 2, 0));
+        mapWarp.GroupGUID = group->GetGUID();
+        if (mapWarp.MapID != 0)
+            queueMapWarp(mapWarp);
+        return ROWOWScriptValue::FromNumber(0);
+    });
+    engine->RegisterCommand("sscanf", [](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // sscanf(<string>,<format>{,<variable>...}): the values of %d and %s, each into its variable; how many were read
+        if (arguments.size() < 2)
+            return ROWOWScriptValue::FromNumber(0);
+        std::string text = arguments[0].GetText();
+        std::string format = arguments[1].GetText();
+        size_t textIndex = 0, argument = 2;
+        int64 readCount = 0;
+        for (size_t formatIndex = 0; formatIndex < format.size(); formatIndex++)
+        {
+            if (format[formatIndex] != '%' || formatIndex + 1 >= format.size())
+            {
+                if (isspace((unsigned char)format[formatIndex]) != 0)
+                {
+                    while (textIndex < text.size() && isspace((unsigned char)text[textIndex]) != 0)
+                        textIndex++;
+                    continue;
+                }
+                if (textIndex >= text.size() || text[textIndex] != format[formatIndex])
+                    break;
+                textIndex++;
+                continue;
+            }
+            char specifier = format[++formatIndex];
+            while (textIndex < text.size() && isspace((unsigned char)text[textIndex]) != 0)
+                textIndex++;
+            size_t start = textIndex;
+            if (specifier == 'd')
+            {
+                if (textIndex < text.size() && (text[textIndex] == '-' || text[textIndex] == '+'))
+                    textIndex++;
+                while (textIndex < text.size() && isdigit((unsigned char)text[textIndex]) != 0)
+                    textIndex++;
+            }
+            else
+            {
+                while (textIndex < text.size() && isspace((unsigned char)text[textIndex]) == 0)
+                    textIndex++;
+            }
+            if (start == textIndex || argument >= arguments.size())
+                break;
+            std::string value = text.substr(start, textIndex - start);
+            ROWOWSCRIPT->SetReferenceValue(context, arguments[argument++], specifier == 'd' ? ROWOWScriptValue::FromNumber(atoll(value.c_str())) : ROWOWScriptValue::FromText(value));
+            readCount++;
+        }
+        return ROWOWScriptValue::FromNumber(readCount);
+    });
+    engine->SetReferenceArguments("sscanf", 0xFFFFFFFC);
 }
 
 Creature* ROWOWMod::SpawnScriptMob(Map* map, uint32 mobID, int32 x, int32 y, std::string const& name, std::string const& event)

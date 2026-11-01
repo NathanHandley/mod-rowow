@@ -1483,10 +1483,29 @@ bool ROWOWMod::SkillCheckConditionCastBegin(Player* sd, uint16 skillID, uint16 s
     // skill (Abracadabra's pick) needs nothing.  GM rights don't skip it here.  (The other jobs' checks of its switch come with them; water
     // cells come with their system)
     ROWOWSkillUnitData* ud = GetSkillUnitData(sd);
+    if (PCCanMoveAt(sd) == false)
+        return false; // clif_parse_UseSkillToId's pc_cant_act2, and the chat room's check
     if (ud->SkillItemID == skillID)
     {
         ud->IsAbraFlag = false; // Hocus-Pocus was used. [Inkfish]
         return true;
+    }
+
+    // MC_VENDING and ALL_BUYING_STORE: not on a novending map, nor beside an NPC
+    if (skillID == ROWOW_SKILL_MC_VENDING || skillID == ROWOW_SKILL_ALL_BUYING_STORE)
+    {
+        auto mapIDsIter = MapIDsByMapFlag.find("novending");
+        if (mapIDsIter != MapIDsByMapFlag.end() && mapIDsIter->second.find(sd->GetMapId()) != mapIDsIter->second.end())
+        {
+            ChatHandler(sd->GetSession()).SendSysMessage("You can't open a shop on this map.");
+            ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_LEVEL);
+            return false;
+        }
+        if (NpcIsNear(sd) == true)
+        {
+            ChatHandler(sd->GetSession()).SendNotification("You can't do that this close to an NPC."); // USESKILL_FAIL_THERE_ARE_NPC_AROUND
+            return false;
+        }
     }
     ROWOWSkillCondition require = SkillGetRequirement(sd, skillID, skillLevel);
     ROWOWStatus const* status = GetROStatus(sd);
@@ -1814,15 +1833,15 @@ bool ROWOWMod::SkillCheckConditionCastBegin(Player* sd, uint16 skillID, uint16 s
                 return false; // Combo needs to be ready
             if (combo->Val3 != 0)
             {
-                // Kick chain (a Taekwon ranker's, never here).  Do not repeat a kick.
+                // Kick chain.  Do not repeat a kick.
                 if (combo->Val3 != skillID)
                     break;
                 StatusChangeEnd(sd, ROWOW_SC_COMBO);
                 return false;
             }
-            if (combo->Val1 != skillID)
+            if (combo->Val1 != skillID && PCIsTaekwonRanker(*GetIdentity(sd)) == false)
             {
-                // Cancel combo wait.  (No Taekwon ranking here: a ranker could kick any of them)
+                // Cancel combo wait.
                 UnitCancelCombo(sd);
                 return false;
             }
@@ -1984,6 +2003,8 @@ bool ROWOWMod::SkillCheckConditionCastEnd(Player* sd, uint16 skillID, uint16 ski
 {
     // skill_check_condition_castend: HP, weapon, ammo, items and Sight Rasher's status, checked when the cast ends, what B.S. Sacramenti's
     // partners give, and how many plants or Marine Spheres an Alchemist may have out
+    if (PCCanMoveAt(sd) == false)
+        return false; // sd.chatID
     if (GetSkillUnitData(sd)->SkillItemID == skillID)
         return true; // Casting finished (Item skill or Hocus-Pocus)
 
@@ -3670,8 +3691,8 @@ void ROWOWMod::SkillCombo(Unit* src, Unit* dsrc, Unit* bl, uint16 skillID, uint1
     // skill_combo: a skill hit ends the combo it was used in (but a ground skill's unit's), then a Monk's or Champion's skill opens the next
     // window when the next skill is learned and the spheres it needs are there: SC_COMBO from the after-cast delay's end (canact_tick, never
     // less than the attack motion), val1 the skill, val2 0 (the next skill auto-targets).  The window's 300 ms are SC_COMBO's own.  A Hunter's
-    // Double Strafe opens Beast Strafing for 2 seconds.  A Taekwon's kick ends the window its stance opened (unit_cancel_combo; a Taekwon
-    // ranker's would go on, but there's no ranking here)
+    // Double Strafe opens Beast Strafing for 2 seconds.  A Taekwon's kick ends the window its stance opened (unit_cancel_combo); a Taekwon
+    // ranker's goes on, as a kick chain
     int64 duration = 0; // Set to duration the user can use a combo skill or 1 for aftercast delay of pre-skill
     int32 nodelay = 0; // Set to 1 for no walk/attack delay, set to 2 for no walk delay
     int32 targetID = int32(bl->GetGUID().GetCounter()); // Set to 0 if combo skill should not autotarget
@@ -3850,6 +3871,7 @@ void ROWOWRecursiveDamageSplashSkillImpl::CastendPos2(Unit* src, int32 x, int32 
     {
         return ROWOW->SkillAreaSub(bl, src, SkillID, skillLevel, tick, splashFlag, ROWOWSkillAreaFunc::CastendDamageID);
     });
+    ROWOW->SkillTrapsInSplash(src, SkillID, skillLevel, x, y, size);
     ud->AreaTemp = outerAreaTemp;
 }
 
@@ -3886,6 +3908,9 @@ void ROWOWRecursiveDamageSplashSkillImpl::SplashSearch(Unit* src, Unit* target, 
     {
         return ROWOW->SkillAreaSub(bl, src, SkillID, skillLevel, tick, splashFlag, ROWOWSkillAreaFunc::CastendDamageID);
     });
+    int32 centerX = 0, centerY = 0;
+    ROWOW->GetUnitCell(target, centerX, centerY);
+    ROWOW->SkillTrapsInSplash(src, SkillID, skillLevel, centerX, centerY, GetSplashSearchSize(src, skillLevel));
 }
 
 int64 ROWOWRecursiveDamageSplashSkillImpl::SplashDamage(Unit* src, Unit* target, uint16 skillLevel, uint64 tick, int32 flag) const

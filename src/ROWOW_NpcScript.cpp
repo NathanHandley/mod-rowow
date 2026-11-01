@@ -252,6 +252,7 @@ void ROWOWMod::LoadNpcScriptData()
     NpcsByCreatureSpawnID.clear();
     BattleFlagsByName.clear();
     TouchNpcIDsByMapID.clear();
+    NpcIDsByMapID.clear();
     for (std::vector<ROWOWNpcEvent>& eventLabels : PlayerEventLabels)
         eventLabels.clear();
     ClockEventsByLabel.clear();
@@ -500,6 +501,8 @@ void ROWOWMod::LoadNpcScriptData()
     uint32 clockLabelCount = 0;
     for (std::unique_ptr<ROWOWNpc> const& npc : NpcsByID)
     {
+        if (npc->MapID != 0)
+            NpcIDsByMapID[npc->MapID].push_back(npc->ID);
         if (npc->Script == nullptr || npc->Script->Error.empty() == false)
             continue;
         if (npc->TriggerSpanX >= 0 && npc->TriggerSpanY >= 0 && npc->MapID != 0)
@@ -1349,6 +1352,8 @@ void ROWOWMod::UpdateNpcScripts(uint32 diff)
             GetUnitCell(player, x, y);
             if (mapWarp.X1 >= 0 && (x < std::min(mapWarp.X1, mapWarp.X2) || x > std::max(mapWarp.X1, mapWarp.X2) || y < std::min(mapWarp.Y1, mapWarp.Y2) ||
                 y > std::max(mapWarp.Y1, mapWarp.Y2)))
+                return;
+            if (mapWarp.GroupGUID.IsEmpty() == false && (player->GetGroup() == nullptr || player->GetGroup()->GetGUID() != mapWarp.GroupGUID))
                 return;
             warpedPlayers.push_back(player);
         });

@@ -2080,7 +2080,7 @@ void ROWOWMod::MobDeadSGTaekwon(Creature* md, Player* sd, int32& bonus)
 {
     // mob_dead for the player who killed the monster: the Star Gladiator's Blessing of the Sun, Moon or Star (10% a level more exp, 20% for the
     // star; Miracle makes every monster a star's) on its hated monster on its day, and the Taekwon mission's kill count (a new mission after
-    // 100: a Branch of Dead Tree monster; Taekwon fame isn't kept, so no ranking)
+    // 100: a Branch of Dead Tree monster, and a fame point)
     static uint16 const blessSkillIDs[ROWOW_MAX_PC_FEELHATE] = { ROWOW_SKILL_SG_SUN_BLESS, ROWOW_SKILL_SG_MOON_BLESS, ROWOW_SKILL_SG_STAR_BLESS };
     ROWOWIdentity& identity = *GetIdentity(sd);
     int32 mobID = int32(GetROMobID(md));
@@ -2101,6 +2101,7 @@ void ROWOWMod::MobDeadSGTaekwon(Creature* md, Player* sd, int32& bonus)
         int64 missionCount = GetIdentityVariable(identity, ROWOW_TKMISSIONCOUNT_VAR) + 1;
         if (missionCount >= 100 && (temp = int32(MobGetRandomID("Branch_Of_Dead_Tree", false))) != 0)
         {
+            PCAddFame(sd, BattleConfig.FameTaekwonMission);
             SetIdentityVariable(identity, ROWOW_TKMISSIONID_VAR, temp);
             missionCount = 0;
             ClifMissionInfo(sd, uint32(temp), 0);
