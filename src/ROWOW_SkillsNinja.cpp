@@ -266,11 +266,10 @@ namespace
             int32 x0 = 0, y0 = 0, x1 = 0, y1 = 0;
             ROWOW->GetUnitCell(src, x0, y0);
             ROWOW->GetUnitCell(target, x1, y1);
-            int32 levelIndex = ROWOWSkill::GetLevelIndex(skillLevel);
             int32 attackFlag = flag;
             uint16 skillID = SkillID;
             // skill_eightpath_algorithm: map_foreachindir, then the target alone when it hit nothing
-            int32 hit = ROWOW->MapForEachInDir(src, x0, y0, x1, y1, ROWOW->SkillGetSplash(SkillID, skillLevel), skill->MaxCount[levelIndex], 0,
+            int32 hit = ROWOW->MapForEachInDir(src, x0, y0, x1, y1, ROWOW->SkillGetSplash(SkillID, skillLevel), ROWOWSkill::GetLevelValue(skill->MaxCount, skillLevel), 0,
                 [src, target, skillID, skillLevel, tick, attackFlag](Unit* bl)
             {
                 if (bl->IsAlive() == false)

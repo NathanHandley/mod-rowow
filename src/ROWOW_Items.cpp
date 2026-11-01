@@ -1205,6 +1205,23 @@ bool ROWOWMod::PCGetItemGroup(Player* player, std::string const& groupName)
     return true;
 }
 
+bool ROWOWMod::ItemDBIsIdentified(uint32 itemID) const
+{
+    // itemdb_isidentified: equipment comes unidentified
+    auto itemTemplateIDIter = ItemTemplateIDsByItemID.find(itemID);
+    if (itemTemplateIDIter == ItemTemplateIDsByItemID.end())
+        return true;
+    auto itemIter = ItemsByItemTemplateID.find(itemTemplateIDIter->second);
+    return itemIter == ItemsByItemTemplateID.end() || IsIdentifiedByDefault(itemIter->second) == true;
+}
+
+std::string ROWOWMod::GetROItemName(uint32 itemID) const
+{
+    auto itemTemplateIDIter = ItemTemplateIDsByItemID.find(itemID);
+    ItemTemplate const* itemTemplate = itemTemplateIDIter != ItemTemplateIDsByItemID.end() ? sObjectMgr->GetItemTemplate(itemTemplateIDIter->second) : nullptr;
+    return itemTemplate != nullptr ? itemTemplate->Name1 : std::to_string(itemID);
+}
+
 bool ROWOWMod::GiveROItem(Player* player, uint32 itemID, uint32 amount, bool isIdentified, Item** itemOut)
 {
     // pc_additem: into the bags, and what doesn't fit comes by mail (RO drops it on the floor, which comes with the ground items, R10).  The

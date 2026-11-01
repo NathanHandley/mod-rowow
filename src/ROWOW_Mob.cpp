@@ -29,8 +29,8 @@
 using namespace std;
 
 // RO monster AI, a port of rAthena's mob.cpp (pre-renewal): mob_ai_sub_hard and what it calls, under the same names.  A monster's target is its own
-// (ROWOWMobData::TargetID, md->target_id): the WoW threat list only keeps the WoW combat state, and the WoW victim follows the target.  Mob skills,
-// slaves and looting are seams for R10.2, R10.3 and R10.4.  Everything here runs in the monster's map thread.  Other monsters of the map (assist)
+// (ROWOWMobData::TargetID, md->target_id): the WoW threat list only keeps the WoW combat state, and the WoW victim follows the target.  Mob skills and
+// slaves are in ROWOW_MobSkill.cpp; looting is a seam for R10.4.  Everything here runs in the monster's map thread.  Other monsters of the map (assist)
 // and the players it looks at are on that map too, so nothing here needs a lock; startup data is only read
 
 namespace
@@ -44,7 +44,6 @@ namespace
     uint8 constexpr RUDE_ATTACKED_COUNT = 1;
     size_t constexpr DAMAGELOG_SIZE = 30;
     int32 constexpr MOBSKILL_EVENT_NONE = -1; // mobskill_use's event for no event
-    int32 constexpr MSC_RUDEATTACKED = 1 << 16; // Only for telling the seam which event it is
 
     // status_db.hasSCF for SCF_MOBLOSETARGET: a status that makes a monster lose its target
     bool HasMobLoseTargetStatus(ROWOWMod const* mod, ROWOWStatusChange const* sc)
@@ -118,6 +117,15 @@ void ROWOWMod::MobSpawnReset(Creature* md)
     mob->LastSkillCheck = tick;
     mob->SpottedLog.clear();
     mob->SpawnTime = 0;
+    mob->SkillIdx = -1;
+    mob->SkillDelays.clear();
+    mob->AfterSkillID = 0;
+    mob->IsRebirth = false;
+    mob->TrickCasting = 0;
+    mob->IsCanEscape = false;
+    mob->SlaveGUIDs.clear();
+    md->CustomData.Erase("ROWOWMobBaseStatus"); // status_calc_mob: NPC_SPEEDUP's speed goes
+    mob->IsSpawnSkillPending = true; // mobskill_use(md, tick, MSC_SPAWN), at its first update
     md->CustomData.Erase("ROWOWDamageLog"); // dmglog
     md->SetRegeneratingHealth(false); // RO monsters don't regenerate on their own (no regen_data)
     md->SetRespawnCompatibilityMode(); // The creature waits out its death (the core would destroy it and make a new one at its database spot)
@@ -339,20 +347,6 @@ void ROWOWMod::MobCastSensor(Creature* md, Unit* src, uint64 tick)
     }
 }
 
-bool ROWOWMod::MobSkillUse(Creature* md, uint64 tick, int32 event)
-{
-    // mobskill_use, R10.2's: it runs the monster's skill list for its state and returns whether it used one.  The hard AI asks at MOB_SKILL_INTERVAL
-    ROWOWMobData* mob = GetMobData(md);
-    mob->LastSkillCheck = tick;
-    (void)event;
-    return false;
-}
-
-void ROWOWMod::MobSkillEvent(Creature* /*md*/, Unit* /*src*/, uint64 /*tick*/, int32 /*flag*/, int64 /*damage*/)
-{
-    // mobskill_event, R10.2's: the skills that answer being attacked or targeted (MSC_CASTTARGETED, MSC_SKILLUSED, the weapon/magic/long range ones)
-}
-
 bool ROWOWMod::MobLootSearch(Creature* /*md*/, ROWOWMobData* /*mob*/, uint64 /*tick*/)
 {
     // mob_ai_sub_hard's looter part and mob_ai_sub_hard_lootsearch, R10.4's: a looter (MD_LOOTER) with no target looks for a floor item within
@@ -362,8 +356,10 @@ bool ROWOWMod::MobLootSearch(Creature* /*md*/, ROWOWMobData* /*mob*/, uint64 /*t
 
 void ROWOWMod::MobAISubHardActiveSearch(Creature* md, ROWOWMobData* mob, Unit* bl, Unit*& target, uint32 mode, int32 range2, int32 range3) const
 {
-    // mob_ai_sub_hard_activesearch.  If can't seek yet, not an enemy, or you can't attack it, skip
-    if (target == bl || bl == md || md->IsValidAttackTarget(bl) == false || StatusCheckSkillUse(md, bl, 0, 0) == false)
+    // mob_ai_sub_hard_activesearch.  If can't seek yet, not an enemy, or you can't attack it, skip.  A summoned plant goes by RO's sides alone: WoW lets
+    // no creature attack a neutral one, and most monsters are neutral to a player's faction, which the plant has
+    bool isSummon = md->CustomData.Get<ROWOWMobSummon>("ROWOWMobSummon") != nullptr;
+    if (target == bl || bl == md || (isSummon == false && md->IsValidAttackTarget(bl) == false) || StatusCheckSkillUse(md, bl, 0, 0) == false)
         return;
     if ((mode & ROWOW_MODE_TARGETWEAK) != 0)
     {
@@ -433,12 +429,6 @@ void ROWOWMod::MobAISubHardChangeChase(Creature* md, ROWOWMobData* mob, Unit* bl
         target = bl;
         mob->TargetID = bl->GetGUID();
     }
-}
-
-bool ROWOWMod::MobAISubHardSlaveMob(Creature* /*md*/, ROWOWMobData* /*mob*/, uint64 /*tick*/)
-{
-    // mob_ai_sub_hard_slavemob, R10.2's and R10.3's: following the master, taking its target, dying with it.  True ends this think
-    return false;
 }
 
 void ROWOWMod::MobUnlockTarget(Creature* md, uint64 tick)
@@ -649,7 +639,7 @@ bool ROWOWMod::MobAISubHard(Creature* md, uint64 tick)
             bool isTrapped = canMove == false && mob->CanMoveTime < tick && ((BattleConfig.MobAI & 0x2) != 0 || GetSCE(md, ROWOW_SC_SPIDERWEB) != nullptr);
             if (tbl != nullptr && BattleCheckRange(md, tbl, attackRange) == false && (isTrapped == true || MobCanReach(md, tbl, status->Range3) == false) &&
                 ++mob->AttackedCount > RUDE_ATTACKED_COUNT)
-                MobSkillUse(md, tick, MSC_RUDEATTACKED);
+                MobSkillUse(md, tick, ROWOW_MSC_RUDEATTACKED);
         }
         else if ((abl = ObjectAccessor::GetUnit(*md, mob->AttackedID)) != nullptr && (tbl == nullptr || MobCanChangeTarget(md, mob, abl, mode) == true))
         {
@@ -664,7 +654,7 @@ bool ROWOWMod::MobAISubHard(Creature* md, uint64 tick)
             {
                 // Rude attacked.  Self damage does not cause rude attack
                 if (abl != md && ++mob->AttackedCount > RUDE_ATTACKED_COUNT)
-                    MobSkillUse(md, tick, MSC_RUDEATTACKED);
+                    MobSkillUse(md, tick, ROWOW_MSC_RUDEATTACKED);
             }
             else if ((BattleConfig.MobAI & 0x2) == 0 && StatusCheckSkillUse(md, abl, 0, 0) == false)
             {
@@ -864,9 +854,9 @@ void ROWOWMod::MobSetAttackedID(Creature* md, Unit* src, uint64 tick, bool isNor
     // monster leaves aggressive mode, and the AI runs at once
     ROWOWMobData* mob = GetMobData(md);
     ObjectGuid attackedID = src->GetGUID();
-    if (ROWOWMobSummon const* summon = src->IsCreature() == true ? src->CustomData.Get<ROWOWMobSummon>("ROWOWMobSummon") : nullptr;
-        summon != nullptr && summon->MasterGUID.IsEmpty() == false && BattleConfig.RetaliateToMaster != 0)
-        attackedID = summon->MasterGUID;
+    if (src->IsCreature() == true && BattleConfig.RetaliateToMaster != 0)
+        if (Unit* master = MobGetMaster(src->ToCreature()))
+            attackedID = master->GetGUID();
     mob->AttackedID = attackedID;
     if (isNormAttacked == true)
         mob->NormAttackedID = attackedID;
@@ -893,17 +883,22 @@ int64 ROWOWMod::BattleCalcWalkDelay(Unit const* bl, int64 damage, int16 div) con
     return delay > 0 ? delay : 1; // Return 1 to specify there should be no noticeable delay, but you should stop walking.
 }
 
-void ROWOWMod::MobBattleAttacked(Unit* src, Unit* target, int64 damage, int16 div, uint64 tick, int32 amotion, bool isNormAttacked)
+void ROWOWMod::MobBattleAttacked(Unit* src, Unit* target, int64 damage, int16 div, uint64 tick, int32 amotion, bool isNormAttacked, int32 attackType, uint16 skillID)
 {
     // battle_damage's end, when an attack connects: the monster stops (status_damage's unit_set_walkdelay, damage_walk_delay being off) and the
     // attacked event comes at the end of the walk delay (mob_attacked, mob_norm_attacked), after the attack motion the damage waits for
     Creature* md = target != nullptr ? target->ToCreature() : nullptr;
     if (md == nullptr || src == nullptr || GetROMobID(md) == 0 || md->IsAlive() == false)
         return;
+    // Trigger monster skill conditions
     if (src != target)
     {
         if (damage > 0)
-            MobSkillEvent(md, src, tick, 0, damage);
+            MobSkillEvent(md, src, tick, attackType, damage);
+        if (skillID > 0 && md->IsAlive() == true)
+            MobSkillEvent(md, src, tick, ROWOW_MSC_SKILLUSED | (int32(skillID) << 16), damage);
+        if (md->IsAlive() == false)
+            return;
     }
     ROWOWMobData* mob = GetMobData(md);
     int64 delay = BattleCalcWalkDelay(target, damage, div);
@@ -962,7 +957,10 @@ void ROWOWMod::MobUpdate(Creature* md, uint32 diff)
     ROWOWMobData* mob = GetMobData(md);
     uint64 tick = GetTick();
     if (mob->IsWalking == true && md->GetMotionMaster()->HasMovementGeneratorType(ESCORT_MOTION_TYPE) == false)
+    {
         mob->IsWalking = false;
+        mob->IsCanEscape = false; // Remove any possible escape states present for mobs once they stopped moving.
+    }
     for (size_t eventIndex = 0; eventIndex < mob->AttackedEvents.size();)
     {
         if (mob->AttackedEvents[eventIndex].Tick > tick)
@@ -974,6 +972,15 @@ void ROWOWMod::MobUpdate(Creature* md, uint32 diff)
         mob->AttackedEvents.erase(mob->AttackedEvents.begin() + eventIndex);
         if (Unit* src = ObjectAccessor::GetUnit(*md, attackedEvent.SrcGUID))
             MobSetAttackedID(md, src, tick, attackedEvent.IsNormAttacked);
+        if (md->IsAlive() == false)
+            return;
+    }
+
+    // mob_spawn's and mob_revive's skills
+    if (mob->IsSpawnSkillPending == true)
+    {
+        mob->IsSpawnSkillPending = false;
+        MobSkillUse(md, tick, ROWOW_MSC_SPAWN);
         if (md->IsAlive() == false)
             return;
     }
@@ -991,6 +998,20 @@ void ROWOWMod::MobUpdate(Creature* md, uint32 diff)
         if (MobIsNearPC(md, mob) == true)
         {
             UnitUpdateChase(md, mob, tick);
+
+            // unit_walktoxy_nextcell: walk and chase skills.  Monsters use them every second, but RO only gets there every "speed" ms: to check one skill per
+            // second on average it takes off half the speed.  A skill used stops the walk but for NPC_SPEEDUP's trick, the emotions and the walk state's
+            // own (MobSkillUse leaves it going; a cast with a cast time holds it anyway)
+            ROWOWStatus const* status = GetROStatus(md);
+            if (mob->IsWalking == true && status != nullptr && tick - mob->LastSkillCheck > MOB_SKILL_INTERVAL - uint64(status->Speed) / 2 && MobSkillUse(md, tick, MOBSKILL_EVENT_NONE, 0, true) == true)
+            {
+                ROWOWSkillUnitData const* ud = md->CustomData.Get<ROWOWSkillUnitData>("ROWOWSkillUnitData");
+                uint16 skillID = ud != nullptr && mob->SkillIdx >= 0 ? ud->SkillID : mob->AfterSkillID;
+                if ((skillID != ROWOW_SKILL_NPC_SPEEDUP || mob->TrickCasting == 0) && skillID != ROWOW_SKILL_NPC_EMOTION && skillID != ROWOW_SKILL_NPC_EMOTION_ON && mob->SkillState != ROWOW_MSS_WALK)
+                    UnitStopWalking(md);
+            }
+            if (md->IsAlive() == false)
+                return;
             if (MobAISubHard(md, tick) == true)
                 mob->LastPCNearTime = tick;
         }

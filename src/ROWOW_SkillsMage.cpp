@@ -346,7 +346,7 @@ namespace
             int32 skillFlag = flag;
             uint16 skillID = SkillID;
             // map_foreachinshootrange(skill_attack_area, ...): skill_area_temp[1] is 0, so no unit is the skill's own target
-            ROWOW->MapForEachInRange(src, skill->SplashArea[ROWOWSkill::GetLevelIndex(skillLevel)], [src, srcX, srcY, skillID, skillLevel, tick, skillFlag](Unit* bl)
+            ROWOW->MapForEachInRange(src, ROWOWSkill::GetLevelValue(skill->SplashArea, skillLevel), [src, srcX, srcY, skillID, skillLevel, tick, skillFlag](Unit* bl)
             {
                 if (bl->IsAlive() == false || (bl != src && src->IsWithinLOSInMap(bl) == false))
                     return 0;
@@ -407,7 +407,7 @@ namespace
         void CastendPos2(Unit* src, int32 x, int32 y, uint16 skillLevel, uint64 /*tick*/, int32& flag) const override
         {
             ROWOWSkill const* skill = ROWOW->GetSkill(SkillID);
-            int32 area = skill->SplashArea[ROWOWSkill::GetLevelIndex(skillLevel)];
+            int32 area = ROWOWSkill::GetLevelValue(skill->SplashArea, skillLevel);
             int32 interval = std::max(1, skill->UnitInterval);
             for (int32 i = 1; i <= ROWOW->SkillGetTime(SkillID, skillLevel) / interval; i++)
             {
@@ -482,7 +482,7 @@ namespace
             ROWOWSkill const* skill = ROWOW->GetSkill(SkillID);
             int32 areaFlag = flag | ROWOW_BCT_ENEMY | ROWOW_SD_ANIMATION | 1;
             uint16 skillID = SkillID;
-            ROWOW->MapForEachInRange(src, skill->SplashArea[ROWOWSkill::GetLevelIndex(skillLevel)], [src, skillID, skillLevel, tick, areaFlag](Unit* bl)
+            ROWOW->MapForEachInRange(src, ROWOWSkill::GetLevelValue(skill->SplashArea, skillLevel), [src, skillID, skillLevel, tick, areaFlag](Unit* bl)
             {
                 if (bl != src && src->IsWithinLOSInMap(bl) == false)
                     return 0; // map_foreachinshootrange
@@ -585,7 +585,7 @@ namespace
             if (urand(0, 99) < 80)
             {
                 int32 dummy = 1;
-                int32 i = ROWOW->GetSkill(SkillID)->SplashArea[ROWOWSkill::GetLevelIndex(skillLevel)] != 0 ? 1 : 0; // (a bool in rAthena)
+                int32 i = ROWOWSkill::GetLevelValue(ROWOW->GetSkill(SkillID)->SplashArea, skillLevel) != 0 ? 1 : 0; // (a bool in rAthena)
                 Map* map = src->GetMap();
                 uint16 skillID = SkillID;
                 ROWOW->MapForEachSkillUnitInArea(map, x - i, y - i, x + i, y + i, [map, skillID, &dummy](ROWOWSkillUnitGroup& group, int32 index)
@@ -792,7 +792,7 @@ namespace
         {
             Player* sd = src->ToPlayer();
             Player* dstsd = target->ToPlayer();
-            int32 i = ROWOW->GetSkill(SkillID)->SplashArea[ROWOWSkill::GetLevelIndex(skillLevel)];
+            int32 i = ROWOWSkill::GetLevelValue(ROWOW->GetSkill(SkillID)->SplashArea, skillLevel);
             if ((flag & 1) == 0 && i >= 1)
             {
                 // Affect all targets on splash area.
@@ -929,7 +929,7 @@ namespace
             if (src->IsPlayer() == true && (target->IsCreature() == false || (tstatus->Mode & ROWOW_MODE_STATUS_IMMUNE) != 0))
                 return;
             ROWOWSkill const* skill = ROWOW->GetSkill(SkillID);
-            ROWOW->SCStart2(src, target, skill->StatusID, 100, skillLevel, skill->Element[ROWOWSkill::GetLevelIndex(skillLevel)], ROWOW->SkillGetTime(SkillID, skillLevel));
+            ROWOW->SCStart2(src, target, skill->StatusID, 100, skillLevel, ROWOWSkill::GetLevelValue(skill->Element, skillLevel), ROWOW->SkillGetTime(SkillID, skillLevel));
         }
     };
 

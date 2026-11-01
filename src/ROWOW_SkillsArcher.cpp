@@ -100,7 +100,7 @@ namespace
         {
             ROWOWSkill const* skill = ROWOW->GetSkill(SkillID);
             int32 type = skill->StatusID;
-            int32 splash = skill->SplashArea[ROWOWSkill::GetLevelIndex(skillLevel)];
+            int32 splash = ROWOWSkill::GetLevelValue(skill->SplashArea, skillLevel);
             ROWOW->SCStart(src, target, type, 100, skillLevel, ROWOW->SkillGetTime(SkillID, skillLevel));
             int32 srcX = 0, srcY = 0;
             ROWOW->GetUnitCell(src, srcX, srcY);
@@ -291,7 +291,7 @@ namespace
 
         void CastendPos2(Unit* src, int32 x, int32 y, uint16 skillLevel, uint64 tick, int32& /*flag*/) const override
         {
-            int32 i = ROWOW->GetSkill(SkillID)->SplashArea[ROWOWSkill::GetLevelIndex(skillLevel)];
+            int32 i = ROWOWSkill::GetLevelValue(ROWOW->GetSkill(SkillID)->SplashArea, skillLevel);
             ROWOW->MapForEachInArea(src, x - i, y - i, x + i, y + i, [src, tick](Unit* bl)
             {
                 ROWOW->StatusChangeTimerSub(bl, src, nullptr, ROWOW_SC_SIGHT, tick);
@@ -773,11 +773,10 @@ namespace
             int32 x0 = 0, y0 = 0, x1 = 0, y1 = 0;
             ROWOW->GetUnitCell(src, x0, y0);
             ROWOW->GetUnitCell(target, x1, y1);
-            int32 levelIndex = ROWOWSkill::GetLevelIndex(skillLevel);
             int32 attackFlag = flag;
             uint16 skillID = SkillID;
             // Use official AoE algorithm (skill_attack_area on each unit of the path)
-            int32 hit = ROWOW->MapForEachInDir(src, x0, y0, x1, y1, skill->SplashArea[levelIndex], skill->MaxCount[levelIndex], 0,
+            int32 hit = ROWOW->MapForEachInDir(src, x0, y0, x1, y1, ROWOWSkill::GetLevelValue(skill->SplashArea, skillLevel), ROWOWSkill::GetLevelValue(skill->MaxCount, skillLevel), 0,
                 [src, target, skill, skillID, skillLevel, tick, attackFlag](Unit* bl)
             {
                 if (bl->IsAlive() == false)

@@ -79,7 +79,7 @@ namespace
                 return;
             ROWOWStatus const* sstatus = ROWOW->GetROStatus(src);
             int32 stunChance = (skillLevel - 5) * int32(sstatus->Level) * 10;
-            ROWOW->StatusChangeStart(src, target, ROWOW_SC_STUN, stunChance, skillLevel, 0, 0, 0, skill->Duration2[ROWOWSkill::GetLevelIndex(skillLevel)], 0);
+            ROWOW->StatusChangeStart(src, target, ROWOW_SC_STUN, stunChance, skillLevel, 0, 0, 0, ROWOWSkill::GetLevelValue(skill->Duration2, skillLevel), 0);
         }
     };
 
@@ -117,17 +117,16 @@ namespace
             // Passive Magnum, should had been casted on yourself: every enemy within its splash (map_foreachinshootrange).  Then 20% of your
             // damage becomes fire element (SC_WATK_ELEMENT)
             ROWOWSkill const* skill = ROWOW->GetSkill(SkillID);
-            int32 levelIndex = ROWOWSkill::GetLevelIndex(skillLevel);
             ROWOWSkillUnitData* ud = ROWOW->GetSkillUnitData(src);
             ROWOWSkillAreaTemp outerAreaTemp = ud->AreaTemp;
             ud->AreaTemp.TargetGUID.Clear();
             int32 areaFlag = flag | ROWOW_BCT_ENEMY | 1;
-            ROWOW->MapForEachInRange(src, skill->SplashArea[levelIndex], [this, src, skillLevel, tick, areaFlag](Unit* bl)
+            ROWOW->MapForEachInRange(src, ROWOWSkill::GetLevelValue(skill->SplashArea, skillLevel), [this, src, skillLevel, tick, areaFlag](Unit* bl)
             {
                 return ROWOW->SkillAreaSub(bl, src, SkillID, skillLevel, tick, areaFlag, ROWOWSkillAreaFunc::CastendDamageID);
             });
             ud->AreaTemp = outerAreaTemp;
-            ROWOW->SCStart4(src, src, ROWOW_SC_WATK_ELEMENT, 100, ROWOW_ELEMENT_FIRE, 20, 0, 0, skill->Duration2[levelIndex]);
+            ROWOW->SCStart4(src, src, ROWOW_SC_WATK_ELEMENT, 100, ROWOW_ELEMENT_FIRE, 20, 0, 0, ROWOWSkill::GetLevelValue(skill->Duration2, skillLevel));
         }
     };
 
@@ -230,7 +229,7 @@ namespace
             uint8 dir = ROWOWMod::GetRODirection(float(srcX - x), float(srcY - y)); // map_calc_dir(target, src->x, src->y)
             ROWOWSkillAreaTemp outerAreaTemp = ud->AreaTemp;
             ud->AreaTemp.TargetGUID = target->GetGUID();
-            ud->AreaTemp.Values[2] = ROWOW->GetSkill(SkillID)->Knockback[ROWOWSkill::GetLevelIndex(skillLevel)];
+            ud->AreaTemp.Values[2] = ROWOWSkill::GetLevelValue(ROWOW->GetSkill(SkillID)->Knockback, skillLevel);
             // all the enemies between the caster and the target are hit, as well as the target
             if (ROWOW->SkillAttack(ROWOW_BF_WEAPON, src, src, target, SkillID, skillLevel, tick, 0) != 0)
                 ROWOW->SkillBlown(src, target, ud->AreaTemp.Values[2], -1, ROWOW_BLOWN_NONE);
@@ -263,9 +262,8 @@ namespace
         void CastendNoDamageID(Unit* src, Unit* target, uint16 skillLevel, uint64 tick, int32& flag) const override
         {
             ROWOWSkill const* skill = ROWOW->GetSkill(SkillID);
-            int32 levelIndex = ROWOWSkill::GetLevelIndex(skillLevel);
-            int32 splash = skill->SplashArea[levelIndex];
-            int32 maxCount = skill->MaxCount[levelIndex];
+            int32 splash = ROWOWSkill::GetLevelValue(skill->SplashArea, skillLevel);
+            int32 maxCount = ROWOWSkill::GetLevelValue(skill->MaxCount, skillLevel);
             bool isPlayer = src->IsPlayer();
             ROWOWSkillUnitData* ud = ROWOW->GetSkillUnitData(src);
             ROWOWSkillAreaTemp outerAreaTemp = ud->AreaTemp;

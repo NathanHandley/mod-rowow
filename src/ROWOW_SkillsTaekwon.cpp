@@ -190,7 +190,7 @@ namespace
             if (ROWOW->GetSkillUnitData(src)->AreaTemp.TargetGUID != target->GetGUID())
             {
                 ROWOWSkill const* skill = ROWOW->GetSkill(SkillID);
-                ROWOW->SkillBlown(src, target, skill->Knockback[ROWOWSkill::GetLevelIndex(skillLevel)], -1, ROWOW_BLOWN_NONE);
+                ROWOW->SkillBlown(src, target, ROWOWSkill::GetLevelValue(skill->Knockback, skillLevel), -1, ROWOW_BLOWN_NONE);
                 ROWOW->SkillAdditionalEffect(src, target, SkillID, skillLevel, ROWOW_BF_MISC, ROWOW_ATK_DEF, tick); // Use Misc rather than weapon to signal passive pushback
             }
         }
@@ -311,7 +311,7 @@ namespace
         void CastendNoDamageID(Unit* src, Unit* target, uint16 skillLevel, uint64 /*tick*/, int32& /*flag*/) const override
         {
             int32 type = ROWOW_SC_NONE;
-            switch (ROWOW->GetSkill(SkillID)->Element[ROWOWSkill::GetLevelIndex(skillLevel)])
+            switch (ROWOWSkill::GetLevelValue(ROWOW->GetSkill(SkillID)->Element, skillLevel))
             {
                 case ROWOW_ELEMENT_EARTH: type = ROWOW_SC_EARTHWEAPON; break;
                 case ROWOW_ELEMENT_WIND: type = ROWOW_SC_WINDWEAPON; break;

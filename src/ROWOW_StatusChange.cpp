@@ -1508,7 +1508,7 @@ bool ROWOWMod::StatusChangeStartValues(Unit* src, Unit* bl, int32 type, int32& v
         case ROWOW_SC_SIGHTBLASTER:
         {
             ROWOWSkill const* skill = GetSkill(uint16(val2)); // Val2 should bring the skill-id.
-            val3 = skill != nullptr ? skill->SplashArea[ROWOWSkill::GetLevelIndex(uint16(val1))] : 0;
+            val3 = skill != nullptr ? ROWOWSkill::GetLevelValue(skill->SplashArea, uint16(val1)) : 0;
             val2 = tick / 20;
             tickTime = 20; // [GodLesZ] tick time
             break;
@@ -1875,7 +1875,7 @@ bool ROWOWMod::StatusChangeStartValues(Unit* src, Unit* bl, int32 type, int32& v
         {
             val2 = (val1 + 1) / 2; // Number of hits blocked
             ROWOWSkill const* utsusemi = GetSkill(ROWOW_SKILL_NJ_UTSUSEMI);
-            val3 = utsusemi != nullptr ? utsusemi->Knockback[ROWOWSkill::GetLevelIndex(uint16(val1))] : 0; // knockback value.
+            val3 = utsusemi != nullptr ? ROWOWSkill::GetLevelValue(utsusemi->Knockback, uint16(val1)) : 0; // knockback value.
             break;
         }
         case ROWOW_SC_BUNSINJYUTSU:
@@ -1907,6 +1907,9 @@ bool ROWOWMod::StatusChangeStartValues(Unit* src, Unit* bl, int32 type, int32& v
             // Level 1 ~ 5 & 6 ~ 10 has different duration.  Level 6 ~ 10 use effect of level 1 ~ 5
             val1 = 1 + ((val1 - 1) % 5);
             val2 = 20 * val1; // Heal effectiveness decrease
+            break;
+        case ROWOW_SC_WEAPONBREAKER:
+            val2 = val1 * 2 * 100; // Chance to break weapon
             break;
         case ROWOW_SC_MAGICMIRROR:
             // Level 1 ~ 5 & 6 ~ 10 has different duration.  Level 6 ~ 10 use effect of level 1 ~ 5
@@ -2198,7 +2201,14 @@ bool ROWOWMod::StatusChangeEnd(Unit* bl, int32 type, bool isTimer)
             bl->SetPower(POWER_MANA, std::min<uint32>(10, bl->GetMaxPower(POWER_MANA)));
             break;
         case ROWOW_SC_STOP:
-            // (Ending the partner's comes with the monster skill NPC_STOP, R10)
+            // NPC_STOP: the partner's ends with it
+            if (val2 != 0)
+            {
+                Unit* tbl = MapID2BL(bl, val2);
+                ROWOWStatusChangeEntry const* tsce = tbl != nullptr ? GetSCE(tbl, ROWOW_SC_STOP) : nullptr;
+                if (tsce != nullptr && tsce->Val2 == int32(bl->GetGUID().GetCounter()))
+                    StatusChangeEnd(tbl, ROWOW_SC_STOP);
+            }
             break;
         case ROWOW_SC_TENSIONRELAX:
             if (sd != nullptr)

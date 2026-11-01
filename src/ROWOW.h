@@ -221,6 +221,7 @@ struct ROWOWDataTable
 #define ROWOW_ITEMID_HOLY_WATER                     523
 #define ROWOW_ITEMID_EMPTY_BOTTLE                   713
 #define ROWOW_ITEMID_STONE                          7049
+#define ROWOW_ITEMID_FRAGMENT_OF_CRYSTAL            7321    // ITEMID_FRAGMENT_OF_CRYSTAL: what a Wizard's spirit link pays to get past Kaite
 #define ROWOW_ITEMID_POISON_BOTTLE                  678     // ITEMID_POISON_BOTTLE: what Create Deadly Poison makes and Enchant Deadly Poison uses
 
 // rAthena's job IDs (e_job in mmo.hpp)
@@ -678,6 +679,21 @@ struct ROWOWBattleConfig
     int32 MonsterActiveEnable = 1; // monster_active_enable
     int32 MobUnlockTime = 2000; // mob_unlock_time
     int32 MobRespawnTime = 1000; // mob_respawn_time
+    int32 MobSkillRate = 100; // mob_skill_rate
+    int32 MobSkillDelayRate = 100; // mob_skill_delay
+    int32 MobMaxSkillLevel = 100; // mob_max_skilllvl
+    int32 MobChangeTargetBySkill = 0; // mob_changetarget_byskill
+    int32 SlavesInheritMode = 4; // slaves_inherit_mode
+    int32 SlavesInheritSpeed = 3; // slaves_inherit_speed
+    int32 SlaveStickWithMaster = 0; // slave_stick_with_master
+    int32 MonsterClassChangeRecover = 1; // monster_class_change_full_recover
+    int32 NpcEmotionBehavior = 0; // npc_emotion_behavior
+    int32 MvpExpRate = 100; // mvp_exp_rate
+    int32 MvpToLootPriority = 0; // mvp_to_loot_priority
+    int32 ItemRateMvp = 100; // item_rate_mvp
+    int32 ItemDropMvpMin = 1; // item_drop_mvp_min
+    int32 ItemDropMvpMax = 10000; // item_drop_mvp_max
+    int32 ItemDropMvpMode = 0; // item_drop_mvp_mode
     int32 MobSpawnVariance = 1; // mob_spawn_variance
     int32 MobSpawnDelay = 100; // mob_spawn_delay
     int32 PlantSpawnDelay = 100; // plant_spawn_delay
@@ -759,6 +775,8 @@ struct ROWOWBattleConfig
     int32 BowlingBashArea = 0; // bowling_bash_area: 0 the gutter lines (40x40 squares), 1 without the demi-gutter bug, else a square around the caster
     int32 GxAllHit = 0; // gx_allhit: Grand Cross hits every target in each cell (else each cell hits three times in all)
     int32 SkillEightpathSameCell = 1; // skill_eightpath_same_cell: a path skill (Brandish Spear) also hits on the caster's own cell
+    int32 EqSingleTargetReflectable = 1; // eq_single_target_reflectable: Earthquake on one target can be reflected
+    int32 MobSlaveKeepTarget = 1; // mob_slave_keep_target: a warped monster keeps its target
     int32 LandProtectorBehavior = 0; // land_protector_behavior: a magic unit fails on Land Protector by the unit's cell (0) or the target's (1)
     int32 DispelSong = 0; // dispel_song: Dispell also ends the songs on a target still in their area
     int32 ComboDelayRate = 100; // combo_delay_rate: the percent of 300 ms a combo's window lasts past its skill's after-cast delay
@@ -984,6 +1002,12 @@ struct ROWOWMobStatus : public DataMap::Base
     ROWOWStatus Status;
 };
 
+// md->base_status: a slave's own base status, the master's speed in it (status_calc_mob's flag 8), kept on the creature as "ROWOWMobBaseStatus"
+struct ROWOWMobBaseStatus : public DataMap::Base
+{
+    ROWOWStatus Status;
+};
+
 // One attack's result (rAthena's struct Damage)
 struct ROWOWDamage
 {
@@ -1005,6 +1029,7 @@ struct ROWOWDamageLogEntry
 {
     ObjectGuid PlayerGUID;
     uint64 Damage = 0;
+    uint64 DamageTanked = 0; // dmg_tanked: what the monster dealt to the player, which counts for the MVP
 };
 struct ROWOWDamageLog : public DataMap::Base
 {
@@ -1030,6 +1055,90 @@ struct ROWOWMobAttackedEvent
 };
 
 // An RO monster's AI (mob_data and its unit_data, under rAthena's names), kept on the creature as "ROWOWMobData".  Only its map's thread touches it
+// mob.hpp's MobSkillState's two that aren't states of a monster, for a skill row
+#define ROWOW_MSS_ANY                               -1      // All states except Dead
+#define ROWOW_MSS_ANYTARGET                         8       // Berserk+Angry+Rush+Follow
+
+// e_mob_skill_target
+enum ROWOWMobSkillTarget
+{
+    ROWOW_MST_TARGET = 0,
+    ROWOW_MST_RANDOM, // Random Target!
+    ROWOW_MST_SELF,
+    ROWOW_MST_FRIEND,
+    ROWOW_MST_MASTER,
+    ROWOW_MST_AROUND5,
+    ROWOW_MST_AROUND6,
+    ROWOW_MST_AROUND7,
+    ROWOW_MST_AROUND8,
+    ROWOW_MST_AROUND1,
+    ROWOW_MST_AROUND2,
+    ROWOW_MST_AROUND3,
+    ROWOW_MST_AROUND4,
+    ROWOW_MST_AROUND = ROWOW_MST_AROUND4
+};
+
+// e_mob_skill_condition
+enum ROWOWMobSkillCondition
+{
+    ROWOW_MSC_ALWAYS = 0,
+    ROWOW_MSC_MYHPLTMAXRATE,
+    ROWOW_MSC_MYHPINRATE,
+    ROWOW_MSC_FRIENDHPLTMAXRATE,
+    ROWOW_MSC_FRIENDHPINRATE,
+    ROWOW_MSC_MYSTATUSON,
+    ROWOW_MSC_MYSTATUSOFF,
+    ROWOW_MSC_FRIENDSTATUSON,
+    ROWOW_MSC_FRIENDSTATUSOFF,
+    ROWOW_MSC_ATTACKPCGT,
+    ROWOW_MSC_ATTACKPCGE,
+    ROWOW_MSC_SLAVELT,
+    ROWOW_MSC_SLAVELE,
+    ROWOW_MSC_CLOSEDATTACKED,
+    ROWOW_MSC_LONGRANGEATTACKED,
+    ROWOW_MSC_AFTERSKILL,
+    ROWOW_MSC_SKILLUSED,
+    ROWOW_MSC_CASTTARGETED,
+    ROWOW_MSC_RUDEATTACKED,
+    ROWOW_MSC_MASTERHPLTMAXRATE,
+    ROWOW_MSC_MASTERATTACKED,
+    ROWOW_MSC_ALCHEMIST,
+    ROWOW_MSC_SPAWN,
+    ROWOW_MSC_MOBNEARBYGT,
+    ROWOW_MSC_GROUNDATTACKED,
+    ROWOW_MSC_DAMAGEDGT,
+    ROWOW_MSC_TRICKCASTING
+};
+
+#define ROWOW_MAX_MOBSKILL                          50      // MAX_MOBSKILL
+#define ROWOW_MOB_MAX_DELAY                         (24 * 3600 * 1000) // MOB_MAX_DELAY
+#define ROWOW_MOB_SLAVEDISTANCE                     2       // MOB_SLAVEDISTANCE
+
+// One row of a monster's skills as mob_parse_row_mobskilldb leaves it (s_mob_skill).  Loaded at startup, read only after
+struct ROWOWMobSkill
+{
+    int32 State = ROWOW_MSS_ANY;
+    uint16 SkillID = 0;
+    uint16 SkillLevel = 1;
+    int32 Permillage = 0;
+    int32 CastTime = 0;
+    int32 Delay = 0;
+    bool IsCancel = false;
+    uint8 Target = ROWOW_MST_TARGET;
+    int32 Cond1 = -1;
+    int64 Cond2 = 0;
+    int32 Val[5] = { 0, 0, 0, 0, 0 };
+    int32 Emotion = -1;
+    uint16 MsgID = 0;
+};
+
+// mob_chat_db: what a monster says with a skill (s_mob_chat)
+struct ROWOWMobChat
+{
+    uint32 Color = 0xFFFFFF;
+    std::string Message;
+};
+
 struct ROWOWMobData : public DataMap::Base
 {
     ObjectGuid TargetID; // target_id
@@ -1054,6 +1163,14 @@ struct ROWOWMobData : public DataMap::Base
     uint64 DeadTime = 0; // When it last died
     uint32 LastSpawnDelay = 0; // How long it was gone the last time, and what that time was to be, for `.ro mob`
     uint32 LastSpawnTime = 0;
+    int32 SkillIdx = -1; // skill_idx: the row of its skill list being used, -1 for none (a script's or a GM's cast)
+    std::vector<uint64> SkillDelays; // skilldelay: per row of its skill list, grown as needed
+    uint16 AfterSkillID = 0; // ud.skill_id kept after a cast: the condition afterskill
+    bool IsSpawnSkillPending = false; // mob_spawn's and mob_revive's MSC_SPAWN, which needs the monster in the world
+    bool IsRebirth = false; // state.rebirth
+    uint64 TrickCasting = 0; // trickcasting: the fake cast bar of NPC_RANDOMMOVE's walk
+    bool IsCanEscape = false; // state.can_escape: a hit doesn't stop its walk (NPC_RUN, NPC_RANDOMMOVE)
+    std::vector<ObjectGuid> SlaveGUIDs; // Its slaves on the map (what mob_countslave's map search finds)
 
     // unit_data
     uint64 CanMoveTime = 0; // canmove_tick
@@ -1538,7 +1655,7 @@ public:
     void PCLostExp(Player* player, uint64 baseExp, uint64 jobExp); // pc_lostexp
 
     // An RO monster's exp (mob.cpp): who hurt it how much (mob_log_damage), and its exp shared out to them when it dies (mob_dead)
-    void MobLogDamage(Creature* creature, Unit* attacker, uint32 damage);
+    void MobLogDamage(Creature* creature, Unit* attacker, uint32 damage, uint32 damageTanked = 0);
     void MobDeadExp(Creature* creature, Unit* killer);
 
     // RO natural HP and SP regen (status_natural_heal), in place of WoW's while in the form
@@ -1609,6 +1726,8 @@ public:
     void StatusHeal(Player* player, int64 hp, int64 sp); // status_heal on a player
     bool PCGetItemGroup(Player* player, std::string const& groupName); // ItemGroupDatabase::pc_get_itemgroup
     bool GiveROItem(Player* player, uint32 itemID, uint32 amount, bool isIdentified, Item** itemOut = nullptr); // pc_additem, mailing what doesn't fit
+    bool ItemDBIsIdentified(uint32 itemID) const; // itemdb_isidentified
+    std::string GetROItemName(uint32 itemID) const; // The item's client name
     Item* PCSearchInventory(Player* player, uint32 itemID) const; // pc_search_inventory: an item of an item_db Id in the bags (identified, not worn)
     void SkillIdentify(Player* player, Item* item); // skill_identify
     void SendItemIdentifyList(Player* player); // clif_item_identify_list
@@ -1703,6 +1822,7 @@ public:
     int32 SkillCastendDamageID(Unit* src, Unit* bl, uint16 skillID, uint16 skillLevel, uint64 tick, int32 flag); // skill_castend_damage_id
     int32 SkillCastendNoDamageID(Unit* src, Unit* bl, uint16 skillID, uint16 skillLevel, uint64 tick, int32 flag); // skill_castend_nodamage_id
     int32 SkillCastendPos2(Unit* src, int32 x, int32 y, uint16 skillID, uint16 skillLevel, uint64 tick, int32 flag); // skill_castend_pos2
+    int32 SkillMagicReflect(Unit* src, Unit* bl, int32 type); // skill_magic_reflect: 1 regular reflection (Maya), 2 Kaite, 3 Magic Mirror
     int64 SkillAttack(int32 attackType, Unit* src, Unit* dsrc, Unit* bl, uint16 skillID, uint16 skillLevel, uint64 tick, int32 flag,
         ROWOWSkillUnit const* dsrcUnit = nullptr); // skill_attack (dsrcUnit: a ground skill's unit is the damage's source, dsrc being its caster)
     void SkillAttackBlow(Unit* src, Unit* dsrc, Unit* target, uint8 blewcount, uint16 skillID, uint16 skillLevel, int64 damage, uint64 tick, int32 flag,
@@ -1938,7 +2058,6 @@ public:
     Unit const* BattleGetMaster(Unit const* bl) const; // battle_get_master: the player a summoned monster answers to (on its map), or itself
     int32 SkillCheckConditionMobMaster(Player* sd, uint16 skillID, uint32 mobClass, int32& countOut); // skill_check_condition_mob_master_sub's count
     void MobDeadFindingOre(Creature* md); // mob_dead's Ore Discovery: an ore in the loot for the player with the loot priority who knows it
-    void UpdateMobSummon(Creature* md); // A summoned monster's own part of the AI: a hit Marine Sphere's blast
     int32 PCSkillHealBonus(Unit const* unit, uint16 skillID) const; // pc_skillheal_bonus: bHealPower (by skill_add_heal_rate) and bSkillHeal
     int32 PCSkillHeal2Bonus(Unit const* unit, uint16 skillID) const; // pc_skillheal2_bonus: bHealPower2 and bSkillHeal2
 
@@ -1950,6 +2069,7 @@ public:
     void PCSkillPlagiarismReset(Player* sd); // pc_skill_plagiarism_reset (Plagiarism's): the copy forgotten
     bool SkillStripEquip(Unit* src, Unit* target, uint16 skillID, uint16 skillLevel); // skill_strip_equip
     bool IsUnitWarpForbidden(Unit const* bl) const; // unit_warp's map flags (noteleport, monster_noteleport)
+    void UnitRemoveMap(Unit* bl); // unit_remove_map's monster part, for a warp
     bool UnitWarpRandom(Unit* bl, Position& destOut); // unit_warp(bl, -1, -1, -1, CLR_TELEPORT): to a random spot of its map (where it goes)
     bool UnitWarpNear(Unit* bl, Position const& center); // unit_warp to a free cell next to a spot of its map (map_search_freecell 1 x 1)
     void SkillSit(Player* sd, bool sitting); // skill_sit: Gangster's Paradise for the Rogues sitting together
@@ -1973,10 +2093,32 @@ public:
     void MobTarget(Creature* md, Unit* bl); // mob_target
     void MobSetProvoked(Creature* md, Unit* src); // SkillProvoke's provoke_flag and mob_target
     void MobCastSensor(Creature* md, Unit* src, uint64 tick); // unit_skilluse_id2's cast sensor
-    bool MobSkillUse(Creature* md, uint64 tick, int32 event); // mobskill_use: the seam for R10.2
-    void MobSkillEvent(Creature* md, Unit* src, uint64 tick, int32 flag, int64 damage); // mobskill_event: the seam for R10.2
+    bool MobSkillUse(Creature* md, uint64 tick, int32 event, int64 damage = 0, bool isWalking = false); // mobskill_use
+    void MobSkillEvent(Creature* md, Unit* src, uint64 tick, int32 flag, int64 damage); // mobskill_event
+    void MobSkillDelay(Creature* md, ROWOWMobData* mob, uint64 tick); // mobskill_delay
+    void MobSetDelay(Creature* md, uint64 tick, bool isCastEnd); // mob_set_delay's cast end and cast cancel, with unit_set_attackdelay's monster part
+    void LoadMobSkillData(); // mob_readskilldb, mob_chat_db
+    std::vector<ROWOWMobSkill> const* GetMobSkills(uint32 mobID) const; // md->db->skill, nullptr for none
+    ROWOWMobSkill const* GetMobSkillInUse(Unit const* src) const; // The row md->skill_idx names, nullptr for none
+    uint32 MobRandomClass(int32 const* value) const; // mob_random_class
+    bool MobChatDisplayMessage(Creature* md, uint16 msgID); // mob_chat_display_message
+    std::vector<std::string> GetMobSkillsWithoutImpl(uint32& skillCountOut) const; // The skills of the mob skill table with no skill class, by name
+    bool WriteMobSkillDump(std::string const& filePath) const; // Every skill row, as the oracle's @oraclemobskills writes them
+    void SetMobSkillTrace(bool isOn); // GM `.ro mobtrace`: counts each skill row monsters use
+    bool WriteMobSkillTrace(std::string const& filePath) const; // The counts, per mob, state, skill and condition
+    uint32 MobCountSlave(Creature* md); // mob_countslave
+    void MobSummonSlave(Creature* md2, int32 const* value, int32 amount, uint16 skillID); // mob_summonslave
+    void MobWarpSlave(Creature* md, int32 range); // mob_warpslave
+    void MobDeleteSlave(Creature* md); // mob_deleteslave
+    Unit* MobGetMaster(Creature const* md) const; // map_id2bl(md->master_id): a slave's monster master or a summon's player
+    Player* MobGetMVPPlayer(Creature* md); // mob_data::get_mvp_player
+    void MobDead(Creature* md, Unit* killer); // mob_dead's rewards and slaves, at a death or before a revive
+    void MobDeadMVP(Creature* md, Player* mvpSD, int32 count); // mob_dead's MVP reward
+    int32 MobDeadAttackerCount(Creature* md); // mob_dead's count: the logged attackers on its map
+    bool MobBeforeDeath(Creature* md, Unit* src, uint32& damage); // status_damage about to kill a monster: its dead skills, and Kaizel and NPC_REBIRTH's revive
+    void MobRevive(Creature* md, int32 perHP); // status_revive and mob_revive
     bool MobLootSearch(Creature* md, ROWOWMobData* mob, uint64 tick); // The looter part of mob_ai_sub_hard: the seam for R10.4
-    bool MobAISubHardSlaveMob(Creature* md, ROWOWMobData* mob, uint64 tick); // mob_ai_sub_hard_slavemob: the seam for R10.2 and R10.3
+    bool MobAISubHardSlaveMob(Creature* md, ROWOWMobData* mob, uint64 tick); // mob_ai_sub_hard_slavemob
     void MobForEachEnemyInRange(Creature* md, int32 range, std::function<void(Unit*)> const& func); // map_foreachinallrange over DEFAULT_ENEMY_TYPE
     void MobAISubHardActiveSearch(Creature* md, ROWOWMobData* mob, Unit* bl, Unit*& target, uint32 mode, int32 range2, int32 range3) const; // mob_ai_sub_hard_activesearch
     void MobAISubHardChangeChase(Creature* md, ROWOWMobData* mob, Unit* bl, Unit*& target, int32 attackRange) const; // mob_ai_sub_hard_changechase
@@ -1987,13 +2129,18 @@ public:
     bool MobIsNearPC(Creature* md, ROWOWMobData* mob) const; // mob_ai_sub_foreachclient
     void MobSetAttackedID(Creature* md, Unit* src, uint64 tick, bool isNormAttacked); // mob_set_attacked_id
     int64 BattleCalcWalkDelay(Unit const* bl, int64 damage, int16 div) const; // battle_calc_walkdelay
-    void MobBattleAttacked(Unit* src, Unit* target, int64 damage, int16 div, uint64 tick, int32 amotion, bool isNormAttacked); // battle_damage's monster events
+    void MobBattleAttacked(Unit* src, Unit* target, int64 damage, int16 div, uint64 tick, int32 amotion, bool isNormAttacked, int32 attackType, uint16 skillID); // battle_damage's monster events
     void MobReleaseCombat(Creature* md, ROWOWMobData* mob); // Leaves WoW's combat state, RO having none
     void MobSyncVictim(Creature* md, ROWOWMobData* mob); // The WoW victim follows the RO target
     void MobUpdate(Creature* md, uint32 diff); // The monster's update (mob_ai_hard, mob_ai_lazy)
 
     // Respawn (ROWOW_Mob.cpp): mob_setdelayspawn's time and mob_spawn's placement, on the core's death and respawn
     void LoadMobSpawnData();
+    std::unordered_map<uint32, std::vector<ROWOWMobSkill>> MobSkillsByMobID; // Written at startup, read only after
+    std::unordered_map<uint32, ROWOWMobChat> MobChatsByID; // Written at startup, read only after
+    bool IsMobSkillTraceOn = false; // Set on the world thread, with the maps idle
+    std::map<std::string, uint32> MobSkillTraceCounts; // By MobSkillTraceMutex: every map thread writes it while the trace is on
+    mutable std::mutex MobSkillTraceMutex;
     ROWOWCreatureSpawn const* GetCreatureSpawn(Creature const* md) const; // Null for a monster of no spawn line
     int64 MobSpawnTimeOf(Creature const* md, ROWOWMobSpawnLine const& line) const; // mob_setdelayspawn's time
     void MobSetDelaySpawn(Creature* md); // mob_setdelayspawn, at death
@@ -2012,6 +2159,8 @@ public:
     bool UnitCanReachBL(Creature* md, Unit const* tbl, int32 range, int32& xOut, int32& yOut) const; // unit_can_reach_bl
     uint32 UnitWalkPathPos(Creature* md, ROWOWMobData const* mob, uint64 tick) const; // walkpath.path_pos
     bool UnitWalkPath(Creature* md, ROWOWMobData* mob, std::vector<uint8> const& path, int32 x0, int32 y0, bool isRun); // Starts walking a path
+    uint32 UnitEscape(Creature* md, Unit* target, int32 dist, uint8 flag); // unit_escape: the walk's time, 0 for no walk
+    Unit* BattleGetTargeted(Unit* target) const; // battle_gettargeted: one of those aiming at it
     bool UnitWalkToXY(Creature* md, int32 x, int32 y); // unit_walktoxy
     bool UnitWalkToBL(Creature* md, ROWOWMobData* mob, Unit* tbl, int32 range, bool isAttackContinue); // unit_walktobl
     bool UnitUpdateChase(Creature* md, ROWOWMobData* mob, uint64 tick); // unit_update_chase

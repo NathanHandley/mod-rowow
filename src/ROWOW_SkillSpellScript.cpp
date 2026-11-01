@@ -49,6 +49,9 @@ class ROWOW_SkillSpellScript : public SpellScript
         // skill.  (Double Attack, Chain Action and Triple Attack have a weapon attack for monsters, which aimed at its own caster hit the player)
         if (GetSpellInfo()->IsPassive() == true && casterOut->IsPlayer() == true)
             return false;
+        // A monster's level is its skill row's: past the skill's own, or a monster skill's one spell
+        if (ROWOWMobSkill const* mobSkill = ROWOW->GetMobSkillInUse(casterOut); mobSkill != nullptr && mobSkill->SkillID == skillIDOut)
+            skillLevelOut = mobSkill->SkillLevel;
         ROWOWSkill const* skill = ROWOW->GetSkill(skillIDOut);
         targetOut = GetExplTargetUnit();
         Unit* pickedTarget = targetOut;
@@ -110,6 +113,8 @@ public:
         uint16 skillLevel = 0;
         if (ROWOW->IsEnabled == false || caster == nullptr || ROWOW->IsROCombatant(caster) == false || ROWOW->GetSkillOfSpell(spell->GetSpellInfo()->Id, skillID, skillLevel) == false)
             return;
+        if (ROWOWMobSkill const* mobSkill = ROWOW->GetMobSkillInUse(caster); mobSkill != nullptr && mobSkill->SkillID == skillID)
+            skillLevel = mobSkill->SkillLevel;
         castTime = ROWOW->UnitSkillCastTime(caster, spell->m_targets.GetUnitTarget(), skillID, skillLevel);
     }
 

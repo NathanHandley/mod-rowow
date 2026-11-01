@@ -69,7 +69,12 @@ namespace
         {
             Player* sd = src->ToPlayer();
             if (sd == nullptr)
+            {
+                // unit_warp(target, -1, -1, -1, CLR_TELEPORT)
+                Position dest;
+                ROWOW->UnitWarpRandom(target, dest);
                 return;
+            }
             auto mapIDsIter = ROWOW->MapIDsByMapFlag.find("noteleport");
             if (skillLevel <= 2 && mapIDsIter != ROWOW->MapIDsByMapFlag.end() && mapIDsIter->second.find(target->GetMapId()) != mapIDsIter->second.end())
             {
@@ -272,7 +277,7 @@ namespace
                 return;
             }
             int32 areaFlag = flag | ROWOW_BCT_ENEMY | 1;
-            ROWOW->MapForEachInRange(src, skill->SplashArea[ROWOWSkill::GetLevelIndex(skillLevel)], [this, src, skillLevel, tick, areaFlag](Unit* target)
+            ROWOW->MapForEachInRange(src, ROWOWSkill::GetLevelValue(skill->SplashArea, skillLevel), [this, src, skillLevel, tick, areaFlag](Unit* target)
             {
                 return ROWOW->SkillAreaSub(target, src, SkillID, skillLevel, tick, areaFlag, ROWOWSkillAreaFunc::CastendNoDamageID);
             });
@@ -359,7 +364,7 @@ namespace
             ROWOWSkillUnitData* ud = ROWOW->GetSkillUnitData(src);
             ROWOWSkillAreaTemp outerAreaTemp = ud->AreaTemp;
             ud->AreaTemp.TargetGUID = src->GetGUID();
-            int32 i = ROWOW->GetSkill(SkillID)->SplashArea[ROWOWSkill::GetLevelIndex(skillLevel)];
+            int32 i = ROWOWSkill::GetLevelValue(ROWOW->GetSkill(SkillID)->SplashArea, skillLevel);
             int32 playerFlag = flag | ROWOW_BCT_ALL | 1;
             ROWOW->MapForEachInArea(src, x - i, y - i, x + i, y + i, [this, src, skillLevel, tick, playerFlag](Unit* bl)
             {
@@ -540,7 +545,7 @@ namespace
                 ROWOWSkillAreaTemp outerAreaTemp = ud->AreaTemp;
                 ud->AreaTemp.Values[0] = 0;
                 int32 areaFlag = flag | ROWOW_BCT_PARTY | 1;
-                ROWOW->PartyForEachSameMap(sd, ROWOW->GetSkill(SkillID)->SplashArea[ROWOWSkill::GetLevelIndex(skillLevel)], [this, src, skillLevel, tick, areaFlag](Unit* member)
+                ROWOW->PartyForEachSameMap(sd, ROWOWSkill::GetLevelValue(ROWOW->GetSkill(SkillID)->SplashArea, skillLevel), [this, src, skillLevel, tick, areaFlag](Unit* member)
                 {
                     return ROWOW->SkillCastendNoDamageID(src, member, SkillID, skillLevel, tick, areaFlag);
                 });
@@ -737,7 +742,7 @@ namespace
             {
                 // Becomes a splash attack when Soul Linked.
                 int32 areaFlag = flag | ROWOW_BCT_ENEMY | 1;
-                ROWOW->MapForEachInRange(target, ROWOW->GetSkill(SkillID)->SplashArea[ROWOWSkill::GetLevelIndex(skillLevel)], [this, src, skillLevel, tick, areaFlag](Unit* bl)
+                ROWOW->MapForEachInRange(target, ROWOWSkill::GetLevelValue(ROWOW->GetSkill(SkillID)->SplashArea, skillLevel), [this, src, skillLevel, tick, areaFlag](Unit* bl)
                 {
                     return ROWOW->SkillAreaSub(bl, src, SkillID, skillLevel, tick, areaFlag, ROWOWSkillAreaFunc::CastendDamageID);
                 });
@@ -886,7 +891,7 @@ namespace
             // Passive part of the attack. Splash knock-back+stun. [Skotlex]
             if (ROWOW->GetSkillUnitData(src)->AreaTemp.TargetGUID != target->GetGUID())
             {
-                ROWOW->SkillBlown(src, target, ROWOW->GetSkill(SkillID)->Knockback[ROWOWSkill::GetLevelIndex(skillLevel)], -1, ROWOW_BLOWN_NONE);
+                ROWOW->SkillBlown(src, target, ROWOWSkill::GetLevelValue(ROWOW->GetSkill(SkillID)->Knockback, skillLevel), -1, ROWOW_BLOWN_NONE);
                 ROWOW->SkillAdditionalEffect(src, target, SkillID, skillLevel, ROWOW_BF_MISC, ROWOW_ATK_DEF, tick); // Use Misc rather than weapon to signal passive pushback
             }
         }
@@ -900,7 +905,7 @@ namespace
             if (ROWOW->SkillAttack(ROWOW_BF_WEAPON, src, src, target, SkillID, skillLevel, tick, flag) != 0)
             {
                 int32 areaFlag = flag | ROWOW_BCT_ENEMY | 1;
-                ROWOW->MapForEachInRange(target, ROWOW->GetSkill(SkillID)->SplashArea[ROWOWSkill::GetLevelIndex(skillLevel)], [this, src, skillLevel, tick, areaFlag](Unit* bl)
+                ROWOW->MapForEachInRange(target, ROWOWSkill::GetLevelValue(ROWOW->GetSkill(SkillID)->SplashArea, skillLevel), [this, src, skillLevel, tick, areaFlag](Unit* bl)
                 {
                     return ROWOW->SkillAreaSub(bl, src, SkillID, skillLevel, tick, areaFlag, ROWOWSkillAreaFunc::CastendNoDamageID);
                 });

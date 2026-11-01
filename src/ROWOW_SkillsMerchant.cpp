@@ -736,7 +736,7 @@ namespace
     };
 
     // SkillSuicideBombing (NPC_SELFDESTRUCTION): the caster's HP as fire damage on everything around it (a summoned Marine Sphere's: its
-    // master's enemies only), then it dies.  Monsters use their skills with R10; until then only a summoned Marine Sphere uses it, when hit
+    // master's enemies only), then it dies
     class ROWOWSkillSuicideBombing : public ROWOWSkillImpl
     {
     public:
@@ -814,5 +814,5 @@ void AddROWOWSkillsMerchant()
     ROWOW->RegisterSkillImpl(new ROWOWSkillPlantCultivation());
     ROWOW->RegisterSkillImpl(new ROWOWSkillFullProtection());
     ROWOW->RegisterSkillImpl(new ROWOWSkillAidCondensedPotion());
-    ROWOW->RegisterSkillImpl(new ROWOWSkillSuicideBombing()); // The Marine Sphere's (NPC_SELFDESTRUCTION)
+    ROWOW->RegisterSkillImpl(new ROWOWSkillSuicideBombing()); // The Marine Sphere's and the monsters' (NPC_SELFDESTRUCTION)
 }

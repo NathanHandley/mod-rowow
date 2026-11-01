@@ -489,6 +489,35 @@ bool ROWOWMod::UnitUpdateChase(Creature* md, ROWOWMobData* mob, uint64 tick)
     return false;
 }
 
+uint32 ROWOWMod::UnitEscape(Creature* md, Unit* target, int32 dist, uint8 flag)
+{
+    // unit_escape: a walk away from the target, the way the target looks at it.  flag&1 a straight line up to the first unreachable cell; else the
+    // furthest reachable cell of the way
+    ROWOWMapGrid const* mapGrid = GetMapGrid(md->GetMapId());
+    if (mapGrid == nullptr)
+        return 0;
+    int32 x = 0, y = 0, targetX = 0, targetY = 0;
+    GetUnitCell(md, x, y);
+    GetUnitCell(target, targetX, targetY);
+    uint8 dir = x == targetX && y == targetY ? UnitGetDir(target) : GetRODirection(float(x - targetX), float(y - targetY)); // map_calc_dir
+    if ((flag & 1) != 0)
+    {
+        // Straight line escape: keep moving until we hit an unreachable cell
+        for (int32 i = 1; i <= dist; i++)
+            if (MapGetCellNoPass(md->GetMap(), *mapGrid, x + i * DirectionX[dir], y + i * DirectionY[dir]) == true)
+                dist = i - 1;
+    }
+    else
+    {
+        // Find the furthest reachable cell (then find a walkpath to it)
+        while (dist > 0 && MapGetCellNoPass(md->GetMap(), *mapGrid, x + dist * DirectionX[dir], y + dist * DirectionY[dir]) == true)
+            dist--;
+    }
+    if (dist > 0 && UnitWalkToXY(md, x + dist * DirectionX[dir], y + dist * DirectionY[dir]) == true)
+        return GetMobData(md)->WalkPathTime; // unit_get_walkpath_time
+    return 0;
+}
+
 void ROWOWMod::UnitStopWalking(Creature* md)
 {
     // unit_stop_walking: its own path only, leaving any movement the core controls (like a fear) alone
@@ -507,6 +536,8 @@ void ROWOWMod::UnitSetWalkDelay(Creature* md, ROWOWMobData* mob, uint64 tick, in
     // it's held for the delay, and immune to being stopped for double the flinch time
     if (delay <= 0)
         return;
+    if (mob->IsCanEscape == true)
+        return; // Mob needs to escape, don't stop it
     if (UnitCanMove(md, mob, tick) == false || (BattleConfig.DamageWalkDelay & ROWOW_BL_MOB) == 0)
     {
         UnitStopWalking(md);
@@ -559,6 +590,13 @@ void ROWOWMod::UnitAttackTimerSub(Creature* md, ROWOWMobData* mob, uint64 tick)
     // unit_attack_timer_sub for a monster, on WoW's attack timer (set to the monster's attack delay).  (Its timer call runs mob_ai_sub_hard first; the
     // think comes at most MIN_MOBTHINKTIME before this)
     if (mob->AttackTargetID.IsEmpty() == true || md->isAttackReady() == false || md->HasUnitState(UNIT_STATE_CASTING) == true)
+        return;
+
+    // mob_ai_sub_hard_attacktimer: the attack timer runs the AI, whose Berserk state checks its skills exactly when the attack delay ends (attackabletime).
+    // The think of every 100 ms can't see that moment, as the swing below resets the timer in the same update.  A skill takes the swing's place
+    if (mob->SkillState == ROWOW_MSS_BERSERK && MobSkillUse(md, tick, -1) == true)
+        return;
+    if (md->IsAlive() == false)
         return;
     Unit* target = ObjectAccessor::GetUnit(*md, mob->AttackTargetID);
     ROWOWStatus const* sstatus = GetROStatus(md);

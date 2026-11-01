@@ -831,6 +831,8 @@ ROWOWStatus const* ROWOWMod::GetROBaseStatus(Unit const* unit) const
     }
     if (unit->IsCreature() == true)
     {
+        if (ROWOWMobBaseStatus const* baseStatus = unit->CustomData.Get<ROWOWMobBaseStatus>("ROWOWMobBaseStatus")) // md->base_status
+            return &baseStatus->Status;
         auto statusIter = MobStatusesByMobID.find(GetROMobID(unit->ToCreature()));
         return statusIter != MobStatusesByMobID.end() ? &statusIter->second : nullptr;
     }
@@ -840,20 +842,20 @@ ROWOWStatus const* ROWOWMod::GetROBaseStatus(Unit const* unit) const
 int64 ROWOWMod::SkillGetTime(uint16 skillID, uint16 skillLevel) const
 {
     ROWOWSkill const* skill = GetSkill(skillID);
-    return skill != nullptr ? skill->Duration1[ROWOWSkill::GetLevelIndex(skillLevel)] : 0;
+    return skill != nullptr ? ROWOWSkill::GetLevelValue(skill->Duration1, skillLevel) : 0;
 }
 
 int64 ROWOWMod::SkillGetTime2(uint16 skillID, uint16 skillLevel) const
 {
     ROWOWSkill const* skill = GetSkill(skillID);
-    return skill != nullptr ? skill->Duration2[ROWOWSkill::GetLevelIndex(skillLevel)] : 0;
+    return skill != nullptr ? ROWOWSkill::GetLevelValue(skill->Duration2, skillLevel) : 0;
 }
 
 int32 ROWOWMod::SkillGetSplash(uint16 skillID, uint16 skillLevel) const
 {
     // skill_get_splash: a skill level's SplashArea, a negative one being the whole area a unit sees (AREA_SIZE)
     ROWOWSkill const* skill = GetSkill(skillID);
-    int32 splash = skill != nullptr ? skill->SplashArea[ROWOWSkill::GetLevelIndex(skillLevel)] : 0;
+    int32 splash = skill != nullptr ? ROWOWSkill::GetLevelValue(skill->SplashArea, skillLevel) : 0;
     return splash < 0 ? BattleConfig.AreaSize : splash;
 }
 

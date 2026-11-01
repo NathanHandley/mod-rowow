@@ -347,7 +347,7 @@ uint8 ROWOWMod::UnitGetDir(Unit const* unit)
 int32 ROWOWMod::SkillGetUnitLayoutType(uint16 skillID, uint16 skillLevel) const
 {
     ROWOWSkill const* skill = GetSkill(skillID);
-    return skill != nullptr ? skill->UnitLayout[ROWOWSkill::GetLevelIndex(skillLevel)] : 0;
+    return skill != nullptr ? ROWOWSkill::GetLevelValue(skill->UnitLayout, skillLevel) : 0;
 }
 
 ROWOWSkillUnitLayout const* ROWOWMod::SkillGetUnitLayout(uint16 skillID, uint16 skillLevel, Unit const* src, int32 x, int32 y) const
@@ -491,8 +491,8 @@ std::shared_ptr<ROWOWSkillUnitGroup> ROWOWMod::SkillUnitSetting(Unit* src, uint1
         return nullptr;
     Map* map = src->GetMap();
     int32 levelIndex = ROWOWSkill::GetLevelIndex(skillLevel);
-    int64 limit = skill->Duration1[levelIndex]; // skill_get_time3 (no map's skill_duration)
-    int32 range = skill->UnitRange[levelIndex];
+    int64 limit = ROWOWSkill::GetLevelValue(skill->Duration1, skillLevel); // skill_get_time3 (no map's skill_duration)
+    int32 range = ROWOWSkill::GetLevelValue(skill->UnitRange, skillLevel);
     int32 interval = skill->UnitInterval;
     int32 target = skill->UnitTarget;
     ROWOWSkillUnitLayout const* layout = SkillGetUnitLayout(skillID, skillLevel, src, x, y);
@@ -656,6 +656,7 @@ std::shared_ptr<ROWOWSkillUnitGroup> ROWOWMod::SkillUnitSetting(Unit* src, uint1
             val2 = skillLevel * 10; // Status ailment resistance
             break;
         case ROWOW_SKILL_PR_SANCTUARY:
+        case ROWOW_SKILL_NPC_EVILLAND:
             val1 = skillLevel + 3; // The undead and demons it can still hit
             break;
         case ROWOW_SKILL_NJ_KAENSIN:
@@ -668,7 +669,7 @@ std::shared_ptr<ROWOWSkillUnitGroup> ROWOWMod::SkillUnitSetting(Unit* src, uint1
         case ROWOW_SKILL_GS_GROUNDDRIFT:
         {
             // Ground Drift Element is decided when it's placed.
-            int32 ele = skill->Element[ROWOWSkill::GetLevelIndex(skillLevel)];
+            int32 ele = ROWOWSkill::GetLevelValue(skill->Element, skillLevel);
             int32 const element[5] = { ROWOW_ELEMENT_WIND, ROWOW_ELEMENT_DARK, ROWOW_ELEMENT_POISON, ROWOW_ELEMENT_WATER, ROWOW_ELEMENT_FIRE };
             if (ele == ROWOW_ELEMENT_RANDOM)
                 val1 = element[urand(0, 4)]; // Use random from available unit visual?
@@ -1282,7 +1283,7 @@ int32 ROWOWMod::SkillUnitOnPlace(Map* map, ROWOWSkillUnitGroup& group, int32 ind
             int32 i = BattleCheckTarget(bl, bl, ROWOW_BCT_ENEMY);
             if (i > 0)
             {
-                SkillBlown(ss, bl, skill->Knockback[ROWOWSkill::GetLevelIndex(group.SkillLevel)], int8(UnitGetDir(bl)), ROWOW_BLOWN_NONE);
+                SkillBlown(ss, bl, ROWOWSkill::GetLevelValue(skill->Knockback, group.SkillLevel), int8(UnitGetDir(bl)), ROWOW_BLOWN_NONE);
                 break;
             }
             if (sce == nullptr && i <= 0)
@@ -1349,7 +1350,7 @@ int32 ROWOWMod::SkillUnitOnPlace(Map* map, ROWOWSkillUnitGroup& group, int32 ind
                 break;
             if (ss == bl) // Also needed to prevent infinite loop crash.
                 break;
-            SkillBlown(ss, bl, skill->Knockback[ROWOWSkill::GetLevelIndex(group.SkillLevel)], int8(UnitGetDir(bl)), ROWOW_BLOWN_NONE);
+            SkillBlown(ss, bl, ROWOWSkill::GetLevelValue(skill->Knockback, group.SkillLevel), int8(UnitGetDir(bl)), ROWOW_BLOWN_NONE);
             break;
         }
 
@@ -1460,8 +1461,7 @@ int32 ROWOWMod::SkillUnitOnPlaceTimer(Map* map, ROWOWSkillUnitGroup& group, int3
             break;
 
         case ROWOW_UNT_DUMMYSKILL:
-            // A Grand Cross cell hits as many times as its val1 (its caster too), and the unit timer takes the spent cell away.  (The NPC
-            // skills come with the monster skills)
+            // A Grand Cross cell hits as many times as its val1 (its caster too), and the unit timer takes the spent cell away
             if (skillID == ROWOW_SKILL_SG_SUN_WARM || skillID == ROWOW_SKILL_SG_MOON_WARM || skillID == ROWOW_SKILL_SG_STAR_WARM)
             {
                 // SG skills [Komurka]: a player in it loses SP; a monster is knocked back, at 2 SP of the Star Gladiator's a hit.  If target
@@ -1511,6 +1511,39 @@ int32 ROWOWMod::SkillUnitOnPlaceTimer(Map* map, ROWOWSkillUnitGroup& group, int3
             SkillAttack(skill->AttackType, ss, ss, bl, skillID, group.SkillLevel, tick, 0, &unit);
             break;
 
+        case ROWOW_UNT_EVILLAND:
+        {
+            // Will heal demon and undead element monsters, but not players.
+            ROWOWStatus const* tstatus = GetROStatus(bl);
+            if (bl->IsPlayer() == true || (BattleCheckUndead(tstatus->Race, tstatus->DefElement) == false && tstatus->Race != ROWOW_RACE_DEMON))
+            {
+                // Damage enemies
+                if (BattleCheckTargetSkillUnit(group, map, bl, ROWOW_BCT_ENEMY) > 0)
+                    SkillAttack(ROWOW_BF_MISC, ss, ss, bl, skillID, group.SkillLevel, tick, 0, &unit);
+                break;
+            }
+            int32 heal = SkillCalcHeal(ss, bl, skillID, group.SkillLevel, true);
+            if (bl->GetHealth() >= bl->GetMaxHealth())
+                break;
+            if (StatusIsImmune(bl) != 0)
+                heal = 0;
+            StatusHeal(bl, heal, 0, 0, ss, GetSkillSpellID(ROWOW_SKILL_AL_HEAL, 1));
+            break;
+        }
+
+        case ROWOW_UNT_EARTHQUAKE:
+        {
+            // Its hit split among the enemies around the unit (flag's targets, NPC_EARTHQUAKE_FLAG on the first of the unit's hits)
+            group.Val1++; // Hit count
+            int32 unitX = unit.X, unitY = unit.Y, splash = SkillGetSplash(skillID, group.SkillLevel);
+            int32 targets = MapForEachInCellArea(map, ss->GetPhaseMask(), unitX - splash, unitY - splash, unitX + splash, unitY + splash, [this, &group, map](Unit* target)
+            {
+                return BattleCheckTargetSkillUnit(group, map, target, ROWOW_BCT_ENEMY) > 0 ? 1 : 0; // skill_area_sub_count
+            });
+            SkillAttack(skill->AttackType, ss, ss, bl, skillID, group.SkillLevel, tick, targets | (group.Val1 == 1 ? ROWOW_NPC_EARTHQUAKE_FLAG : 0), &unit);
+            break;
+        }
+
         case ROWOW_UNT_SANCTUARY:
         {
             ROWOWStatus const* tstatus = GetROStatus(bl);
@@ -1551,7 +1584,7 @@ int32 ROWOWMod::SkillUnitOnPlaceTimer(Map* map, ROWOWSkillUnitGroup& group, int3
             int32 i = BattleCheckTargetSkillUnit(group, map, bl, ROWOW_BCT_ENEMY);
             if (i > 0)
             {
-                SkillBlown(ss, bl, skill->Knockback[ROWOWSkill::GetLevelIndex(group.SkillLevel)], int8(UnitGetDir(bl)), ROWOW_BLOWN_NONE, &unit);
+                SkillBlown(ss, bl, ROWOWSkill::GetLevelValue(skill->Knockback, group.SkillLevel), int8(UnitGetDir(bl)), ROWOW_BLOWN_NONE, &unit);
                 break;
             }
             if (i <= 0 && GetSCE(bl, ROWOW_SC_BASILICA) == nullptr)
@@ -1572,7 +1605,7 @@ int32 ROWOWMod::SkillUnitOnPlaceTimer(Map* map, ROWOWSkillUnitGroup& group, int3
             int32 blX = 0, blY = 0;
             GetUnitCell(bl, blX, blY);
             int32 srcX = group.Val1 >> 16, srcY = group.Val1 & 0xFFFF;
-            SkillBlown(ss, bl, skill->Knockback[ROWOWSkill::GetLevelIndex(group.SkillLevel)], int8(GetRODirection(float(srcX - blX), float(srcY - blY))),
+            SkillBlown(ss, bl, ROWOWSkill::GetLevelValue(skill->Knockback, group.SkillLevel), int8(GetRODirection(float(srcX - blX), float(srcY - blY))),
                 ROWOW_BLOWN_NONE, &unit);
             group.UnitID = ROWOW_UNT_USED_TRAPS;
             ClifChangeTrapLook(map, group, index, bl);
@@ -1638,7 +1671,7 @@ int32 ROWOWMod::SkillUnitOnPlaceTimer(Map* map, ROWOWSkillUnitGroup& group, int3
             int32 centerX = unit.X, centerY = unit.Y;
             if (group.UnitID == ROWOW_UNT_SANDMAN || group.UnitID == ROWOW_UNT_FREEZINGTRAP)
                 GetUnitCell(bl, centerX, centerY); // These have their effect centered around the unit that triggered the trap
-            if (int32 splashRange = skill->SplashArea[ROWOWSkill::GetLevelIndex(group.SkillLevel)]; splashRange == 0)
+            if (int32 splashRange = ROWOWSkill::GetLevelValue(skill->SplashArea, group.SkillLevel); splashRange == 0)
             {
                 // If no splash range, it only hits the unit that activated the trap
                 if (skill->NK[ROWOW_NK_NODAMAGE] == true)
@@ -1831,6 +1864,9 @@ int32 ROWOWMod::SkillUnitOnPlaceTimer(Map* map, ROWOWSkillUnitGroup& group, int3
             break;
         }
     }
+    if (bl->IsCreature() == true && bl->GetGUID() != group.SrcGUID && GetROMobID(bl->ToCreature()) != 0)
+        if (Unit* ss = ObjectAccessor::GetUnit(*bl, group.SrcGUID))
+            MobSkillEvent(bl->ToCreature(), ss, tick, ROWOW_MSC_SKILLUSED | (int32(skillID) << 16), 0);
     return skillID;
 }
 
@@ -2453,7 +2489,7 @@ int32 ROWOWMod::SkillCheckUnitRange(Unit* bl, int32 x, int32 y, uint16 skillID, 
     ROWOWSkill const* skill = GetSkill(skillID);
     if (skill == nullptr)
         return 0;
-    int32 range = bl->IsPlayer() == true ? skill->UnitRange[ROWOWSkill::GetLevelIndex(skillLevel)] : 0;
+    int32 range = bl->IsPlayer() == true ? ROWOWSkill::GetLevelValue(skill->UnitRange, skillLevel) : 0;
     int32 layoutType = SkillGetUnitLayoutType(skillID, skillLevel);
     if (layoutType == -1 || layoutType > ROWOW_MAX_SQUARE_LAYOUT)
     {
@@ -2529,7 +2565,7 @@ int32 ROWOWMod::SkillCheckUnitRange2(Unit* bl, int32 x, int32 y, uint16 skillID,
                 LOG_ERROR("module.ROWOW", "ROWOWMod::SkillCheckUnitRange2: unsupported layout type {} for skill {}", layoutType, skillID);
                 return 0;
             }
-            range = skill->UnitRange[ROWOWSkill::GetLevelIndex(skillLevel)] + layoutType;
+            range = ROWOWSkill::GetLevelValue(skill->UnitRange, skillLevel) + layoutType;
             break;
         }
     }
@@ -2568,7 +2604,7 @@ bool ROWOWMod::SkillPosMaxcountCheck(Unit* src, int32 x, int32 y, uint16 skillID
             ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_LEVEL);
         return false;
     }
-    int32 maxcount = skill->MaxCount[ROWOWSkill::GetLevelIndex(skillLevel)];
+    int32 maxcount = ROWOWSkill::GetLevelValue(skill->MaxCount, skillLevel);
     if (src->IsPlayer() == true && maxcount > 0) // land_skill_limit: players (and homunculi)
     {
         // unit_skillunit_maxcount: each of the caster's groups of the skill uses up one
@@ -2677,14 +2713,14 @@ int32 ROWOWMod::SkillTrapSplash(Map* map, Unit* bl, ROWOWSkillUnitGroup& group, 
             break;
         case ROWOW_UNT_GROUNDDRIFT_FIRE:
             if (SkillAttack(skill->AttackType, ss, ss, bl, group.SkillID, group.SkillLevel, tick, group.Val1, &unit) != 0)
-                SkillBlown(ss, bl, skill->Knockback[ROWOWSkill::GetLevelIndex(group.SkillLevel)], -1, ROWOW_BLOWN_NONE, &unit);
+                SkillBlown(ss, bl, ROWOWSkill::GetLevelValue(skill->Knockback, group.SkillLevel), -1, ROWOW_BLOWN_NONE, &unit);
             break;
         default:
         {
             int32 splitCount = 0;
             if (skill->NK[ROWOW_NK_SPLASHSPLIT] == true)
             {
-                int32 splashArea = skill->SplashArea[ROWOWSkill::GetLevelIndex(group.SkillLevel)];
+                int32 splashArea = ROWOWSkill::GetLevelValue(skill->SplashArea, group.SkillLevel);
                 splitCount = std::max(1, MapForEachInCellArea(map, bl->GetPhaseMask(), unit.X - splashArea, unit.Y - splashArea, unit.X + splashArea,
                     unit.Y + splashArea, [this, ss](Unit* splashTarget) { return BattleCheckTarget(ss, splashTarget, ROWOW_BCT_ENEMY) > 0 ? 1 : 0; }));
             }

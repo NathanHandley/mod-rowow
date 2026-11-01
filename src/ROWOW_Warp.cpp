@@ -176,7 +176,7 @@ void ROWOWMod::SkillCastendMap(Player* player, uint16 skillID, std::string const
             int32 lv = PCCheckSkill(player, skillID);
             if (lv <= 0)
                 return;
-            if ((maxcount = skill->MaxCount[ROWOWSkill::GetLevelIndex(uint16(lv))]) > 0)
+            if ((maxcount = ROWOWSkill::GetLevelValue(skill->MaxCount, uint16(lv))) > 0)
             {
                 // unit_skillunit_maxcount
                 for (int32 groupID : GetSkillUnitData(player)->SkillUnitGroupIDs)

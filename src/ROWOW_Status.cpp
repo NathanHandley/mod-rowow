@@ -255,6 +255,21 @@ void ROWOWMod::LoadStatusData()
         readValue("monster_active_enable", BattleConfig.MonsterActiveEnable);
         readValue("mob_unlock_time", BattleConfig.MobUnlockTime);
         readValue("mob_respawn_time", BattleConfig.MobRespawnTime);
+        readValue("mob_skill_rate", BattleConfig.MobSkillRate);
+        readValue("mob_skill_delay", BattleConfig.MobSkillDelayRate);
+        readValue("mob_max_skilllvl", BattleConfig.MobMaxSkillLevel);
+        readValue("mob_changetarget_byskill", BattleConfig.MobChangeTargetBySkill);
+        readValue("slaves_inherit_mode", BattleConfig.SlavesInheritMode);
+        readValue("slaves_inherit_speed", BattleConfig.SlavesInheritSpeed);
+        readValue("slave_stick_with_master", BattleConfig.SlaveStickWithMaster);
+        readValue("monster_class_change_full_recover", BattleConfig.MonsterClassChangeRecover);
+        readValue("npc_emotion_behavior", BattleConfig.NpcEmotionBehavior);
+        readValue("mvp_exp_rate", BattleConfig.MvpExpRate);
+        readValue("mvp_to_loot_priority", BattleConfig.MvpToLootPriority);
+        readValue("item_rate_mvp", BattleConfig.ItemRateMvp);
+        readValue("item_drop_mvp_min", BattleConfig.ItemDropMvpMin);
+        readValue("item_drop_mvp_max", BattleConfig.ItemDropMvpMax);
+        readValue("item_drop_mvp_mode", BattleConfig.ItemDropMvpMode);
         readValue("mob_spawn_variance", BattleConfig.MobSpawnVariance);
         readValue("mob_spawn_delay", BattleConfig.MobSpawnDelay);
         readValue("plant_spawn_delay", BattleConfig.PlantSpawnDelay);
@@ -337,6 +352,8 @@ void ROWOWMod::LoadStatusData()
         readValue("bowling_bash_area", BattleConfig.BowlingBashArea);
         readValue("gx_allhit", BattleConfig.GxAllHit);
         readValue("skill_eightpath_same_cell", BattleConfig.SkillEightpathSameCell);
+        readValue("eq_single_target_reflectable", BattleConfig.EqSingleTargetReflectable);
+        readValue("mob_slave_keep_target", BattleConfig.MobSlaveKeepTarget);
         readValue("land_protector_behavior", BattleConfig.LandProtectorBehavior);
         readValue("dispel_song", BattleConfig.DispelSong);
         readValue("combo_delay_rate", BattleConfig.ComboDelayRate);
@@ -1307,17 +1324,18 @@ void ROWOWMod::PCLostExp(Player* player, uint64 baseExp, uint64 jobExp)
     SendROStatusToClient(player);
 }
 
-void ROWOWMod::MobLogDamage(Creature* creature, Unit* attacker, uint32 damage)
+void ROWOWMod::MobLogDamage(Creature* creature, Unit* attacker, uint32 damage, uint32 damageTanked)
 {
     // mob_log_damage: players in the form only (their pets are put away there), a summoned monster's damage counting as its master's.  The
-    // damage counted is what the monster had left to lose
-    if (creature == nullptr || attacker == nullptr || damage == 0 || GetROMobID(creature) == 0)
+    // damage counted is what the monster had left to lose.  damageTanked is what the monster dealt to the player (status_damage's call), which
+    // counts for the MVP
+    if (creature == nullptr || attacker == nullptr || (damage == 0 && damageTanked == 0) || GetROMobID(creature) == 0)
         return;
     Player const* player = BattleGetMaster(attacker)->ToPlayer();
     if (player == nullptr || IsInROForm(player) == false)
         return;
     damage = std::min<uint32>(damage, creature->GetHealth());
-    if (damage == 0)
+    if (damage == 0 && damageTanked == 0)
         return;
 
     ROWOWDamageLog* damageLog = creature->CustomData.GetDefault<ROWOWDamageLog>("ROWOWDamageLog");
@@ -1326,6 +1344,7 @@ void ROWOWMod::MobLogDamage(Creature* creature, Unit* attacker, uint32 damage)
         if (entry.PlayerGUID == player->GetGUID())
         {
             entry.Damage += damage;
+            entry.DamageTanked += damageTanked;
             return;
         }
     }
@@ -1334,6 +1353,7 @@ void ROWOWMod::MobLogDamage(Creature* creature, Unit* attacker, uint32 damage)
     ROWOWDamageLogEntry entry;
     entry.PlayerGUID = player->GetGUID();
     entry.Damage = damage;
+    entry.DamageTanked = damageTanked;
     damageLog->Entries.push_back(entry);
 }
 
@@ -1345,6 +1365,7 @@ void ROWOWMod::MobDeadExp(Creature* creature, Unit* killer)
     ROWOWDamageLog* damageLog = creature->CustomData.Get<ROWOWDamageLog>("ROWOWDamageLog");
     if (damageLog == nullptr || damageLog->Entries.empty() == true)
         return;
+    // Self damage counts as an exp tap (mob_revive's lost HP), never as an attacker's share, which MobDeadAttackerCount and this only skip: it isn't logged
     // Only player-summoned mobs do not give exp. [Skotlex]
     if (ROWOWMobSummon const* summon = creature->CustomData.Get<ROWOWMobSummon>("ROWOWMobSummon"); summon != nullptr && summon->AI != ROWOW_AI_NONE &&
         summon->MasterGUID.IsEmpty() == false)

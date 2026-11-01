@@ -431,6 +431,14 @@ public:
         }
         if (victim->IsCreature() == true)
             ROWOW->MobLogDamage(victim->ToCreature(), attacker, damage);
+
+        // status_damage's mob_log_damage(src, target, 0, dhp): what a monster deals counts for its MVP
+        if (attacker != nullptr && attacker != victim && attacker->IsCreature() == true && victim->IsPlayer() == true)
+            ROWOW->MobLogDamage(attacker->ToCreature(), victim, 0, damage);
+
+        // A monster's death is coming: its dead skills, and the revives that take the death away
+        if (victim->IsCreature() == true && damage >= victim->GetHealth() && ROWOW->GetROMobID(victim->ToCreature()) != 0)
+            ROWOW->MobBeforeDeath(victim->ToCreature(), attacker, damage);
     }
 
     void OnUnitDeath(Unit* unit, Unit* killer) override
@@ -466,8 +474,7 @@ public:
         }
         if (unit->IsCreature() == true)
         {
-            ROWOW->MobDeadFindingOre(unit->ToCreature());
-            ROWOW->MobDeadExp(unit->ToCreature(), killer);
+            ROWOW->MobDead(unit->ToCreature(), killer);
         }
         else if (unit->IsPlayer() == true)
             ROWOW->PCDeadPenalty(unit->ToPlayer());
@@ -616,6 +623,14 @@ public:
             { "mob",      HandleROMobCommand,    SEC_GAMEMASTER, Console::No },
             { "mobs",     HandleROMobsCommand,   SEC_GAMEMASTER, Console::No },
             { "mobdump",  HandleROMobDumpCommand, SEC_GAMEMASTER, Console::Yes },
+            { "mobskilldump", HandleROMobSkillDumpCommand, SEC_GAMEMASTER, Console::Yes },
+            { "mobtrace", HandleROMobTraceCommand, SEC_GAMEMASTER, Console::Yes },
+            { "mobwound", HandleROMobWoundCommand, SEC_GAMEMASTER, Console::No },
+            { "mobhit", HandleROMobHitCommand, SEC_GAMEMASTER, Console::No },
+            { "mobskillimpl", HandleROMobSkillImplCommand, SEC_GAMEMASTER, Console::Yes },
+            { "mobskilldirect", HandleROMobSkillDirectCommand, SEC_GAMEMASTER, Console::No },
+            { "mobskillrun", HandleROMobSkillRunCommand, SEC_GAMEMASTER, Console::No },
+            { "mobbattle", HandleROMobBattleCommand, SEC_GAMEMASTER, Console::No },
             { "setcart",  HandleROSetCartCommand, SEC_GAMEMASTER, Console::No },
             { "setriding", HandleROSetRidingCommand, SEC_GAMEMASTER, Console::No },
             { "setfalcon", HandleROSetFalconCommand, SEC_GAMEMASTER, Console::No },
@@ -1421,6 +1436,220 @@ public:
         return true;
     }
 
+    static bool HandleROMobTraceCommand(ChatHandler* handler, std::string mode, Optional<std::string> filePath)
+    {
+        // `.ro mobtrace on`, `off`, `dump <file>`: counts each skill row monsters use, for sampling which of them run
+        if (mode == "dump" && filePath.has_value() == true)
+        {
+            if (ROWOW->WriteMobSkillTrace(*filePath) == false)
+                return false;
+        }
+        else
+            ROWOW->SetMobSkillTrace(mode == "on");
+        handler->PSendSysMessage("Monster skill trace: {}", mode);
+        return true;
+    }
+
+    static bool HandleROMobHitCommand(ChatHandler* handler, Optional<uint32> isLong)
+    {
+        // What a normal attack that connects tells the selected RO monster (battle_damage's events), from any distance, melee or (1) long range
+        Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
+        Creature* creature = handler->getSelectedCreature();
+        if (player == nullptr || creature == nullptr || ROWOW->GetROMobID(creature) == 0)
+            return false;
+        ROWOW->MobBattleAttacked(player, creature, 1, 1, ROWOWMod::GetTick(), 0, true, ROWOW_BF_WEAPON | ROWOW_BF_NORMAL | (isLong.value_or(0) != 0 ? ROWOW_BF_LONG : ROWOW_BF_SHORT), 0);
+        return true;
+    }
+
+    static bool HandleROMobWoundCommand(ChatHandler* handler, uint32 percent, Optional<uint32> range)
+    {
+        // Every RO monster within range cells of you down to percent of its HP and turned on you, for the HP conditions of monster skills, or at 0 the
+        // temporary ones gone
+        Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
+        if (player == nullptr)
+            return false;
+        int32 count = ROWOW->MapForEachInRange(player, int32(range.value_or(20)), [percent, player](Unit* bl)
+        {
+            Creature* md = bl->ToCreature();
+            if (md == nullptr || md->IsAlive() == false || ROWOW->GetROMobID(md) == 0)
+                return 0;
+            if (percent == 0) // 0 clears the temporary ones instead
+            {
+                if (md->IsSummon() == true)
+                    md->DespawnOrUnsummon();
+                return md->IsSummon() == true ? 1 : 0;
+            }
+            md->SetHealth(std::max<uint32>(1, uint32(uint64(md->GetMaxHealth()) * percent / 100)));
+            ROWOW->MobTarget(md, player);
+            return 1;
+        });
+        handler->PSendSysMessage("{} monsters at {}%", count, percent);
+        return true;
+    }
+
+    static bool HandleROMobSkillDumpCommand(ChatHandler* handler, std::string filePath)
+    {
+        // Every monster's skill rows as loaded, in the format of the oracle's @oraclemobskills
+        if (ROWOW->WriteMobSkillDump(filePath) == false)
+        {
+            handler->SendSysMessage("Can't write that file.");
+            return false;
+        }
+        handler->PSendSysMessage("Wrote {}", filePath);
+        return true;
+    }
+
+    static bool HandleROMobSkillImplCommand(ChatHandler* handler)
+    {
+        // The skills of the mob skill table that no skill class answers
+        uint32 skillCount = 0;
+        std::vector<std::string> skillNames = ROWOW->GetMobSkillsWithoutImpl(skillCount);
+        handler->PSendSysMessage("{} skills in the mob skill table, {} with no skill class", skillCount, skillNames.size());
+        for (std::string const& skillName : skillNames)
+            handler->SendSysMessage(skillName);
+        return true;
+    }
+
+    // The skill's id from its skill_db name or number, or 0
+    static uint16 GetSkillIDByNameOrNumber(std::string const& skillName)
+    {
+        uint16 skillID = ROWOW->GetSkillIDByName(skillName);
+        if (skillID == 0 && std::all_of(skillName.begin(), skillName.end(), ::isdigit) == true)
+            skillID = uint16(strtoul(skillName.c_str(), nullptr, 10));
+        return ROWOW->GetSkill(skillID) != nullptr ? skillID : uint16(0);
+    }
+
+    // The skill's end from md (skill_castend_id's dispatch, no spell, no checks) at the target, or at the target's spot for a ground skill, with the nth row
+    // of md's skill list that has the skill as the row in use: what a monster's skill does past its WoW spell
+    static void MobSkillDirect(Creature* md, Unit* target, uint16 skillID, uint16 skillLevel, uint32 rowNumber = 1)
+    {
+        ROWOWSkill const* skill = ROWOW->GetSkill(skillID);
+        ROWOWMobData* mob = ROWOW->GetMobData(md);
+        std::vector<ROWOWMobSkill> const* skills = ROWOW->GetMobSkills(ROWOW->GetROMobID(md));
+        mob->SkillIdx = -1;
+        for (size_t i = 0; skills != nullptr && i < skills->size() && rowNumber > 0; i++)
+        {
+            if ((*skills)[i].SkillID == skillID)
+            {
+                mob->SkillIdx = int32(i);
+                rowNumber--;
+            }
+        }
+        ROWOWMobSkill const* ms = ROWOW->GetMobSkillInUse(md);
+        uint64 tick = ROWOWMod::GetTick();
+        uint8 castType = ROWOW->SkillGetCastType(skillID);
+        bool isSelf = (skill->Inf & ROWOW_INF_SELF_SKILL) != 0 || (ms != nullptr && ms->Target == ROWOW_MST_SELF);
+        if (castType == ROWOW_CAST_GROUND)
+        {
+            int32 x = 0, y = 0;
+            ROWOW->GetUnitCell(target, x, y);
+            ROWOW->GetSkillUnitData(md)->SkillZ = target->GetPositionZ();
+            ROWOW->SkillCastendPos2(md, x, y, skillID, skillLevel, tick, 0);
+        }
+        else if (castType == ROWOW_CAST_NODAMAGE)
+            ROWOW->SkillCastendNoDamageID(md, isSelf == true ? md : target, skillID, skillLevel, tick, 0);
+        else
+            ROWOW->SkillCastendDamageID(md, target, skillID, skillLevel, tick, 0);
+        if (md->IsAlive() == true)
+            mob->SkillIdx = -1;
+    }
+
+    static bool HandleROMobSkillDirectCommand(ChatHandler* handler, std::string skillName, uint32 skillLevel, Optional<uint32> rowNumber)
+    {
+        // Has the selected RO monster use a skill at the player with no WoW spell, its level as a row gives it (the skill's nth row of its list in use, the
+        // first by default): for the skills with no shell yet.  Prints what it left on both
+        Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
+        Creature* creature = handler->getSelectedCreature();
+        uint16 skillID = GetSkillIDByNameOrNumber(skillName);
+        if (player == nullptr || creature == nullptr || ROWOW->GetROMobID(creature) == 0 || ROWOW->GetROStatus(creature) == nullptr || skillID == 0 || skillLevel == 0)
+        {
+            handler->SendSysMessage("Select an RO monster and name an RO skill and level.");
+            return false;
+        }
+        MobSkillDirect(creature, player, skillID, uint16(skillLevel), rowNumber.value_or(1));
+        auto statuses = [](Unit const* unit)
+        {
+            std::string list;
+            if (ROWOWStatusChange const* sc = ROWOW->GetStatusChange(unit))
+                for (auto const& entry : sc->EntriesByType)
+                    list += fmt::format("{},", entry.first);
+            return list;
+        };
+        int32 x = 0, y = 0;
+        ROWOW->GetUnitCell(creature, x, y);
+        BattlePrint(handler, fmt::format("direct {} {}: {} (mob {}) hp {}/{} cell {},{} mode {:#x} slaves {} state {} sc [{}], player hp {}/{} sp {} sc [{}]", ROWOW->GetSkill(skillID)->Name, skillLevel,
+            creature->GetName(), ROWOW->GetROMobID(creature), creature->GetHealth(), creature->GetMaxHealth(), x, y, ROWOW->GetROStatus(creature) != nullptr ? ROWOW->GetROStatus(creature)->Mode : 0,
+            ROWOW->MobCountSlave(creature), uint32(ROWOW->GetMobData(creature)->SkillState), statuses(creature), player->GetHealth(), player->GetMaxHealth(), player->GetPower(POWER_MANA), statuses(player)));
+        return true;
+    }
+
+    static bool HandleROMobSkillRunCommand(ChatHandler* handler, Optional<uint32> firstSkillID, Optional<uint32> lastSkillID)
+    {
+        // Every skill of the mob skill table (or those from first to last), at its first row's level, from a temporary monster of that row next to the player
+        // at the player: the check that no skill class assumes a player.  What a skill does is left to the world (a level 1 character can die of it)
+        Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
+        ROWOWDataTable const* skillTable = ROWOW->GetDataTable("mod_rowow_db_mob_skill");
+        if (player == nullptr || ROWOW->IsInROForm(player) == false || skillTable == nullptr)
+        {
+            handler->SendSysMessage("In the Ragnarok Online world, with the mob skill table loaded.");
+            return false;
+        }
+        int32 skillColumnIndex = skillTable->GetColumnIndex("SkillID");
+        int32 levelColumnIndex = skillTable->GetColumnIndex("SkillLevel");
+        int32 mobColumnIndex = skillTable->GetColumnIndex("MobID");
+        std::map<uint16, size_t> firstRowBySkillID;
+        for (size_t rowIndex = 0; rowIndex < skillTable->Rows.size(); rowIndex++)
+            if (ROWOW->GetMobCreatureEntry(uint32(skillTable->GetInt(rowIndex, mobColumnIndex, 0))) != 0)
+                firstRowBySkillID.emplace(uint16(skillTable->GetInt(rowIndex, skillColumnIndex, 0)), rowIndex);
+        int32 x = 0, y = 0;
+        ROWOW->GetUnitCell(player, x, y);
+        uint32 ran = 0, noMonster = 0;
+        for (auto const& firstRow : firstRowBySkillID)
+        {
+            if (firstRow.first < firstSkillID.value_or(0) || firstRow.first > lastSkillID.value_or(0xFFFF) || ROWOW->GetSkill(firstRow.first) == nullptr)
+                continue;
+            uint32 mobID = uint32(skillTable->GetInt(firstRow.second, mobColumnIndex, 0));
+            uint16 level = uint16(std::clamp<int64>(skillTable->GetInt(firstRow.second, levelColumnIndex, 1), 1, ROWOW->BattleConfig.MobMaxSkillLevel));
+            Creature* md = ROWOW->MobOnceSpawnSub(player, x, y, mobID, ROWOW_AI_NONE, 30000);
+            if (md == nullptr)
+            {
+                noMonster++;
+                continue;
+            }
+            LOG_INFO("module.ROWOW", ".ro mobskillrun: {} {} from {}", ROWOW->GetSkill(firstRow.first)->Name, level, mobID);
+            MobSkillDirect(md, player, firstRow.first, level);
+            ran++;
+        }
+        handler->PSendSysMessage("Ran {} skills, {} with no monster to spawn", ran, noMonster);
+        return true;
+    }
+
+    static bool HandleROMobBattleCommand(ChatHandler* handler, uint32 swings, std::string skillName, uint32 skillLevel, Optional<int32> mflag)
+    {
+        // Works out the selected RO monster's skill on the player without dealing it, the level as a row gives it (past the skill's MaxLevel too), and prints
+        // the totals of the rAthena oracle's @oraclemobdmg.  mflag is battle_calc_attack's flag (a split skill's targets)
+        Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
+        Creature* creature = handler->getSelectedCreature();
+        uint16 skillID = GetSkillIDByNameOrNumber(skillName);
+        if (player == nullptr || ROWOW->IsInROForm(player) == false || creature == nullptr || ROWOW->GetROStatus(creature) == nullptr || skillID == 0 || skillLevel == 0)
+        {
+            handler->SendSysMessage("Select an RO monster, in the Ragnarok Online world, and name an RO skill and level.");
+            return false;
+        }
+        ROWOWSkill const* skill = ROWOW->GetSkill(skillID);
+        ROWOWStatus const& pc = *ROWOW->GetROStatus(player);
+        ROWOWStatus const& mob = *ROWOW->GetROStatus(creature);
+        BattlePrint(handler, fmt::format("pc_status maxhp={} maxsp={} hp={} sp={} def={} def2={} mdef={} mdef2={} flee={} flee2={} def_ele={} ele_lv={} race={} size={}", pc.MaxHP, pc.MaxSP,
+            player->GetHealth(), player->GetPower(POWER_MANA), pc.Def, pc.Def2, pc.MDef, pc.MDef2, pc.Flee, pc.Flee2, pc.DefElement, pc.ElementLevel, pc.Race, pc.Size));
+        BattlePrint(handler, fmt::format("mob_status str={} agi={} vit={} int={} dex={} luk={} maxhp={} watk={} watk2={} batk={} matk_min={} matk_max={} hit={} lv={}", mob.Stats[0], mob.Stats[1],
+            mob.Stats[2], mob.Stats[3], mob.Stats[4], mob.Stats[5], mob.MaxHP, mob.WeaponAttack, mob.WeaponRefineAttack, mob.BaseAttack, mob.MagicAttackMin, mob.MagicAttackMax, mob.Hit, mob.Level));
+        BattlePrint(handler, fmt::format("skill id={} lv={} type={} ele={}", skillID, skillLevel, skill->AttackType, ROWOWSkill::GetLevelValue(skill->Element, uint16(skillLevel))));
+        if (skill->AttackType == 0)
+            return true;
+        RunBattleSwings(handler, "mobskill", std::clamp<uint32>(swings, 1, 1000000), creature, player, skill->AttackType, skillID, uint16(skillLevel), mflag.value_or(0));
+        return true;
+    }
+
     static bool HandleROMobCastCommand(ChatHandler* handler, std::string skillName, Optional<uint32> skillLevel)
     {
         // Has the selected RO monster cast a skill (its skill_db name or id) at the player, as its spell with its cast time (a ground skill at
@@ -1511,6 +1740,8 @@ public:
         }
         ROWOW->PCSkill(player, skillID, uint16(std::min<uint32>(level, skill->MaxLevel)));
         handler->PSendSysMessage("{} now has {} ({}) at level {}.", player->GetName(), skill->Description, skill->Name, std::min<uint32>(level, skill->MaxLevel));
+        if (level > 0 && ROWOW->GetIdentity(player)->TreeSkillIDs.find(skillID) == ROWOW->GetIdentity(player)->TreeSkillIDs.end())
+            handler->SendSysMessage("It isn't on this job's tree, or the skills it needs aren't learned (pc_calc_skilltree), so it stays off the spellbook.");
         return true;
     }
 
@@ -1880,6 +2111,71 @@ public:
         return true;
     }
 
+    // A line of `.ro battle` or `.ro mobbattle`, to the GM and the server log
+    static void BattlePrint(ChatHandler* handler, std::string const& line)
+    {
+        handler->SendSysMessage(line);
+        LOG_INFO("module.ROWOW", ".ro battle: {}", line);
+    }
+
+    // The totals of swingCount evaluations of battle_calc_attack, as the oracle's oracle_dmg_print
+    static void RunBattleSwings(ChatHandler* handler, char const* label, uint32 swingCount, Unit* src, Unit* target, int32 attackType, uint16 skillID, uint16 skillLevel, int32 flag,
+        std::function<void()> const& beforeSwing = nullptr)
+    {
+        uint32 landed = 0, flee = 0, lucky = 0, otherMiss = 0, crit = 0, multi = 0;
+        uint64 total = 0, normalTotal = 0, critTotal = 0;
+        int64 normalMin = std::numeric_limits<int64>::max(), normalMax = 0, critMin = std::numeric_limits<int64>::max(), critMax = 0;
+        int32 divMin = std::numeric_limits<int32>::max(), divMax = 0;
+        for (uint32 swing = 0; swing < swingCount; swing++)
+        {
+            if (beforeSwing != nullptr)
+                beforeSwing();
+            ROWOWDamage d = ROWOW->BattleCalcAttack(attackType, src, target, skillID, skillLevel, flag);
+            int64 damage = d.Damage + d.Damage2;
+            if (d.DmgLv == ROWOW_ATK_LUCKY || d.Type == ROWOW_DMG_LUCY_DODGE)
+            {
+                lucky++;
+                continue;
+            }
+            if (d.DmgLv == ROWOW_ATK_FLEE)
+            {
+                flee++;
+                continue;
+            }
+            if (damage < 1)
+            {
+                otherMiss++;
+                continue;
+            }
+            landed++;
+            total += uint64(damage);
+            divMin = std::min<int32>(divMin, std::abs(d.Div));
+            divMax = std::max<int32>(divMax, std::abs(d.Div));
+            if (d.Type == ROWOW_DMG_MULTI_HIT)
+                multi++;
+            if (d.Type == ROWOW_DMG_CRITICAL)
+            {
+                crit++;
+                critTotal += uint64(damage);
+                critMin = std::min(critMin, damage);
+                critMax = std::max(critMax, damage);
+            }
+            else
+            {
+                normalTotal += uint64(damage);
+                normalMin = std::min(normalMin, damage);
+                normalMax = std::max(normalMax, damage);
+            }
+        }
+        uint32 normalCount = landed - std::min(landed, crit);
+        BattlePrint(handler, fmt::format("{} n={} landed={} flee={} lucky={} othermiss={} crit={} multi={} hit_pct={:.2f} crit_pct={:.2f} lucky_pct={:.2f} avg_landed={:.3f} div={}-{}",
+            label, swingCount, landed, flee, lucky, otherMiss, crit, multi, 100.0 * landed / swingCount, 100.0 * crit / swingCount, 100.0 * lucky / swingCount,
+            landed != 0 ? double(total) / landed : 0.0, landed != 0 ? divMin : 0, divMax));
+        BattlePrint(handler, fmt::format("{}_normal count={} min={} max={} avg={:.3f} crit_count={} crit_min={} crit_max={} crit_avg={:.3f}", label, normalCount,
+            normalCount != 0 ? normalMin : 0, normalMax, normalCount != 0 ? double(normalTotal) / normalCount : 0.0, crit, crit != 0 ? critMin : 0, critMax,
+            crit != 0 ? double(critTotal) / crit : 0.0));
+    }
+
     static bool HandleROBattleCommand(ChatHandler* handler, Optional<uint32> swings, Optional<std::string> skillName, Optional<uint32> skillLevel,
         Optional<std::string> mobStatusName)
     {
@@ -1897,9 +2193,7 @@ public:
         }
         auto print = [handler](std::string_view format, auto&&... args)
         {
-            std::string line = fmt::format(fmt::runtime(format), std::forward<decltype(args)>(args)...);
-            handler->SendSysMessage(line);
-            LOG_INFO("module.ROWOW", ".ro battle: {}", line);
+            BattlePrint(handler, fmt::format(fmt::runtime(format), std::forward<decltype(args)>(args)...));
         };
         uint16 skillID = 0;
         if (skillName.has_value() == true)
@@ -1932,61 +2226,10 @@ public:
             mobStatus.Critical, mobStatus.DefElement, mobStatus.ElementLevel, mobStatus.Race, mobStatus.Size, mobStatus.Class, mobStatus.AttackMotion,
             mobStatus.AttackDelay, mobStatus.DamageMotion);
         print("mob_speed speed={} batk={} mode={}", mobStatus.Speed, mobStatus.BaseAttack, mobStatus.Mode);
-        auto runSwings = [print, swingCount](char const* label, Unit* src, Unit* target, int32 attackType, uint16 swingSkillID, uint16 swingSkillLevel,
+        auto runSwings = [handler, swingCount](char const* label, Unit* src, Unit* target, int32 attackType, uint16 swingSkillID, uint16 swingSkillLevel,
             std::function<void()> const& beforeSwing = nullptr)
         {
-            uint32 landed = 0, flee = 0, lucky = 0, otherMiss = 0, crit = 0, multi = 0;
-            uint64 total = 0, normalTotal = 0, critTotal = 0;
-            int64 normalMin = std::numeric_limits<int64>::max(), normalMax = 0, critMin = std::numeric_limits<int64>::max(), critMax = 0;
-            int32 divMin = std::numeric_limits<int32>::max(), divMax = 0;
-            for (uint32 swing = 0; swing < swingCount; swing++)
-            {
-                if (beforeSwing != nullptr)
-                    beforeSwing();
-                ROWOWDamage d = ROWOW->BattleCalcAttack(attackType, src, target, swingSkillID, swingSkillLevel, 0);
-                int64 damage = d.Damage + d.Damage2;
-                if (d.DmgLv == ROWOW_ATK_LUCKY || d.Type == ROWOW_DMG_LUCY_DODGE)
-                {
-                    lucky++;
-                    continue;
-                }
-                if (d.DmgLv == ROWOW_ATK_FLEE)
-                {
-                    flee++;
-                    continue;
-                }
-                if (damage < 1)
-                {
-                    otherMiss++;
-                    continue;
-                }
-                landed++;
-                total += uint64(damage);
-                divMin = std::min<int32>(divMin, std::abs(d.Div));
-                divMax = std::max<int32>(divMax, std::abs(d.Div));
-                if (d.Type == ROWOW_DMG_MULTI_HIT)
-                    multi++;
-                if (d.Type == ROWOW_DMG_CRITICAL)
-                {
-                    crit++;
-                    critTotal += uint64(damage);
-                    critMin = std::min(critMin, damage);
-                    critMax = std::max(critMax, damage);
-                }
-                else
-                {
-                    normalTotal += uint64(damage);
-                    normalMin = std::min(normalMin, damage);
-                    normalMax = std::max(normalMax, damage);
-                }
-            }
-            uint32 normalCount = landed - std::min(landed, crit);
-            print("{} n={} landed={} flee={} lucky={} othermiss={} crit={} multi={} hit_pct={:.2f} crit_pct={:.2f} lucky_pct={:.2f} avg_landed={:.3f} div={}-{}",
-                label, swingCount, landed, flee, lucky, otherMiss, crit, multi, 100.0 * landed / swingCount, 100.0 * crit / swingCount, 100.0 * lucky / swingCount,
-                landed != 0 ? double(total) / landed : 0.0, landed != 0 ? divMin : 0, divMax);
-            print("{}_normal count={} min={} max={} avg={:.3f} crit_count={} crit_min={} crit_max={} crit_avg={:.3f}", label, normalCount,
-                normalCount != 0 ? normalMin : 0, normalMax, normalCount != 0 ? double(normalTotal) / normalCount : 0.0, crit, crit != 0 ? critMin : 0, critMax,
-                crit != 0 ? double(critTotal) / crit : 0.0);
+            RunBattleSwings(handler, label, swingCount, src, target, attackType, swingSkillID, swingSkillLevel, 0, beforeSwing);
         };
         runSwings("pc2mob", player, creature, ROWOW_BF_WEAPON, 0, 0);
         runSwings("mob2pc", creature, player, ROWOW_BF_WEAPON, 0, 0);

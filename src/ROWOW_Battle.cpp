@@ -118,9 +118,6 @@ namespace
         WEAPON_HIT_SOUND_RIFLE = 7,
     };
 
-    // NPC_EARTHQUAKE_FLAG: Earthquake's damage flag, which Dodge and Kaupe let through
-    constexpr int32 NpcEarthquakeFlag = 0x800;
-
     // DAMAGE_DIV_FIX
     void DamageDivFix(int64& damage, int16& div)
     {
@@ -695,7 +692,7 @@ uint8 ROWOWMod::BattleWeaponAttack(Unit* src, Unit* target, ROWOWDamage& wdOut)
         ROWOWMobData const* tmob = GetMobData(target->ToCreature());
         bool isNormAttacked = tmob->SkillState == ROWOW_MSS_BERSERK && tmob->TargetID != src->GetGUID() &&
             ((BattleConfig.MobAI & 0x4) != 0 || CheckDistanceBL(src, target, tstatus->Range + 1) == true);
-        MobBattleAttacked(src, target, wdOut.Damage + wdOut.Damage2, wdOut.Div, tick, wdOut.AMotion, isNormAttacked);
+        MobBattleAttacked(src, target, wdOut.Damage + wdOut.Damage2, wdOut.Div, tick, wdOut.AMotion, isNormAttacked, wdOut.Flag, 0);
     }
 
     // battle_delay_damage's additional effects: WoW deals the swing right after this, and they follow it in the target's update (where the
@@ -835,13 +832,12 @@ ROWOWDamage ROWOWMod::InitializeWeaponData(Unit const* src, Unit const* target, 
     ROWOWStatus const* sstatus = GetROStatus(src);
     ROWOWStatus const* tstatus = GetROStatus(target);
     ROWOWSkill const* skill = GetSkill(skillID);
-    int32 levelIndex = ROWOWSkill::GetLevelIndex(skillLevel);
     ROWOWDamage wd;
     wd.Type = ROWOW_DMG_NORMAL; // Normal attack
-    wd.Div = int16(skillID != 0 && skill != nullptr ? skill->HitCount[levelIndex] : 1);
+    wd.Div = int16(skillID != 0 && skill != nullptr ? ROWOWSkill::GetLevelValue(skill->HitCount, skillLevel) : 1);
     wd.AMotion = (skill != nullptr && (skill->Inf & ROWOW_INF_GROUND_SKILL) != 0) ? 0 : sstatus->AttackMotion; // Amotion should be 0 for ground skills.
     wd.DMotion = tstatus->DamageMotion;
-    wd.BlewCount = skill != nullptr ? skill->Knockback[levelIndex] : 0;
+    wd.BlewCount = skill != nullptr ? ROWOWSkill::GetLevelValue(skill->Knockback, skillLevel) : 0;
     wd.MiscFlag = wflag;
     wd.Flag = ROWOW_BF_WEAPON; // Initial Flag
     wd.Flag |= (skillID != 0 || wd.MiscFlag != 0) ? ROWOW_BF_SKILL : ROWOW_BF_NORMAL; // Baphomet card's splash damage is counted as a skill. [Inkfish]
@@ -1208,17 +1204,16 @@ ROWOWDamage ROWOWMod::BattleCalcMagicAttack(Unit* src, Unit* target, uint16 skil
         ad.DmgLv = ROWOW_ATK_NONE;
         return ad;
     }
-    int32 levelIndex = ROWOWSkill::GetLevelIndex(skillLevel);
     Player* sd = src->ToPlayer();
     Player* tsd = target->ToPlayer();
 
     // Initial Values
     // Set to 1 because magic damage on plants is 1 per hit; if target is not a plant this gets reinitialized to 0 later
     ad.Damage = 1;
-    ad.Div = int16(skill->HitCount[levelIndex]);
+    ad.Div = int16(ROWOWSkill::GetLevelValue(skill->HitCount, skillLevel));
     ad.AMotion = (skill->Inf & ROWOW_INF_GROUND_SKILL) != 0 ? 0 : sstatus->AttackMotion; // Amotion should be 0 for ground skills.
     ad.DMotion = tstatus->DamageMotion;
-    ad.BlewCount = skill->Knockback[levelIndex];
+    ad.BlewCount = ROWOWSkill::GetLevelValue(skill->Knockback, skillLevel);
     ad.Flag = ROWOW_BF_MAGIC | ROWOW_BF_SKILL;
     ad.MiscFlag = mflag;
     ad.DmgLv = ROWOW_ATK_DEF;
@@ -1249,8 +1244,7 @@ ROWOWDamage ROWOWMod::BattleCalcMagicAttack(Unit* src, Unit* target, uint16 skil
         // Damage was set to 1 to simulate plant damage; if not plant, need to reinitialize damage with 0
         ad.Damage = 0;
 
-        // Calc base damage according to skill.  (The monster skills with their own base damage, Earthquake and the like, come with the
-        // monster skills, R10)
+        // Calc base damage according to skill
         int32 i = 0;
         switch (skillID)
         {
@@ -1279,6 +1273,24 @@ ROWOWDamage ROWOWMod::BattleCalcMagicAttack(Unit* src, Unit* target, uint16 skil
                 break;
             case ROWOW_SKILL_PF_SOULBURN:
                 ad.Damage = int64(target->GetPower(POWER_MANA)) * 2;
+                break;
+            case ROWOW_SKILL_NPC_EARTHQUAKE:
+                if ((mflag & ROWOW_NPC_EARTHQUAKE_FLAG) != 0)
+                {
+                    ad.Flag |= ROWOW_NPC_EARTHQUAKE_FLAG; // Pass flag to battle_calc_damage
+                    mflag &= ~ROWOW_NPC_EARTHQUAKE_FLAG; // Remove before NK_SPLASHSPLIT check
+                }
+                if (sd != nullptr)
+                    ad.Damage = sstatus->BaseAttack + sstatus->WeaponAttack;
+                else
+                {
+                    ad.Damage = BattleCalcBaseDamage(src, *sstatus, false, tstatus->Size, 0);
+                    if (ROWOWStatusChange const* sc = GetStatusChange(static_cast<Unit const*>(src)); sc != nullptr && sc->IsEmpty() == false)
+                        ad.Damage = ad.Damage * BattleGetAtkPercent(src, skillID, *sc) / 100; // MATK_RATE
+                }
+                ad.Damage = ad.Damage * (200 + 100 * skillLevel + 100 * (skillLevel / 2) + (skillLevel > 4 ? 100 : 0)) / 100; // MATK_RATE
+                if (nk[ROWOW_NK_SPLASHSPLIT] == true && mflag > 1)
+                    ad.Damage /= mflag;
                 break;
             default:
             {
@@ -1421,8 +1433,8 @@ ROWOWDamage ROWOWMod::BattleCalcMiscAttack(Unit* src, Unit* target, uint16 skill
     // Some initial values
     md.AMotion = (skill->Inf & ROWOW_INF_GROUND_SKILL) != 0 ? 0 : sstatus->AttackMotion;
     md.DMotion = tstatus->DamageMotion;
-    md.Div = int16(skill->HitCount[levelIndex]);
-    md.BlewCount = skill->Knockback[levelIndex];
+    md.Div = int16(ROWOWSkill::GetLevelValue(skill->HitCount, skillLevel));
+    md.BlewCount = ROWOWSkill::GetLevelValue(skill->Knockback, skillLevel);
     md.DmgLv = ROWOW_ATK_DEF;
     md.Flag = ROWOW_BF_MISC | ROWOW_BF_SKILL;
     md.MiscFlag = mflag;
@@ -1438,7 +1450,7 @@ ROWOWDamage ROWOWMod::BattleCalcMiscAttack(Unit* src, Unit* target, uint16 skill
     if (ROWOWSkillImpl const* impl = GetSkillImpl(skillID))
         impl->ModifyDamageData(md, *src, *target, skillLevel);
 
-    // (The monster skills, the third jobs' and the homunculi's come with them)
+    // (The third jobs' and the homunculi's come with them)
     switch (skillID)
     {
         case ROWOW_SKILL_TF_THROWSTONE:
@@ -1466,7 +1478,7 @@ ROWOWDamage ROWOWMod::BattleCalcMiscAttack(Unit* src, Unit* target, uint16 skill
             {
                 // Div fix of Blitzbeat (DAMAGE_DIV_FIX2)
                 ROWOWSkill const* blitzBeat = GetSkill(ROWOW_SKILL_HT_BLITZBEAT);
-                int32 blitzHits = blitzBeat != nullptr ? blitzBeat->HitCount[ROWOWSkill::GetLevelIndex(5)] : 1;
+                int32 blitzHits = blitzBeat != nullptr ? ROWOWSkill::GetLevelValue(blitzBeat->HitCount, 5) : 1;
                 if (blitzHits > 1)
                     md.Damage *= blitzHits;
                 // Falcon Assault Modifier
@@ -1480,6 +1492,12 @@ ROWOWDamage ROWOWMod::BattleCalcMiscAttack(Unit* src, Unit* target, uint16 skill
             break;
         case ROWOW_SKILL_NPC_SELFDESTRUCTION:
             md.Damage = src->GetHealth();
+            break;
+        case ROWOW_SKILL_NPC_SMOKING:
+            md.Damage = 3;
+            break;
+        case ROWOW_SKILL_NPC_EVILLAND:
+            md.Damage = SkillCalcHeal(src, target, skillID, skillLevel, false);
             break;
         case ROWOW_SKILL_ASC_BREAKER:
             md.Damage = 500 + int32(urand(0, 499)) + 5 * skillLevel * sstatus->Stats[ROWOW_STAT_INT];
@@ -1875,7 +1893,7 @@ int32 ROWOWMod::BattleGetWeaponElement(ROWOWDamage const& wd, Unit const* src, U
     // overrides.  (There are no spirit charms in pre-renewal jobs)
     ROWOWStatus const* sstatus = GetROStatus(src);
     ROWOWSkill const* skill = GetSkill(skillID);
-    int32 element = skill != nullptr ? skill->Element[ROWOWSkill::GetLevelIndex(skillLevel)] : ROWOW_ELEMENT_NEUTRAL;
+    int32 element = skill != nullptr ? ROWOWSkill::GetLevelValue(skill->Element, skillLevel) : ROWOW_ELEMENT_NEUTRAL;
 
     // Take weapon's element
     if (skillID == 0 || element == ROWOW_ELEMENT_WEAPON)
@@ -1903,7 +1921,7 @@ int32 ROWOWMod::BattleGetMagicElement(ROWOWDamage const& d, Unit const* src, Uni
     // battle_get_magic_element
     ROWOWStatus const* sstatus = GetROStatus(src);
     ROWOWSkill const* skill = GetSkill(skillID);
-    int32 element = skill != nullptr ? skill->Element[ROWOWSkill::GetLevelIndex(skillLevel)] : ROWOW_ELEMENT_NEUTRAL;
+    int32 element = skill != nullptr ? ROWOWSkill::GetLevelValue(skill->Element, skillLevel) : ROWOW_ELEMENT_NEUTRAL;
     switch (element)
     {
         case ROWOW_ELEMENT_WEAPON: // pl = -1 : the skill takes the weapon's element
@@ -1927,7 +1945,7 @@ int32 ROWOWMod::BattleGetMiscElement(ROWOWDamage const& d, Unit const* src, Unit
 {
     // battle_get_misc_element
     ROWOWSkill const* skill = GetSkill(skillID);
-    int32 element = skill != nullptr ? skill->Element[ROWOWSkill::GetLevelIndex(skillLevel)] : ROWOW_ELEMENT_NEUTRAL;
+    int32 element = skill != nullptr ? ROWOWSkill::GetLevelValue(skill->Element, skillLevel) : ROWOW_ELEMENT_NEUTRAL;
     switch (element)
     {
         case ROWOW_ELEMENT_WEAPON:
@@ -2911,7 +2929,7 @@ bool ROWOWMod::BattleStatusBlockDamage(Unit* src, Unit* target, ROWOWStatusChang
     }
 
     if (sc->HasSCE(ROWOW_SC_DODGE) == true && ((flag & ROWOW_BF_LONG) != 0 || sc->HasSCE(ROWOW_SC_SPURT) == true) &&
-        (skillID != ROWOW_SKILL_NPC_EARTHQUAKE || (flag & NpcEarthquakeFlag) != 0) && int32(urand(0, 99)) < 20)
+        (skillID != ROWOW_SKILL_NPC_EARTHQUAKE || (flag & ROWOW_NPC_EARTHQUAKE_FLAG) != 0) && int32(urand(0, 99)) < 20)
     {
         Player* tsd = target->ToPlayer();
         if (tsd != nullptr && tsd->IsSitState() == true)
@@ -2920,7 +2938,7 @@ bool ROWOWMod::BattleStatusBlockDamage(Unit* src, Unit* target, ROWOWStatusChang
         return false;
     }
 
-    if (ROWOWStatusChangeEntry* sce = sc->GetSCE(ROWOW_SC_KAUPE); sce != nullptr && (skillID != ROWOW_SKILL_NPC_EARTHQUAKE || (flag & NpcEarthquakeFlag) != 0) &&
+    if (ROWOWStatusChangeEntry* sce = sc->GetSCE(ROWOW_SC_KAUPE); sce != nullptr && (skillID != ROWOW_SKILL_NPC_EARTHQUAKE || (flag & ROWOW_NPC_EARTHQUAKE_FLAG) != 0) &&
         int32(urand(0, 99)) < sce->Val2)
     {
         // Kaupe blocks damage (skill or otherwise) from players, mobs, homuns, mercenaries.  Shouldn't end until Breaker's non-weapon part

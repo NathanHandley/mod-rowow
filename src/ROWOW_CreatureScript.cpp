@@ -115,11 +115,6 @@ public:
             }
 
             events.Update(diff);
-
-            // A hit Marine Sphere's blast
-            ROWOW->UpdateMobSummon(me);
-            if (me->IsAlive() == false)
-                return;
             while (uint32 eventId = events.ExecuteEvent())
             {
                 if (eventId == EVENT_GROUND_SNAP_CHECK)
@@ -132,14 +127,6 @@ public:
                 ROWOW->MobUpdate(me, diff);
             else
                 ScriptedAI::UpdateAI(diff);
-        }
-
-        void DamageTaken(Unit* attacker, uint32& damage, DamageEffectType damageType, SpellSchoolMask damageSchoolMask) override
-        {
-            ScriptedAI::DamageTaken(attacker, damage, damageType, damageSchoolMask);
-            // A summoned Marine Sphere that loses HP blows up at its next update (its Self Destruction's "alchemist" condition)
-            if (ROWOWMobSummon* summon = me->CustomData.Get<ROWOWMobSummon>("ROWOWMobSummon"); summon != nullptr && summon->AI == ROWOW_AI_SPHERE && damage > 0)
-                summon->IsSelfDestructPending = true;
         }
 
         bool CanAIAttack(Unit const* target) const override

@@ -867,8 +867,12 @@ void ROWOWMod::ClifSkillPosEffect(Unit* src, uint16 skillID, uint16 skillLevel, 
 
 void ROWOWMod::ClifSkillNoDamage(Unit* src, Unit* target, uint16 skillID, uint16 skillLevel)
 {
-    // clif_skill_nodamage: the skill's look on a unit (Magic Rod taking a spell in, Soul Drain), its spell cast on it for the look alone
-    SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(GetSkillSpellID(skillID, skillLevel));
+    // clif_skill_nodamage: the skill's look on a unit (Magic Rod taking a spell in, Soul Drain), its spell cast on it for the look alone.  (A monster's
+    // level can pass the skill's spells: the highest below it)
+    uint32 spellID = 0;
+    for (uint16 level = skillLevel; level > 0 && spellID == 0; level--)
+        spellID = GetSkillSpellID(skillID, level);
+    SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(spellID);
     if (spellInfo == nullptr || src->IsInWorld() == false || target->IsInWorld() == false)
         return;
     ROWOWSkillUnitData* ud = GetSkillUnitData(src);
@@ -1011,17 +1015,40 @@ bool ROWOWMod::MobClassChange(Creature* md, uint32 mobID)
     uint32 entry = GetMobCreatureEntry(mobID);
     if (md->IsInWorld() == false || mobID == 0 || entry == 0 || GetROMobID(md) == mobID)
         return false;
+    int64 mobRowIndex = GetMobRowIndex(GetROMobID(md));
+    ROWOWDataTable const* mobTable = GetDataTable(ROWOW_DATA_TABLE_MOB);
+    if (mobRowIndex >= 0 && mobTable != nullptr && mobTable->GetCell(size_t(mobRowIndex), mobTable->GetColumnIndex("RaceGroups")).find("Treasure") != std::string::npos)
+        return false; // Treasure Boxes
+    if (ROWOWMobSummon const* summon = md->CustomData.Get<ROWOWMobSummon>("ROWOWMobSummon"); summon != nullptr && summon->AI > ROWOW_AI_ATTACK)
+        return false; // Marine Spheres and Floras.
     uint64 hpRate = md->GetMaxHealth() > 0 ? uint64(md->GetHealth()) * 100 / md->GetMaxHealth() : 100;
     StatusChangeEnd(md, ROWOW_SC_KEEPING); // End before calling status_calc_mob().
     StatusChangeEnd(md, ROWOW_SC_BARRIER);
     md->AttackStop();
     md->StopMoving();
+    UnitSkillCastCancel(md, 0);
     MobUnlockTarget(md, GetTick());
     if (md->UpdateEntry(entry) == false)
         return false;
     md->SetRegeneratingHealth(false);
     StatusCalcBL(md, std::bitset<ROWOW_SCB_MAX>().set());
-    md->SetHealth(uint32(std::max<uint64>(1, uint64(md->GetMaxHealth()) * hpRate / 100)));
+
+    // monster_class_change_full_recover: full HP and a clean damage log, otherwise the HP rate stays
+    if (BattleConfig.MonsterClassChangeRecover != 0)
+    {
+        md->SetHealth(md->GetMaxHealth());
+        md->CustomData.Erase("ROWOWDamageLog");
+    }
+    else
+        md->SetHealth(uint32(std::max<uint64>(1, uint64(md->GetMaxHealth()) * hpRate / 100)));
+
+    // Skill delays and targets are cleared on morph
+    ROWOWMobData* mob = GetMobData(md);
+    mob->SkillDelays.clear();
+    mob->SkillIdx = -1;
+    mob->TargetID.Clear();
+    mob->AttackedID.Clear();
+    mob->NormAttackedID.Clear();
     return true;
 }
 
@@ -1333,7 +1360,9 @@ Creature* ROWOWMod::MobOnceSpawnSub(Unit* src, int32 x, int32 y, uint32 mobID, u
         ROWOW_SKILL_CELL_GROUND_SEARCH_DISTANCE);
     if (cellZ <= INVALID_HEIGHT)
         return nullptr;
-    TempSummon* md = src->SummonCreature(entry, cellX, cellY, cellZ, src->GetOrientation(), TEMPSUMMON_TIMED_DESPAWN, uint32(std::max<int64>(1, duration)));
+    // A duration of 0 is a monster with no deletetimer: it stays until it dies, then its body goes as a spawned one's
+    TempSummon* md = src->SummonCreature(entry, cellX, cellY, cellZ, src->GetOrientation(), duration > 0 ? TEMPSUMMON_TIMED_DESPAWN : TEMPSUMMON_CORPSE_TIMED_DESPAWN,
+        duration > 0 ? uint32(duration) : ConfigCorpseLootHoldTimeInSec * 1000);
     if (md == nullptr)
         return nullptr;
     if (ai != ROWOW_AI_NONE)
@@ -1424,23 +1453,6 @@ void ROWOWMod::MobDeadFindingOre(Creature* md)
     if (itemTemplateIDIter == ItemTemplateIDsByItemID.end())
         return;
     md->loot.AddItem(LootStoreItem(itemTemplateIDIter->second, 0, 100.0f, false, LOOT_MODE_DEFAULT, 0, 1, 1));
-}
-
-void ROWOWMod::UpdateMobSummon(Creature* md)
-{
-    // A summoned monster's own part of mob_ai_sub_hard, from its update: a Marine Sphere that was hit uses Self Destruction (its mob skill, at
-    // once on any damage: the "alchemist" condition; R10.2 runs this through its skill list).  A plant (AI_FLORA) looks for its enemies in the AI
-    ROWOWMobSummon* summon = md->CustomData.Get<ROWOWMobSummon>("ROWOWMobSummon");
-    if (summon == nullptr || md->IsAlive() == false || md->IsInWorld() == false)
-        return;
-    if (summon->AI == ROWOW_AI_SPHERE)
-    {
-        if (summon->IsSelfDestructPending == true)
-        {
-            summon->IsSelfDestructPending = false;
-            SkillCastendNoDamageID(md, md, ROWOW_SKILL_NPC_SELFDESTRUCTION, 1, GetTick(), 0);
-        }
-    }
 }
 
 int8 ROWOWMod::SkillIsCopyable(Player* sd, uint16 skillID) const
@@ -1577,12 +1589,28 @@ bool ROWOWMod::IsUnitWarpForbidden(Unit const* bl) const
     return isMapFlagged("monster_noteleport") == true && (summon == nullptr || summon->MasterGUID.IsEmpty() == true);
 }
 
+void ROWOWMod::UnitRemoveMap(Unit* bl)
+{
+    // unit_remove_map's monster part: its walk stopped, its target dropped (a slave keeps its own: mob_slave_keep_target), idle
+    Creature* md = bl->ToCreature();
+    if (md == nullptr || GetROMobID(md) == 0)
+        return;
+    ROWOWMobData* mob = GetMobData(md);
+    UnitStopWalking(md);
+    if (BattleConfig.MobSlaveKeepTarget == 0)
+        mob->TargetID.Clear();
+    mob->SpottedLog.clear();
+    mob->AttackedID.Clear();
+    MobSetState(md, mob, ROWOW_MSS_IDLE);
+}
+
 bool ROWOWMod::UnitWarpRandom(Unit* bl, Position& destOut)
 {
     // unit_warp(bl, -1, -1, -1, CLR_TELEPORT): to a random spot of its map, unless the map forbids it.  A player's teleport lands once its
     // client answers, so where it goes is given back for those warped next to it
     if (IsUnitWarpForbidden(bl) == true || MapSearchRandomSpot(bl->GetMap(), destOut) == false)
         return false;
+    UnitRemoveMap(bl);
     bl->NearTeleportTo(destOut.GetPositionX(), destOut.GetPositionY(), destOut.GetPositionZ(), bl->GetOrientation());
     return true;
 }
@@ -1611,6 +1639,7 @@ bool ROWOWMod::UnitWarpNear(Unit* bl, Position const& center)
         z = cellZ + 0.5f;
         break;
     }
+    UnitRemoveMap(bl);
     bl->NearTeleportTo(x, y, z, bl->GetOrientation());
     return true;
 }
@@ -1861,7 +1890,7 @@ void ROWOWMod::UnitRunHit(Unit* bl)
     GetSkillUnitData(bl)->IsRunning = false;
     StatusChangeEnd(bl, ROWOW_SC_RUN);
     ROWOWSkill const* skill = GetSkill(ROWOW_SKILL_TK_RUN);
-    SkillBlown(bl, bl, skill != nullptr ? skill->Knockback[ROWOWSkill::GetLevelIndex(uint16(lv))] : 0, dir, ROWOW_BLOWN_NONE);
+    SkillBlown(bl, bl, skill != nullptr ? ROWOWSkill::GetLevelValue(skill->Knockback, uint16(lv)) : 0, dir, ROWOW_BLOWN_NONE);
 }
 
 void ROWOWMod::UpdateUnitRun(Unit* bl)

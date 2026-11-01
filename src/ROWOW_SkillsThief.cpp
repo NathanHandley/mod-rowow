@@ -153,7 +153,7 @@ namespace
         void CastendNoDamageID(Unit* src, Unit* bl, uint16 skillLevel, uint64 /*tick*/, int32& /*flag*/) const override
         {
             ROWOWSkill const* skill = ROWOW->GetSkill(SkillID);
-            ROWOW->SkillBlown(src, bl, skill->Knockback[ROWOWSkill::GetLevelIndex(skillLevel)], int8(ROWOWMod::UnitGetDir(bl)), ROWOW_BLOWN_IGNORE_NO_KNOCKBACK);
+            ROWOW->SkillBlown(src, bl, ROWOWSkill::GetLevelValue(skill->Knockback, skillLevel), int8(ROWOWMod::UnitGetDir(bl)), ROWOW_BLOWN_IGNORE_NO_KNOCKBACK);
         }
     };
 

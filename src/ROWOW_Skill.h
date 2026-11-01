@@ -146,6 +146,7 @@ enum ROWOWSkillUnitFlag : uint8
 #define ROWOW_SD_ANIMATION                          0x2000
 #define ROWOW_SD_SPLASH                             0x4000
 #define ROWOW_SD_PREAMBLE                           0x8000
+#define ROWOW_NPC_EARTHQUAKE_FLAG                   0x800   // NPC_EARTHQUAKE_FLAG: Earthquake's first hit of its unit, which Dodge and Kaupe let through
 
 // e_require_state: a skill's Requires_State
 enum ROWOWRequireState : uint8
@@ -418,7 +419,6 @@ struct ROWOWMobSummon : public DataMap::Base
 {
     ObjectGuid MasterGUID; // master_id: who it answers to (on its map), empty for none
     uint8 AI = ROWOW_AI_NONE; // ROWOW_AI_*
-    bool IsSelfDestructPending = false; // A Marine Sphere was hit: it blows up at its next update (its mob skill's "alchemist" condition)
 };
 
 // skill_unit: one cell of a ground skill (a Fire Wall's cell, a Safety Wall, a trap), at an RO cell of its group's map
@@ -575,6 +575,20 @@ struct ROWOWSkill
 
     // Clamps a level into the per-level arrays (skill_get_lv)
     static int32 GetLevelIndex(uint16 level) { return level == 0 ? 0 : (level > ROWOW_MAX_SKILL_LEVEL ? ROWOW_MAX_SKILL_LEVEL - 1 : level - 1); }
+
+    // skill_get_lv: a per-level value.  Past the arrays (a monster's skill can go that high) a value above 1 goes on by the steps of the last levels
+    static int32 GetLevelValue(int32 const (&values)[ROWOW_MAX_SKILL_LEVEL], uint16 level)
+    {
+        int32 index = GetLevelIndex(level);
+        if (level > ROWOW_MAX_SKILL_LEVEL && values[index] > 1 && index > 1)
+        {
+            int32 a = values[index - 2];
+            int32 b = values[index - 1];
+            int32 c = values[index];
+            return c + ((level - ROWOW_MAX_SKILL_LEVEL + 1) * (b - a) / 2) + ((level - ROWOW_MAX_SKILL_LEVEL) * (c - b) / 2);
+        }
+        return values[index];
+    }
 };
 
 // A skill Abracadabra can cast (abra_db's s_skill_abra_db), and its chance (in 10000) at each of Abracadabra's levels
@@ -1017,5 +1031,6 @@ void AddROWOWSkillsThief();
 void AddROWOWSkillsTaekwon();
 void AddROWOWSkillsGunslinger();
 void AddROWOWSkillsNinja();
+void AddROWOWSkillsNpc();
 
 #endif
