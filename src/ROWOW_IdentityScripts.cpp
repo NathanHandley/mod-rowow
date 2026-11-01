@@ -18,6 +18,7 @@
 #include "CommandScript.h"
 #include "Creature.h"
 #include "DatabaseEnv.h"
+#include "GossipDef.h"
 #include "Item.h"
 #include "Log.h"
 #include "Map.h"
@@ -396,13 +397,49 @@ public:
                 ChatHandler(session).SendNotification("You need Basic Skill level 3 to sit.");
                 return false;
             }
+            case CMSG_OPEN_ITEM:
+            {
+                // A WoW item that opens can hold gold, and its loot window would pay that into the zeny purse.  No RO item opens this way, they run
+                // scripts.  The client holds the item locked until it hears about it
+                WorldPacket packetCopy(packet);
+                uint8 bag = 0;
+                uint8 slot = 0;
+                packetCopy >> bag >> slot;
+                SendNotInROFormMessage(player);
+                if (Item* item = player->GetItemByPos(bag, slot))
+                {
+                    player->SendEquipError(EQUIP_ERR_NONE, item, nullptr);
+                    player->SendLootRelease(item->GetGUID());
+                }
+                return false;
+            }
+            case CMSG_GOSSIP_SELECT_OPTION:
+            {
+                // A gossip option with a price would take it from the zeny purse.  No NPC in the RO world offers one today
+                WorldPacket packetCopy(packet);
+                ObjectGuid npcGUID;
+                uint32 menuID = 0;
+                uint32 listID = 0;
+                packetCopy >> npcGUID >> menuID >> listID;
+                GossipMenuItem const* gossipItem = player->PlayerTalkClass->GetGossipMenu().GetItem(listID);
+                if (gossipItem == nullptr || gossipItem->BoxMoney == 0)
+                    return true;
+                SendNotInROFormMessage(player);
+                player->PlayerTalkClass->SendCloseGossip();
+                return false;
+            }
             case CMSG_BUYBACK_ITEM: // RO shops have no buyback
-            // Money that would cross between zeny and the character's money, or pay for the character's things with zeny
+            // Money that would cross between zeny and the character's money, or pay for the character's things with zeny (plan section 8 item 13)
             case CMSG_SEND_MAIL:
             case CMSG_MAIL_TAKE_MONEY:
             case CMSG_MAIL_TAKE_ITEM:
             case CMSG_AUCTION_SELL_ITEM:
             case CMSG_AUCTION_PLACE_BID:
+            case CMSG_AUCTION_REMOVE_ITEM:
+            case CMSG_ITEM_REFUND:
+            case CMSG_LOOT_MONEY:
+            case CMSG_QUESTGIVER_CHOOSE_REWARD:
+            case MSG_SAVE_GUILD_EMBLEM:
             case CMSG_GUILD_BANK_DEPOSIT_MONEY:
             case CMSG_GUILD_BANK_WITHDRAW_MONEY:
             case CMSG_GUILD_BANK_BUY_TAB:

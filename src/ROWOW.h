@@ -58,6 +58,7 @@ struct ItemTemplate;
 struct Position;
 struct ROWOWScript;
 struct ROWOWScriptContext;
+enum InventoryResult : uint8;
 
 // Per creature template values from mod_rowow_creature_template
 struct ROWOWCreatureTemplate
@@ -564,9 +565,10 @@ struct ROWOWItem
     int32 WeaponLevel = 0;
     int32 Weight = 0; // In tenths
     int32 Buy = 0; // The NPC shops' price (zeny)
-    bool IsNoTrade = false; // item_db's Trade restrictions the cart and the shops read (itemdb_cantrade, itemdb_cancartstore)
+    bool IsNoTrade = false; // item_db's Trade restrictions the cart, the shops and the storage read (itemdb_cantrade, itemdb_cancartstore, itemdb_canstore)
     bool IsBuyingStore = false; // flag.buyingstore: a buying store may ask for it
     bool IsNoCart = false;
+    bool IsNoStorage = false;
     std::vector<std::string> HatEffectNames; // The hat effects (HAT_EF_*, in upper case) it shows while worn (only the post-renewal looks have them)
 };
 
@@ -1860,7 +1862,7 @@ struct ROWOWIdentity : public DataMap::Base
     uint64 CanEquipTick = 0; // canequip_tick: no equipment goes on before it (Desperado), in the skill engine's ticks
     std::unordered_map<uint32, uint32> ItemDelayEndTimes; // By item_db Id: when each item with a reuse delay can be used again
     bool IsIdentifyMenuOpen = false; // A Magnifier's list of items to appraise is up (menuskill_id MC_IDENTIFY)
-    uint8 StorageFlag = 0; // state.storage_flag: a Kafra opened its storage (1, the WoW bank) on this map, until it leaves the map
+    uint8 StorageFlag = 0; // state.storage_flag: a Kafra opened its storage (1, the bank window) on this map, until it leaves the map
     std::map<uint16, uint16> SkillLevelsByID; // The skills learned (mod_rowow_identity_skill), and their levels
     bool AreSkillsChanged = false;
     std::set<uint16> TreeSkillIDs; // The skills of the tree it may use and raise now, learned or not (pc_calc_skilltree sets their id)
@@ -2289,7 +2291,7 @@ public:
         int32 flag) const; // battle_calc_cardfix
     void RunItemScript(Player* player, ROWOWScript const* script, Item const* item); // An EquipScript or UnEquipScript
 
-    // Keeps the worn items true to the bags (one sold, moved to the bank or destroyed is no longer worn) and tells the client's RO interface
+    // Keeps the worn items true to the bags (one sold, mailed or destroyed is no longer worn; no bank tab takes one) and tells the client's RO interface
     // where each worn item is, under the ROWOWEQUIP prefix, when that changes
     void UpdateIdentityEquipment(Player* player, ROWOWIdentity& identity);
     void SendEquipmentToClient(Player* player, ROWOWIdentity& identity, bool isForced);
@@ -3144,9 +3146,10 @@ public:
     void LoadIdentityQuests(Player* player, ROWOWIdentity& identity);
     void SaveIdentityQuests(Player* player, ROWOWIdentity& identity, CharacterDatabaseTransaction trans);
     std::unordered_map<uint32, ROWOWQuestData> QuestsByID;
-    // Kafra storage (ROWOW_Storage.cpp, R8.2): rAthena's storage.cpp opens the character's own WoW bank, and its guild's bank when the guild has
-    // one (plan section 8 item 7), each with the player as its own banker as AzerothCore's bank command does
-    void StorageStorageOpen(Player* player); // storage_storageopen: the WoW bank window
+    // Kafra storage (ROWOW_Storage.cpp, R8.2): rAthena's storage.cpp opens the account's Ragnarok bank tab, and its guild's bank when the guild has
+    // one (plan section 8 items 7 and 14), each with the player as its own banker as AzerothCore's bank command does
+    void StorageStorageOpen(Player* player); // storage_storageopen: the bank window, on the Ragnarok tab
+    InventoryResult StorageCanAddItem(Player* player, Item const* item, uint8 world); // storage_additem's checks, on a bank tab
     int32 StorageGuildStorageOpen(Player* player); // storage_guild_storageopen: ROWOW_GSTORAGE_*; the guild bank window opens at the next world update
     void StorageClose(Player* player); // Leaving the map: the storage ends (storage_storageclose, storage_guild_storageclose)
     void OpenPendingGuildStorages(); // The world update, with the maps idle: the guild bank windows asked for

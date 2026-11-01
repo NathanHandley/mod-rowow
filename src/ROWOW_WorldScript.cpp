@@ -16,6 +16,7 @@
 
 #include "Configuration/Config.h"
 #include "Log.h"
+#include "Player.h"
 #include "ScriptMgr.h"
 
 #include "ROWOW.h"
@@ -36,6 +37,10 @@ public:
             return;
         }
         ROWOW->LoadConfigurationFile();
+
+        // The Ragnarok bank tab, known to the core before any session exists
+        if (ROWOW->IsEnabled == true)
+            Player::SetWorldBankEnabled(WORLD_BANK_RAGNAROK, true);
     }
 
     void OnStartup() override

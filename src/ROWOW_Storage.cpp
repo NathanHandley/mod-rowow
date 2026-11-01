@@ -20,6 +20,7 @@
 
 #include "Chat.h"
 #include "Guild.h"
+#include "Item.h"
 #include "ObjectAccessor.h"
 #include "Player.h"
 #include "ScriptMgr.h"
@@ -29,20 +30,35 @@
 
 using namespace std;
 
-// Kafra storage (R8.2): there is no RO storage of its own (plan section 8 item 7).  A Kafra's storage is the character's WoW bank, in the
-// stock bank window, and its guild's bank when the guild has bought a tab, in the stock guild bank window.  Neither needs a banker in reach:
-// the player is its own banker, as AzerothCore's bank command (.character check bank) does for the bank and the core's SendShowGuildBank
-// (MergedWorlds) does for the guild bank.  The client opens the guild bank window on a list it didn't ask for on an RO map (MergedWorldClient
-// ro-guild-storage).  Zeny never moves into or out of the guild bank (plan section 8 item 5)
+// Kafra storage (R8.2, R12): RO's storage is account wide, and so is the Ragnarok tab of the bank window, which a Kafra opens (plan section 8
+// items 7 and 14, RONotes\world-bank-tabs.md).  The tab takes RO items only, the core holds them (account_bank_item, world 1), and any banker
+// in any world reaches it.  The Character and Account tabs are beside it, and the guild's bank when the guild has bought a tab, in the stock guild
+// bank window.  Neither needs a banker in reach: the player is its own banker, as AzerothCore's bank command (.character check bank) does for the
+// bank and the core's SendShowGuildBank (MergedWorlds) does for the guild bank.  The client opens the guild bank window on a list it didn't ask for
+// on an RO map (MergedWorldClient ro-guild-storage).  Zeny never moves into or out of the guild bank (plan section 8 item 5)
 
 void ROWOWMod::StorageStorageOpen(Player* player)
 {
-    // storage_storageopen: the bank window, with the player as the banker (rAthena keeps it open until the client closes it; here until the
-    // player leaves the map)
+    // storage_storageopen: the bank window on the Ragnarok tab, with the player as the banker (rAthena keeps it open until the client closes it;
+    // here until the player leaves the map)
     if (player == nullptr || player->GetSession() == nullptr)
         return;
     GetIdentity(player)->StorageFlag = 1;
-    player->GetSession()->SendShowBank(player->GetGUID());
+    player->GetSession()->SendShowBank(player->GetGUID(), WORLD_BANK_RAGNAROK);
+}
+
+InventoryResult ROWOWMod::StorageCanAddItem(Player* player, Item const* item, uint8 world)
+{
+    // The Ragnarok tab takes what storage_additem does: an RO item (a companion pet's carrier isn't one) that RO's storage takes (itemdb_canstore).
+    // On every tab, worn equipment stays out: it sits in the bags with its place in the identity, in the form or not, until it's taken off
+    if (IsROItemTemplate(item->GetEntry()) == false)
+        return world == WORLD_BANK_RAGNAROK ? EQUIP_ERR_WORLD_BANK_ITEM_NOT_ALLOWED : EQUIP_ERR_OK;
+    if (GetIdentityEquipPosition(*GetIdentity(player), item->GetGUID().GetCounter()) != 0)
+        return EQUIP_ERR_WORLD_BANK_ITEM_WORN;
+    ROWOWItem const* roItem = GetROItem(item);
+    if (world == WORLD_BANK_RAGNAROK && (roItem == nullptr || roItem->IsNoStorage == true))
+        return EQUIP_ERR_ACCOUNT_BANK_ITEM_NOT_ALLOWED;
+    return EQUIP_ERR_OK;
 }
 
 int32 ROWOWMod::StorageGuildStorageOpen(Player* player)
@@ -95,7 +111,8 @@ void ROWOWMod::OpenPendingGuildStorages()
     }
 }
 
-// Kafra storage's hooks: the guild bank windows asked for, the end of storage on leaving a map, and no zeny in or out of the guild bank
+// Kafra storage's hooks: the guild bank windows asked for, the end of storage on leaving a map, what the bank tabs take, and no zeny in or
+// out of the guild bank
 class ROWOW_StorageWorldScript : public WorldScript
 {
 public:
@@ -112,13 +129,24 @@ public:
 class ROWOW_StoragePlayerScript : public PlayerScript
 {
 public:
-    ROWOW_StoragePlayerScript() : PlayerScript("ROWOW_StoragePlayerScript", { PLAYERHOOK_ON_MAP_CHANGED }) {}
+    ROWOW_StoragePlayerScript() : PlayerScript("ROWOW_StoragePlayerScript", { PLAYERHOOK_ON_MAP_CHANGED, PLAYERHOOK_CAN_BANK_ITEM }) {}
 
     void OnPlayerMapChanged(Player* player) override
     {
         if (ROWOW->IsEnabled == false)
             return;
         ROWOW->StorageClose(player);
+    }
+
+    void OnPlayerCanBankItem(Player* player, Item const* item, uint8 world, InventoryResult& result) override
+    {
+        // The player's own thread: its session's packets, which also read its identity.  Other worlds' tabs are their modules' to answer, and on
+        // the Character and Account tabs this only ever refuses
+        if (ROWOW->IsEnabled == false || (world != WORLD_BANK_ACCOUNT && world != WORLD_BANK_RAGNAROK))
+            return;
+        InventoryResult storageResult = ROWOW->StorageCanAddItem(player, item, world);
+        if (world == WORLD_BANK_RAGNAROK || storageResult != EQUIP_ERR_OK)
+            result = storageResult;
     }
 };
 
