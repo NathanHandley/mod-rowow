@@ -341,6 +341,21 @@ void ROWOWMod::LoadStatusData()
         readValue("pet_distance_check", BattleConfig.PetDistanceCheck);
         readValue("pet_hide_check", BattleConfig.PetHideCheck);
         readValue("pet_rename", BattleConfig.PetRename);
+        readValue("hom_setting", BattleConfig.HomSetting);
+        readValue("hom_rename", BattleConfig.HomRename);
+        readValue("homunculus_friendly_rate", BattleConfig.HomunculusFriendlyRate);
+        readValue("homunculus_evo_intimacy_need", BattleConfig.HomunculusEvoIntimacyNeed);
+        readValue("homunculus_evo_intimacy_reset", BattleConfig.HomunculusEvoIntimacyReset);
+        readValue("hvan_explosion_intimate", BattleConfig.HvanExplosionIntimate);
+        readValue("homunculus_show_growth", BattleConfig.HomunculusShowGrowth);
+        readValue("homunculus_auto_vapor", BattleConfig.HomunculusAutoVapor);
+        readValue("homunculus_max_level", BattleConfig.HomMaxLevel);
+        readValue("homunculus_starving_rate", BattleConfig.HomunculusStarvingRate);
+        readValue("homunculus_starving_delay", BattleConfig.HomunculusStarvingDelay);
+        readValue("feature.homunculus_autofeed", BattleConfig.FeatureHomunculusAutofeed);
+        readValue("feature.homunculus_autofeed_rate", BattleConfig.FeatureHomunculusAutofeedRate);
+        readValue("amotion_min_skill_delay", BattleConfig.AmotionMinSkillDelay);
+        readValue("critical_rate", BattleConfig.CriticalRate);
         readValue("pet_friendly_rate", BattleConfig.PetFriendlyRate);
         readValue("pet_hungry_delay_rate", BattleConfig.PetHungryDelayRate);
         readValue("pet_unequip_destroy", BattleConfig.PetUnequipDestroy);
@@ -938,7 +953,8 @@ int32 ROWOWMod::StatusBaseAtk(ROWOWStatus const& status) const
         std::swap(str, dex);
     int32 dstr = str / 10;
     str += dstr * dstr;
-    str += dex / 5 + status.Stats[ROWOW_STAT_LUK] / 5;
+    if (status.FollowerType != ROWOW_BL_HOM) // Normally only players have base-atk, but homunc have a different batk equation
+        str += dex / 5 + status.Stats[ROWOW_STAT_LUK] / 5;
     return std::clamp(str, 0, int32(USHRT_MAX));
 }
 
@@ -974,13 +990,14 @@ void ROWOWMod::StatusCalcMisc(ROWOWStatus& status, uint32 level) const
 
     if (status.Critical != 0 && status.IsPlayer == false)
     {
-        if (BattleConfig.MobCriticalRate != 100)
-            status.Critical = std::clamp<int32>(status.Critical * BattleConfig.MobCriticalRate / 100, 1, SHRT_MAX);
-        if (status.Critical == 0 && BattleConfig.MobCriticalRate != 0)
+        int32 criticalRate = status.FollowerType != 0 ? BattleConfig.CriticalRate : BattleConfig.MobCriticalRate; // Players don't have a critical adjustment setting as of yet.
+        if (criticalRate != 100)
+            status.Critical = std::clamp<int32>(status.Critical * criticalRate / 100, 1, SHRT_MAX);
+        if (status.Critical == 0 && criticalRate != 0)
             status.Critical = 10;
     }
 
-    // Only players regenerate here (BL_REGEN has no monsters)
+    // Monsters don't regenerate (BL_REGEN has no monsters), and a homunculus's or mercenary's own regen is in StatusCalcBLMain, on its battle status
     if (status.IsPlayer == true)
         StatusCalcRegen(nullptr, status);
 }
@@ -1415,10 +1432,11 @@ void ROWOWMod::MobLogDamage(Creature* creature, Unit* attacker, uint32 damage, u
     if (damage == 0 && damageTanked == 0)
         return;
 
+    int32 flag = GetFollowerDamageLogFlag(attacker);
     ROWOWDamageLog* damageLog = creature->CustomData.GetDefault<ROWOWDamageLog>("ROWOWDamageLog");
     for (ROWOWDamageLogEntry& entry : damageLog->Entries)
     {
-        if (entry.PlayerGUID == player->GetGUID())
+        if (entry.PlayerGUID == player->GetGUID() && entry.Flag == flag)
         {
             entry.Damage += damage;
             entry.DamageTanked += damageTanked;
@@ -1429,6 +1447,7 @@ void ROWOWMod::MobLogDamage(Creature* creature, Unit* attacker, uint32 damage, u
         damageLog->Entries.pop_front(); // The oldest goes
     ROWOWDamageLogEntry entry;
     entry.PlayerGUID = player->GetGUID();
+    entry.Flag = flag;
     entry.Damage = damage;
     entry.DamageTanked = damageTanked;
     damageLog->Entries.push_back(entry);
@@ -1476,6 +1495,8 @@ void ROWOWMod::MobDeadExp(Creature* creature, Unit* killer)
         count++;
         if (player->IsAlive() == false || IsInROForm(player) == false)
             continue;
+        if (entries[i].Flag == ROWOW_MDLF_HOMUN && HomIsActive(GetHomunculus(player)) == false)
+            continue; // Skip homunculus' share if inactive
         players[i] = player;
     }
 
@@ -1522,6 +1543,8 @@ void ROWOWMod::MobDeadExp(Creature* creature, Unit* killer)
 
         uint64 baseExp = mobBaseExp != 0 ? uint64(std::clamp(double(mobBaseExp) * per * bonus / 100., 1.0, double(std::numeric_limits<uint32>::max()))) : 0;
         uint64 jobExp = mobJobExp != 0 ? uint64(std::clamp(double(mobJobExp) * per * bonus / 100., 1.0, double(std::numeric_limits<uint32>::max()))) : 0;
+        if (entries[i].Flag == ROWOW_MDLF_HOMUN)
+            jobExp = 0; // Homun earned job-exp is always lost.
 
         // Locate the party, possibly add it; else its own
         bool isOwnExp = true;
@@ -1544,6 +1567,9 @@ void ROWOWMod::MobDeadExp(Creature* creature, Unit* killer)
                 isOwnExp = false;
             }
         }
+        if (baseExp != 0 && entries[i].Flag == ROWOW_MDLF_HOMUN)
+            if (ROWOWHomunData* hd = GetHomunculus(players[i]))
+                HomGainExp(players[i], *hd, baseExp);
         if (isOwnExp == true)
             PCGainExp(players[i], baseExp, jobExp, creature);
     }

@@ -538,6 +538,7 @@ ROWOWIdentity* ROWOWMod::GetIdentity(Player* player)
     LoadIdentityMemo(player, *identity);
     LoadIdentityQuests(player, *identity);
     LoadIdentityPet(player, *identity);
+    LoadIdentityFollowers(player, *identity);
     PCCalcSkillTree(*identity);
     return identity;
 }
@@ -601,6 +602,7 @@ void ROWOWMod::SaveIdentity(Player* player, CharacterDatabaseTransaction trans)
     SaveIdentityMemo(player, *identity, trans);
     SaveIdentityQuests(player, *identity, trans);
     SaveIdentityPet(player, *identity, trans);
+    SaveIdentityFollowers(player, *identity, trans);
 }
 
 bool ROWOWMod::IsSpellKeptInROForm(SpellInfo const* spellInfo) const
@@ -883,6 +885,7 @@ void ROWOWMod::CompleteROFormChange(Player* player)
         // clif_parse_LoadEndAck: arriving on a map makes the player invincible for a moment (pc_setinvincibletimer), and its pet arrives with it
         PCSetInvincibleTimer(player);
         PetArrive(player);
+        FollowerArrive(player);
     }
 }
 
@@ -971,6 +974,7 @@ void ROWOWMod::LeaveROForm(Player* player)
     LeaveStatusChanges(player, *identity);
     identity->InvincibleEndTime = 0;
     PetLeaveMap(player);
+    FollowerLeaveMap(player, true);
     PartyRemoveMember(player);
     identity->Zeny = player->GetMoney();
     if (player->IsAlive() == true)

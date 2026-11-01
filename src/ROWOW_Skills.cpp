@@ -426,6 +426,8 @@ void ROWOWMod::LoadSkillData()
     AddROWOWSkillsGunslinger();
     AddROWOWSkillsNinja();
     AddROWOWSkillsNpc();
+    AddROWOWSkillsHomunculus();
+    AddROWOWSkillsMercenary();
     LOG_INFO("module.ROWOW", "ROWOWMod::LoadSkillData loaded {} skills ({} skill spells, {} with their own rules) and {} job skill trees ({} skills)", SkillsByID.size(),
         SkillIDsBySpellID.size(), SkillImplsBySkillID.size(), SkillTreesByJobID.size(), treeSkillCount);
 }
@@ -912,6 +914,8 @@ void ROWOWMod::PCJobChange(Player* player, uint16 jobID)
         PCSetFalcon(player, false);
     if (PCIsCartOn(player) == true && PCCheckSkill(*identity, ROWOW_SKILL_MC_PUSHCART) == 0)
         PCSetCart(player, 0);
+    if (HomIsActive(GetHomunculus(player)) == true && PCCheckSkill(*identity, ROWOW_SKILL_AM_CALLHOMUN) == 0)
+        HomVaporize(player, ROWOW_HOM_ST_ACTIVE);
 }
 
 int64 ROWOWMod::PCJobIDToMapID(int32 jobID) const
@@ -946,6 +950,8 @@ int32 ROWOWMod::PCResetSkill(Player* player)
         PCSetFalcon(player, false);
     if (PCIsCartOn(player) == true && PCCheckSkill(*identity, ROWOW_SKILL_MC_PUSHCART) != 0)
         PCSetCart(player, 0);
+    if (HomIsActive(GetHomunculus(player)) == true && PCCheckSkill(*identity, ROWOW_SKILL_AM_CALLHOMUN) != 0)
+        HomVaporize(player, ROWOW_HOM_ST_ACTIVE);
     bool isNovice = (PCJobIDToMapID(GetNonBabyJobID(identity->JobID)) & ROWOW_MAPID_SECONDMASK) == 0; // MAPID_NOVICE, normal or High
     int32 skillPoint = 0;
     for (auto levelIter = identity->SkillLevelsByID.begin(); levelIter != identity->SkillLevelsByID.end();)

@@ -195,6 +195,7 @@ void ROWOWMod::LoadItemScriptData()
     if (IsEnabled == false)
         return;
     RegisterPetCommands();
+    RegisterFollowerCommands();
 
     // Item names, for the scripts and groups that name items
     for (char const* itemTableName : { ROWOW_DATA_TABLE_ITEM, ROWOW_DATA_TABLE_ITEM_RENEWAL })
@@ -945,6 +946,19 @@ bool ROWOWMod::PCCheckItem(Player* player, ROWOWIdentity& identity)
     return isChanged;
 }
 
+bool ROWOWMod::IsItemInGroup(std::string const& groupName, uint32 itemID) const
+{
+    // itemdb_group.item_exists, by the uppercase group name
+    auto groupIter = ItemGroupsByName.find(groupName);
+    if (groupIter == ItemGroupsByName.end())
+        return false;
+    for (auto const& subGroup : groupIter->second.SubGroupsByID)
+        for (ROWOWItemGroupEntry const& entry : subGroup.second.Entries)
+            if (entry.ItemID == itemID)
+                return true;
+    return false;
+}
+
 bool ROWOWMod::PCIsUseItem(Player* player, Item const* item, bool isReporting)
 {
     // pc_isUseitem
@@ -962,6 +976,23 @@ bool ROWOWMod::PCIsUseItem(Player* player, Item const* item, bool isReporting)
             SendItemMessage(player, "This item can't be used yet.");
         return false;
     }
+
+    // pc_isUseitem's mercenary items: its potions need it (and it awake, and the level the two high ones ask), and a scroll can't be used with one under contract
+    if (ROWOWMercData const* mercenary = identity->Mercenary.get(); roItem->ItemID == ROWOW_ITEMID_MERCENARY_RED_POTION || roItem->ItemID == ROWOW_ITEMID_MERCENARY_BLUE_POTION ||
+        roItem->ItemID == ROWOW_ITEMID_M_CENTER_POTION || roItem->ItemID == ROWOW_ITEMID_M_AWAKENING_POTION || roItem->ItemID == ROWOW_ITEMID_M_BERSERK_POTION)
+    {
+        if (mercenary == nullptr)
+            return false;
+        if (Creature* md = GetFollowerCreature(player, *mercenary))
+            if (ROWOWStatusChange const* msc = GetStatusChange(static_cast<Unit const*>(md)); msc != nullptr && msc->Cant.Consume == true)
+                return false;
+        if (roItem->ItemID == ROWOW_ITEMID_M_AWAKENING_POTION && mercenary->DB->Level < 40)
+            return false;
+        if (roItem->ItemID == ROWOW_ITEMID_M_BERSERK_POTION && mercenary->DB->Level < 80)
+            return false;
+    }
+    if (identity->Mercenary != nullptr && IsItemInGroup("MERCENARY", roItem->ItemID) == true)
+        return false; // Mercenary Scrolls
 
     // A dialog that turned items off (disable_items: npc_id with no npc_item_flag)
     if (IsItemUseBlockedByNpc(player) == true)

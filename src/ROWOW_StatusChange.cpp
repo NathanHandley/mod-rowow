@@ -815,7 +815,9 @@ bool ROWOWMod::StatusChangeStartPostDelay(Unit* src, Unit* bl, int32 type, int32
         case ROWOW_SC_MERC_HPUP:
         case ROWOW_SC_MERC_SPUP:
         case ROWOW_SC_MERC_HITUP:
-            return false; // Stats only for Mercenaries
+            if (GetFollowerType(bl) != ROWOW_BL_MER)
+                return false; // Stats only for Mercenaries
+            break;
         case ROWOW_SC_STRFOOD:
         case ROWOW_SC_AGIFOOD:
         case ROWOW_SC_VITFOOD:
@@ -1853,7 +1855,7 @@ bool ROWOWMod::StatusChangeStartValues(Unit* src, Unit* bl, int32 type, int32& v
             // val4 signals autoprovoke.
             break;
         case ROWOW_SC_AVOID:
-            val2 = 10 * val1; // Speed change rate.
+            val2 = (status != nullptr && status->FollowerType == ROWOW_BL_HOM ? 40 : 10) * val1; // Speed change rate.
             break;
         case ROWOW_SC_DEFENCE:
             val2 = 2 * val1; // Vit bonus for players / Def bonus for homunculus
@@ -2233,6 +2235,9 @@ bool ROWOWMod::StatusChangeEnd(Unit* bl, int32 type, bool isTimer)
             ROWOWIdentity* identity = d_bl != nullptr ? d_bl->CustomData.Get<ROWOWIdentity>("ROWOWIdentity") : nullptr;
             if (identity != nullptr && val2 >= 0 && val2 < ROWOW_MAX_DEVOTION && identity->DevotionGUIDs[val2] == bl->GetGUID())
                 identity->DevotionGUIDs[val2].Clear();
+            if (Player* master = bl->ToPlayer())
+                if (ROWOWMercData* mercenary = GetMercenary(master); mercenary != nullptr && mercenary->CreatureGUID.GetCounter() == uint32(val1))
+                    mercenary->IsDevotion = false;
             break;
         }
         case ROWOW_SC_GOSPEL:

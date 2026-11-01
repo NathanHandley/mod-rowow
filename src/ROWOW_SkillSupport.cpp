@@ -394,13 +394,22 @@ void ROWOWMod::PCSetRiding(Player* player, bool isRiding)
         RefreshROFormLook(player);
 }
 
-Player* ROWOWMod::GetDevotionSource(Unit const* bl, bool isRangeChecked) const
+Unit* ROWOWMod::GetDevotionSource(Unit const* bl, bool isRangeChecked) const
 {
     // The Crusader of a devoted unit, as rAthena checks it before each use of SC_DEVOTION: the player of val1, on the unit's map, whose slot
-    // val2 still names the unit, and (check_distance_bl) within the link's reach, val3
+    // val2 still names the unit, and (check_distance_bl) within the link's reach, val3.  A mercenary devoted to its master is the other kind
     ROWOWStatusChangeEntry const* sce = GetSCE(bl, ROWOW_SC_DEVOTION);
     if (sce == nullptr || sce->Val2 < 0 || sce->Val2 >= ROWOW_MAX_DEVOTION || bl->IsInWorld() == false)
         return nullptr;
+    if (Player const* master = bl->ToPlayer())
+    {
+        ROWOWMercData const* md = GetMercenary(master);
+        if (md != nullptr && md->IsDevotion == true && md->CreatureGUID.GetCounter() == uint32(sce->Val1))
+        {
+            Creature* mercenary = GetFollowerCreature(const_cast<Player*>(master), *md);
+            return mercenary == nullptr || (isRangeChecked == true && DistanceBL(bl, mercenary) > sce->Val3) ? nullptr : mercenary;
+        }
+    }
     Player* d_bl = ObjectAccessor::GetPlayer(bl->GetMap(), ObjectGuid::Create<HighGuid::Player>(uint32(sce->Val1)));
     ROWOWIdentity const* identity = d_bl != nullptr ? d_bl->CustomData.Get<ROWOWIdentity>("ROWOWIdentity") : nullptr;
     if (identity == nullptr || identity->DevotionGUIDs[sce->Val2] != bl->GetGUID())
@@ -1391,6 +1400,8 @@ Creature* ROWOWMod::MobOnceSpawnSub(Unit* src, int32 x, int32 y, uint32 mobID, u
 Unit const* ROWOWMod::BattleGetMaster(Unit const* bl) const
 {
     // battle_get_master: a monster a skill summoned answers to its master, while the master is on its map
+    if (Player const* master = GetFollowerMaster(bl))
+        return master; // A homunculus's or mercenary's
     ROWOWMobSummon const* summon = bl->IsCreature() == true ? bl->CustomData.Get<ROWOWMobSummon>("ROWOWMobSummon") : nullptr;
     if (summon == nullptr || summon->MasterGUID.IsEmpty() == true)
         return bl;

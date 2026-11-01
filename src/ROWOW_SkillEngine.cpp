@@ -307,7 +307,7 @@ int32 ROWOWMod::BattleCheckTarget(Unit const* src, Unit const* target, int32 fla
         if (tBL->IsPlayer() == false)
             state |= ROWOW_BCT_ENEMY; // Natural enemy.
     }
-    else if (target->IsCreature() == true || tBL->IsCreature() == true)
+    else if ((target->IsCreature() == true && IsROFollower(target) == false) || tBL->IsCreature() == true)
         state |= ROWOW_BCT_PARTY; // Normal mobs with no ai are friends, and so are the monsters players summoned to them
     else
         state |= ROWOW_BCT_ENEMY; // However, all else are enemies.
@@ -388,6 +388,17 @@ bool ROWOWMod::StatusCheckSkillUse(Unit const* src, Unit const* target, uint16 s
 
     if (skillID == ROWOW_SKILL_PA_PRESSURE && flag != 0 && tsc != nullptr && (tsc->Option & ROWOW_OPTION_HIDE) != 0)
         return false; // Gloria Avoids pretty much everything....
+    if (int32 targetFollowerType = GetFollowerType(target); targetFollowerType != 0 && skillID != 0)
+    {
+        ROWOWSkill const* targetSkill = GetSkill(skillID);
+        if (targetFollowerType == ROWOW_BL_HOM && (BattleConfig.HomSetting & ROWOW_HOMSET_NO_SUPPORT_SKILL) != 0 && targetSkill != nullptr && (targetSkill->Inf & ROWOW_INF_SUPPORT_SKILL) != 0 &&
+            BattleGetMaster(target) != src)
+            return false; // Can't use support skills on Homunculus (only Master/Self)
+        if (targetFollowerType == ROWOW_BL_MER && (skillID == ROWOW_SKILL_PR_ASPERSIO || (skillID >= ROWOW_SKILL_SA_FLAMELAUNCHER && skillID <= ROWOW_SKILL_SA_SEISMICWEAPON)) && BattleGetMaster(target) != src)
+            return false; // Can't use Weapon endow skills on Mercenary (only Master)
+        if (skillID == ROWOW_SKILL_AM_POTIONPITCHER && targetFollowerType == ROWOW_BL_MER)
+            return false; // Can't use Potion Pitcher on Mercenaries
+    }
     if (skillID == ROWOW_SKILL_AL_TELEPORT && src != nullptr && (mode & ROWOW_MODE_STATUS_IMMUNE) == 0)
     {
         // Should fail when used on top of Land Protector [Skotlex] (but cast as a skill item)
@@ -681,12 +692,26 @@ void ROWOWMod::UnitSetAttackDelay(Unit* unit, uint64 tick, bool isCastBegin)
     // plus the shortest motion (the attack delay itself is WoW's swing timer).  Monsters get theirs at cast end and cancel (MobSetDelay)
     Player* sd = unit->ToPlayer();
     ROWOWStatus const* status = GetROStatus(unit);
-    if (sd == nullptr || status == nullptr)
+    int32 followerType = GetFollowerType(unit);
+    if ((sd == nullptr && followerType == 0) || status == nullptr)
         return;
     ROWOWSkillUnitData* ud = GetSkillUnitData(unit);
     if (isCastBegin == true && ud->SkillID == 0)
         return;
     int64 actDelay = status->AttackMotion + BattleConfig.MaxAspdAmotion / 2; // pc_maxaspd / AMOTION_DIVIDER_PC
+    if (followerType != 0)
+    {
+        // A homunculus's and mercenary's normal attack delay is its attack delay, WoW's swing timer.  For non-PCs that can be controlled from the client, there is a security delay of
+        // 200ms at a cast's start; to prevent tricks to use skills faster, a config uses amotion instead.  A mercenary's ground skills go as a player's
+        if (isCastBegin == false)
+            return;
+        ROWOWSkill const* skill = GetSkill(ud->SkillID);
+        bool isGround = skill != nullptr && (skill->Inf & ROWOW_INF_GROUND_SKILL) != 0;
+        if (followerType == ROWOW_BL_HOM || isGround == false)
+            actDelay = BattleConfig.AmotionMinSkillDelay == 1 ? status->AttackMotion + ROWOW_MAX_ASPD_NOPC : ROWOW_MIN_DELAY_SLAVE;
+        else
+            actDelay = status->AttackMotion + ROWOW_MAX_ASPD_NOPC;
+    }
     ud->CanActTime = std::max<uint64>(tick + uint64(actDelay), ud->CanActTime);
 }
 
@@ -868,6 +893,11 @@ Unit* ROWOWMod::UnitSkillTarget(Unit* src, Unit* target, Unit* pickedTarget, uin
     }
     else if (target == src && (skill->Inf & ROWOW_INF_SELF_SKILL) != 0 && skill->Inf2[ROWOW_INF2_NOTARGETSELF] == true)
         target = attackTarget; // Auto-select target. [Skotlex]
+
+    // Homun-auto-target skills.
+    if (GetFollowerType(src) == ROWOW_BL_HOM && (skillID == ROWOW_SKILL_HLIF_HEAL || skillID == ROWOW_SKILL_HLIF_AVOID || skillID == ROWOW_SKILL_HAMI_DEFENCE || skillID == ROWOW_SKILL_HAMI_CASTLE))
+        if (Player* master = GetFollowerMaster(src))
+            return master;
 
     // Check for skills that auto-select target
     if (src->IsPlayer() == true && skillID == ROWOW_SKILL_MO_CHAINCOMBO && sc != nullptr)
@@ -1080,6 +1110,7 @@ SpellCastResult ROWOWMod::SkillCastEndCheck(Unit* src, Unit* target, WorldLocati
                         return fail(ROWOW_USESKILL_FAIL_LEVEL);
                 }
                 break;
+            case ROWOW_SKILL_MER_LEXDIVINA:
             case ROWOW_SKILL_PR_LEXDIVINA:
                 // If it's not an enemy, and not silenced, you can't use the skill on them. [Skotlex]
                 if (BattleCheckTarget(src, target, ROWOW_BCT_ENEMY) <= 0 && GetSCE(target, ROWOW_SC_SILENCE) == nullptr)
@@ -1106,6 +1137,8 @@ SpellCastResult ROWOWMod::SkillCastEndCheck(Unit* src, Unit* target, WorldLocati
     if (StatusCheckSkillUse(src, target, skillID, 1) == false)
         return fail(ROWOW_USESKILL_FAIL_MAX);
     if (sd != nullptr && SkillCheckConditionCastEnd(sd, skillID, skillLevel) == false)
+        return fail(ROWOW_USESKILL_FAIL_MAX);
+    if (IsROFollower(src) == true && FollowerSkillCheckCondition(src, skillID, skillLevel, 0) == false)
         return fail(ROWOW_USESKILL_FAIL_MAX);
     return SPELL_CAST_OK;
 }
@@ -1140,6 +1173,14 @@ void ROWOWMod::SkillCastEnd(Unit* src, Unit* target, WorldLocation const* dest, 
     if (sd != nullptr)
         SkillConsumeRequirement(sd, skillID, skillLevel, 1);
 
+    if (IsROFollower(src) == true && FollowerSkillCheckCondition(src, skillID, skillLevel, 1) == false)
+    {
+        ud->CanActTime = tick;
+        ud->SkillID = 0;
+        FollowerClearSkill(src);
+        return;
+    }
+
     // Damage skills on a skill immune target fail after paying (a skill fail message)
     ROWOWStatus const* tstatus = GetROStatus(target);
     if (src != target && tstatus != nullptr && tstatus->Class == ROWOW_CLASS_BATTLEFIELD && SkillGetCastType(skillID) == ROWOW_CAST_DAMAGE)
@@ -1161,6 +1202,8 @@ void ROWOWMod::SkillCastEnd(Unit* src, Unit* target, WorldLocation const* dest, 
             ud->CooldownEndTimesBySkillID[skillID] = tick + uint64(cooldown);
     }
     SendSkillDelayToClient(src, skillID);
+    if (IsROFollower(src) == true)
+        FollowerSetSkillBlock(src, skillID, skillLevel);
     if (sd != nullptr)
     {
         switch (skillID)
@@ -1196,9 +1239,9 @@ void ROWOWMod::SkillCastEnd(Unit* src, Unit* target, WorldLocation const* dest, 
         castFlag = 1;
     }
 
-    if (skillID == ROWOW_SKILL_PF_SPIDERWEB)
+    if (skillID == ROWOW_SKILL_PF_SPIDERWEB || skillID == ROWOW_SKILL_AM_RESURRECTHOMUN)
     {
-        // These should become skill_castend_pos: Spider Web goes on a random cell its splash away from the target (its own cell when none)
+        // These should become skill_castend_pos: Spider Web goes on a random cell its splash away from the target (its own cell when none), as a resurrected homunculus does
         int32 targetX = 0, targetY = 0;
         GetUnitCell(target, targetX, targetY);
         int32 splash = ROWOWSkill::GetLevelValue(skill->SplashArea, skillLevel);
@@ -1233,6 +1276,7 @@ void ROWOWMod::SkillCastEnd(Unit* src, Unit* target, WorldLocation const* dest, 
         ud->CooldownEndTimesBySkillID[ROWOW_SKILL_BD_ADAPTATION] = tick + 3000;
     ud->SkillID = 0;
     ud->SkillLevel = 0;
+    FollowerClearSkill(src);
 
     // mobs can't clear this one as it is used for skill condition 'afterskill'
     if (md != nullptr && md->IsAlive() == true)
@@ -1272,6 +1316,7 @@ void ROWOWMod::UnitSkillCastCancel(Unit* bl, int32 type)
     ud->SkillLevel = 0;
     ud->IsSkillTimer = false;
     bl->InterruptSpell(CURRENT_GENERIC_SPELL, false, false);
+    FollowerClearSkill(bl);
     if (bl->IsCreature() == true && GetROMobID(bl->ToCreature()) != 0)
     {
         // unit_set_attackdelay(DELAY_EVENT_CASTCANCEL), and the skill's row is done with
@@ -1355,6 +1400,8 @@ ROWOWSkillCondition ROWOWMod::SkillGetRequirement(Player* sd, uint16 skillID, ui
             itemIndex++;
             continue;
         }
+        if (skillID == ROWOW_SKILL_AM_CALLHOMUN && GetHomunculus(sd) != nullptr)
+            continue; // Don't delete items when hom is already out.
         uint32 itemID = item.ItemID;
         int32 amount = item.Amount;
         // Check requirement for gemstone (Blue, Red and Yellow Gemstones): the Mistress card's bonus saves them
@@ -1641,6 +1688,26 @@ bool ROWOWMod::SkillCheckConditionCastBegin(Player* sd, uint16 skillID, uint16 s
         {
             uint16 partnerLevel = skillLevel;
             if (SkillCheckPCPartner(sd, skillID, partnerLevel, 1, 0) < 2)
+            {
+                ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_LEVEL);
+                return false;
+            }
+            break;
+        }
+        case ROWOW_SKILL_AM_CALLHOMUN:
+            // Can't summon if a hom is already out
+            if (ROWOWHomunData const* hd = GetHomunculus(sd); hd != nullptr && hd->Vaporize == ROWOW_HOM_ST_ACTIVE)
+            {
+                ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_LEVEL);
+                return false;
+            }
+            break;
+        case ROWOW_SKILL_AM_REST:
+        {
+            // Can't vapo homun if you don't have an active homunc or it's hp is < 80%
+            ROWOWHomunData const* hd = GetHomunculus(sd);
+            Creature* md = HomIsActive(hd) == true ? GetFollowerCreature(sd, *hd) : nullptr;
+            if (md == nullptr || uint64(md->GetHealth()) < uint64(md->GetMaxHealth()) * 80 / 100)
             {
                 ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_LEVEL);
                 return false;
@@ -2039,7 +2106,7 @@ void ROWOWMod::SkillConsumeRequirement(Player* sd, uint16 skillID, uint16 skillL
         }
 
         // skill_consume_hpspap: Magnum Break needs HP but doesn't use it up
-        if (skillID == ROWOW_SKILL_SM_MAGNUM)
+        if (skillID == ROWOW_SKILL_SM_MAGNUM || skillID == ROWOW_SKILL_MS_MAGNUM)
             require.HP = 0;
         if (require.HP > 0)
             sd->SetHealth(sd->GetHealth() > uint32(require.HP) ? sd->GetHealth() - uint32(require.HP) : 1);
@@ -2618,7 +2685,7 @@ int64 ROWOWMod::SkillAttack(int32 attackType, Unit* src, Unit* dsrc, Unit* bl, u
     if (tsc != nullptr && tsc->HasSCE(ROWOW_SC_DEVOTION) == true && skillID != ROWOW_SKILL_NPC_EVILLAND && skillID != ROWOW_SKILL_PA_PRESSURE &&
         skillID != ROWOW_SKILL_HW_GRAVITATION)
     {
-        if (Player* d_bl = GetDevotionSource(bl, true))
+        if (Unit* d_bl = GetDevotionSource(bl, true))
         {
             // If it isn't devotion_rdamage's, reflected magics are done directly on the target not on the Crusader
             if (isMagicReflected == false)
@@ -3209,9 +3276,11 @@ int32 ROWOWMod::SkillCalcHeal(Unit* src, Unit* target, uint16 skillID, uint16 sk
             hp = (int32(sstatus->Level) + sstatus->Stats[ROWOW_STAT_INT]) / 8 * (4 + (skillLevel * 8));
             if ((skill = PCCheckSkill(src, ROWOW_SKILL_HP_MEDITATIO)) > 0)
                 hp += hp * skill * 2 / 100;
+            else if ((skill = HomCheckSkill(src, ROWOW_SKILL_HLIF_BRAIN)) > 0)
+                hp += hp * skill * 2 / 100;
             break;
     }
-    if (heal == false && skillID != ROWOW_SKILL_NPC_EVILLAND)
+    if ((heal == false || GetFollowerType(target) == ROWOW_BL_MER) && skillID != ROWOW_SKILL_NPC_EVILLAND)
         hp /= 2;
     if (src->IsPlayer() == true && (skill = PCSkillHealBonus(src, skillID)) > 0)
         hp += hp * skill / 100;
@@ -3526,6 +3595,7 @@ void ROWOWMod::SkillTimerSkill(Unit* src, uint32 timerSkillID)
             });
             break;
         }
+        case ROWOW_SKILL_MER_LEXDIVINA:
         case ROWOW_SKILL_PR_LEXDIVINA:
             if (src->IsPlayer() == false)
             {
@@ -3537,6 +3607,9 @@ void ROWOWMod::SkillTimerSkill(Unit* src, uint32 timerSkillID)
             break;
         case ROWOW_SKILL_PR_STRECOVERY:
             SCStart(src, target, ROWOW_SC_BLIND, skl.Type, skl.SkillLevel, SkillGetTime2(skl.SkillID, skl.SkillLevel));
+            break;
+        case ROWOW_SKILL_HVAN_EXPLOSION:
+            StatusKill(src);
             break;
         case ROWOW_SKILL_BS_HAMMERFALL:
             SCStart(src, target, ROWOW_SC_STUN, skl.Type, skl.SkillLevel, SkillGetTime2(skl.SkillID, skl.SkillLevel));

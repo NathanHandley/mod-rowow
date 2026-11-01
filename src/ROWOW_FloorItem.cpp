@@ -440,6 +440,13 @@ void ROWOWMod::MobDeadLootPriority(Creature* md, Unit* src, ROWOWLootPriority& p
         Player* sd = ObjectAccessor::GetPlayer(*md, entry.PlayerGUID);
         if (sd == nullptr || sd->IsAlive() == false || IsInROForm(sd) == false)
             continue;
+        // A homunculus's damage is added to its master's (Slave damage is added to the player's damage)
+        auto existingIter = std::find_if(lootDamage.begin(), lootDamage.end(), [sd](ROWOWLootDamage const& damage) { return damage.SD == sd; });
+        if (existingIter != lootDamage.end())
+        {
+            existingIter->Damage += entry.Damage;
+            continue;
+        }
         ROWOWLootDamage damage;
         damage.SD = sd;
         damage.Damage = entry.Damage;

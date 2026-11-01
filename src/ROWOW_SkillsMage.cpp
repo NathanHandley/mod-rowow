@@ -239,7 +239,7 @@ namespace
     class ROWOWSkillSight : public ROWOWSkillImpl
     {
     public:
-        ROWOWSkillSight() : ROWOWSkillImpl(ROWOW_SKILL_MG_SIGHT) { }
+        explicit ROWOWSkillSight(uint16 skillID = ROWOW_SKILL_MG_SIGHT) : ROWOWSkillImpl(skillID) { }
 
         void CastendNoDamageID(Unit* src, Unit* target, uint16 skillLevel, uint64 /*tick*/, int32& /*flag*/) const override
         {
@@ -505,7 +505,7 @@ namespace
     class ROWOWSkillSense : public ROWOWSkillImpl
     {
     public:
-        ROWOWSkillSense() : ROWOWSkillImpl(ROWOW_SKILL_WZ_ESTIMATION) { }
+        explicit ROWOWSkillSense(uint16 skillID = ROWOW_SKILL_WZ_ESTIMATION) : ROWOWSkillImpl(skillID) { }
 
         void CastendNoDamageID(Unit* src, Unit* target, uint16 /*skillLevel*/, uint64 /*tick*/, int32& /*flag*/) const override
         {
@@ -1229,6 +1229,7 @@ void AddROWOWSkillsMage()
     ROWOW->RegisterSkillImpl(new ROWOWSkillSoulStrike());
     ROWOW->RegisterSkillImpl(new ROWOWSkillFireBall());
     ROWOW->RegisterSkillImpl(new ROWOWSkillSight());
+    ROWOW->RegisterSkillImpl(new ROWOWSkillSight(ROWOW_SKILL_MER_SIGHT)); // A mercenary's own: the same but for its SkillID
     ROWOW->RegisterSkillImpl(new ROWOWStatusSkillImpl(ROWOW_SKILL_MG_ENERGYCOAT)); // SkillEnergyCoat: the StatusSkillImpl alone
     ROWOW->RegisterSkillImpl(new ROWOWSkillFrostDiver());
     ROWOW->RegisterSkillImpl(new ROWOWSkillStoneCurse());

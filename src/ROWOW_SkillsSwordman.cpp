@@ -55,7 +55,7 @@ namespace
     class ROWOWSkillBash : public ROWOWWeaponSkillImpl
     {
     public:
-        ROWOWSkillBash() : ROWOWWeaponSkillImpl(ROWOW_SKILL_SM_BASH) { }
+        explicit ROWOWSkillBash(uint16 skillID = ROWOW_SKILL_SM_BASH) : ROWOWWeaponSkillImpl(skillID) { }
 
         void CalculateSkillRatio(ROWOWDamage const* /*wd*/, Unit const* /*src*/, Unit const* /*target*/, uint16 skillLevel, int32& baseSkillRatio, int32 /*mflag*/) const override
         {
@@ -87,7 +87,7 @@ namespace
     class ROWOWSkillMagnumBreak : public ROWOWSkillImpl
     {
     public:
-        ROWOWSkillMagnumBreak() : ROWOWSkillImpl(ROWOW_SKILL_SM_MAGNUM) { }
+        explicit ROWOWSkillMagnumBreak(uint16 skillID = ROWOW_SKILL_SM_MAGNUM) : ROWOWSkillImpl(skillID) { }
 
         void CalculateSkillRatio(ROWOWDamage const* wd, Unit const* /*src*/, Unit const* /*target*/, uint16 skillLevel, int32& baseSkillRatio, int32 /*mflag*/) const override
         {
@@ -152,7 +152,7 @@ namespace
     class ROWOWSkillProvoke : public ROWOWSkillImpl
     {
     public:
-        ROWOWSkillProvoke() : ROWOWSkillImpl(ROWOW_SKILL_SM_PROVOKE) { }
+        explicit ROWOWSkillProvoke(uint16 skillID = ROWOW_SKILL_SM_PROVOKE) : ROWOWSkillImpl(skillID) { }
 
         void CastendNoDamageID(Unit* src, Unit* bl, uint16 skillLevel, uint64 /*tick*/, int32& /*flag*/) const override
         {
@@ -182,7 +182,7 @@ namespace
     class ROWOWSkillPierce : public ROWOWWeaponSkillImpl
     {
     public:
-        ROWOWSkillPierce() : ROWOWWeaponSkillImpl(ROWOW_SKILL_KN_PIERCE) { }
+        explicit ROWOWSkillPierce(uint16 skillID = ROWOW_SKILL_KN_PIERCE) : ROWOWWeaponSkillImpl(skillID) { }
 
         void ModifyDamageData(ROWOWDamage& dmg, Unit const& /*src*/, Unit const& target, uint16 /*skillLevel*/) const override
         {
@@ -257,7 +257,7 @@ namespace
     class ROWOWSkillBrandishSpear : public ROWOWSkillImpl
     {
     public:
-        ROWOWSkillBrandishSpear() : ROWOWSkillImpl(ROWOW_SKILL_KN_BRANDISHSPEAR) { }
+        explicit ROWOWSkillBrandishSpear(uint16 skillID = ROWOW_SKILL_KN_BRANDISHSPEAR) : ROWOWSkillImpl(skillID) { }
 
         void CastendNoDamageID(Unit* src, Unit* target, uint16 skillLevel, uint64 tick, int32& flag) const override
         {
@@ -359,7 +359,7 @@ namespace
     class ROWOWSkillBowlingBash : public ROWOWSkillImpl
     {
     public:
-        ROWOWSkillBowlingBash() : ROWOWSkillImpl(ROWOW_SKILL_KN_BOWLINGBASH) { }
+        explicit ROWOWSkillBowlingBash(uint16 skillID = ROWOW_SKILL_KN_BOWLINGBASH) : ROWOWSkillImpl(skillID) { }
 
         void ModifyDamageData(ROWOWDamage& dmg, Unit const& /*src*/, Unit const& /*target*/, uint16 /*skillLevel*/) const override
         {
@@ -573,7 +573,7 @@ namespace
     class ROWOWSkillShieldReflect : public ROWOWStatusSkillImpl
     {
     public:
-        ROWOWSkillShieldReflect() : ROWOWStatusSkillImpl(ROWOW_SKILL_CR_REFLECTSHIELD) { }
+        explicit ROWOWSkillShieldReflect(uint16 skillID = ROWOW_SKILL_CR_REFLECTSHIELD) : ROWOWStatusSkillImpl(skillID) { }
 
         void CastendNoDamageID(Unit* src, Unit* target, uint16 skillLevel, uint64 tick, int32& flag) const override
         {
@@ -851,6 +851,22 @@ namespace
 void AddROWOWSkillsSwordman()
 {
     ROWOW->RegisterSkillImpl(new ROWOWSkillBash());
+
+    // A mercenary's own of these (skills/mercenary): the same but for their SkillID
+    ROWOW->RegisterSkillImpl(new ROWOWSkillBash(ROWOW_SKILL_MS_BASH));
+    ROWOW->RegisterSkillImpl(new ROWOWSkillMagnumBreak(ROWOW_SKILL_MS_MAGNUM));
+    ROWOW->RegisterSkillImpl(new ROWOWSkillProvoke(ROWOW_SKILL_MER_PROVOKE));
+    ROWOW->RegisterSkillImpl(new ROWOWSkillPierce(ROWOW_SKILL_ML_PIERCE));
+    ROWOW->RegisterSkillImpl(new ROWOWSkillBrandishSpear(ROWOW_SKILL_ML_BRANDISH));
+    ROWOW->RegisterSkillImpl(new ROWOWSkillBowlingBash(ROWOW_SKILL_MS_BOWLINGBASH));
+    ROWOW->RegisterSkillImpl(new ROWOWSkillShieldReflect(ROWOW_SKILL_MS_REFLECTSHIELD));
+    ROWOW->RegisterSkillImpl(new ROWOWWeaponSkillImpl(ROWOW_SKILL_ML_SPIRALPIERCE)); // SkillMercenarySpiralPierce: the hit itself is battle_calc_skill_base_damage's
+    ROWOW->RegisterSkillImpl(new ROWOWStatusSkillImpl(ROWOW_SKILL_MS_PARRYING));
+    ROWOW->RegisterSkillImpl(new ROWOWStatusSkillImpl(ROWOW_SKILL_MS_BERSERK));
+    ROWOW->RegisterSkillImpl(new ROWOWStatusSkillImpl(ROWOW_SKILL_ML_AUTOGUARD, true));
+    ROWOW->RegisterSkillImpl(new ROWOWStatusSkillImpl(ROWOW_SKILL_ML_DEFENDER, true));
+    ROWOW->RegisterSkillImpl(new ROWOWStatusSkillImpl(ROWOW_SKILL_MER_AUTOBERSERK, true));
+    ROWOW->RegisterSkillImpl(new ROWOWStatusSkillImpl(ROWOW_SKILL_MER_QUICKEN));
     ROWOW->RegisterSkillImpl(new ROWOWSkillMagnumBreak());
     ROWOW->RegisterSkillImpl(new ROWOWStatusSkillImpl(ROWOW_SKILL_SM_ENDURE));
     ROWOW->RegisterSkillImpl(new ROWOWSkillProvoke());

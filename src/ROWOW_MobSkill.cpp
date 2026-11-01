@@ -227,6 +227,8 @@ ROWOWMobSkill const* ROWOWMod::GetMobSkillInUse(Unit const* src) const
     // md->db->skill[md->skill_idx]: the row a monster is casting.  None for a cast of a script's or a GM's, or of a monster that isn't RO's
     Creature const* md = src != nullptr ? src->ToCreature() : nullptr;
     ROWOWMobData const* mob = md != nullptr ? md->CustomData.Get<ROWOWMobData>("ROWOWMobData") : nullptr;
+    if (mob != nullptr && mob->FollowerSkill.SkillID != 0)
+        return &mob->FollowerSkill; // What a homunculus or mercenary was told to cast
     if (mob == nullptr || mob->SkillIdx < 0)
         return nullptr;
     std::vector<ROWOWMobSkill> const* skills = GetMobSkills(GetROMobID(md));
@@ -989,6 +991,11 @@ void ROWOWMod::MobDead(Creature* md, Unit* killer)
     int32 count = MobDeadAttackerCount(md);
     if (isNoRewards == false)
         MobDeadExp(md, killer);
+
+    // The master or Mercenary can increase the kill count, if the monster level is greater or equal than half the baselevel of the master
+    if (Player* sd = killer != nullptr ? const_cast<Player*>(BattleGetMaster(killer)->ToPlayer()) : nullptr; sd != nullptr && (killer->IsPlayer() == true || GetFollowerType(killer) == ROWOW_BL_MER) &&
+        GetMercenary(sd) != nullptr && status != nullptr && status->Level >= GetIdentity(sd)->BaseLevel / 2)
+        MercenaryKills(sd);
     MobDeadDrops(md, killer, priority, isNoRewards);
     if (mvpSD != nullptr)
         MobDeadMVP(md, mvpSD, count, priority, isNoRewards);

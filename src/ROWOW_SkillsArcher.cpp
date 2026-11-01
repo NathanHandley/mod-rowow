@@ -37,7 +37,7 @@ namespace
     class ROWOWSkillDoubleStrafe : public ROWOWWeaponSkillImpl
     {
     public:
-        ROWOWSkillDoubleStrafe() : ROWOWWeaponSkillImpl(ROWOW_SKILL_AC_DOUBLE) { }
+        explicit ROWOWSkillDoubleStrafe(uint16 skillID = ROWOW_SKILL_AC_DOUBLE) : ROWOWWeaponSkillImpl(skillID) { }
 
         void CalculateSkillRatio(ROWOWDamage const* /*wd*/, Unit const* /*src*/, Unit const* /*target*/, uint16 skillLevel, int32& baseSkillRatio, int32 /*mflag*/) const override
         {
@@ -49,7 +49,7 @@ namespace
     class ROWOWSkillArrowShower : public ROWOWRecursiveDamageSplashSkillImpl
     {
     public:
-        ROWOWSkillArrowShower() : ROWOWRecursiveDamageSplashSkillImpl(ROWOW_SKILL_AC_SHOWER) { }
+        explicit ROWOWSkillArrowShower(uint16 skillID = ROWOW_SKILL_AC_SHOWER) : ROWOWRecursiveDamageSplashSkillImpl(skillID) { }
 
         void CalculateSkillRatio(ROWOWDamage const* /*wd*/, Unit const* /*src*/, Unit const* /*target*/, uint16 skillLevel, int32& baseSkillRatio, int32 /*mflag*/) const override
         {
@@ -67,7 +67,7 @@ namespace
     class ROWOWSkillChargeArrow : public ROWOWWeaponSkillImpl
     {
     public:
-        ROWOWSkillChargeArrow() : ROWOWWeaponSkillImpl(ROWOW_SKILL_AC_CHARGEARROW) { }
+        explicit ROWOWSkillChargeArrow(uint16 skillID = ROWOW_SKILL_AC_CHARGEARROW) : ROWOWWeaponSkillImpl(skillID) { }
 
         void CalculateSkillRatio(ROWOWDamage const* /*wd*/, Unit const* /*src*/, Unit const* /*target*/, uint16 /*skillLevel*/, int32& baseSkillRatio, int32 /*mflag*/) const override
         {
@@ -133,7 +133,7 @@ namespace
     class ROWOWSkillLandMine : public ROWOWTrapSkillImpl
     {
     public:
-        ROWOWSkillLandMine() : ROWOWTrapSkillImpl(ROWOW_SKILL_HT_LANDMINE) { }
+        explicit ROWOWSkillLandMine(uint16 skillID = ROWOW_SKILL_HT_LANDMINE) : ROWOWTrapSkillImpl(skillID) { }
 
         void ApplyAdditionalEffects(Unit* src, Unit* target, uint16 skillLevel, uint64 /*tick*/, int32 /*attackType*/, uint8 /*dmgLv*/) const override
         {
@@ -157,7 +157,7 @@ namespace
     class ROWOWSkillSandman : public ROWOWTrapSkillImpl
     {
     public:
-        ROWOWSkillSandman() : ROWOWTrapSkillImpl(ROWOW_SKILL_HT_SANDMAN) { }
+        explicit ROWOWSkillSandman(uint16 skillID = ROWOW_SKILL_HT_SANDMAN) : ROWOWTrapSkillImpl(skillID) { }
 
         void ApplyAdditionalEffects(Unit* src, Unit* target, uint16 skillLevel, uint64 /*tick*/, int32 /*attackType*/, uint8 /*dmgLv*/) const override
         {
@@ -181,7 +181,7 @@ namespace
     class ROWOWSkillFreezingTrap : public ROWOWTrapSkillImpl
     {
     public:
-        ROWOWSkillFreezingTrap() : ROWOWTrapSkillImpl(ROWOW_SKILL_HT_FREEZINGTRAP) { }
+        explicit ROWOWSkillFreezingTrap(uint16 skillID = ROWOW_SKILL_HT_FREEZINGTRAP) : ROWOWTrapSkillImpl(skillID) { }
 
         void ApplyAdditionalEffects(Unit* src, Unit* target, uint16 skillLevel, uint64 /*tick*/, int32 /*attackType*/, uint8 /*dmgLv*/) const override
         {
@@ -748,11 +748,11 @@ namespace
     class ROWOWSkillFocusedArrowStrike : public ROWOWRecursiveDamageSplashSkillImpl
     {
     public:
-        ROWOWSkillFocusedArrowStrike() : ROWOWRecursiveDamageSplashSkillImpl(ROWOW_SKILL_SN_SHARPSHOOTING) { }
+        explicit ROWOWSkillFocusedArrowStrike(uint16 skillID = ROWOW_SKILL_SN_SHARPSHOOTING) : ROWOWRecursiveDamageSplashSkillImpl(skillID) { }
 
         void CalculateSkillRatio(ROWOWDamage const* wd, Unit const* src, Unit const* /*target*/, uint16 skillLevel, int32& skillratio, int32 /*mflag*/) const override
         {
-            if (src->IsCreature() == true)
+            if (src->IsCreature() == true && SkillID == ROWOW_SKILL_SN_SHARPSHOOTING)
             {
                 if ((wd->MiscFlag & 2) != 0) // Splash damage bonus
                     skillratio += -100 + 140 * skillLevel;
@@ -826,6 +826,16 @@ void AddROWOWSkillsArcher()
 {
     // Archer
     ROWOW->RegisterSkillImpl(new ROWOWSkillDoubleStrafe());
+
+    // A mercenary's own of these (skills/mercenary): the same but for their SkillID
+    ROWOW->RegisterSkillImpl(new ROWOWSkillDoubleStrafe(ROWOW_SKILL_MA_DOUBLE));
+    ROWOW->RegisterSkillImpl(new ROWOWSkillArrowShower(ROWOW_SKILL_MA_SHOWER));
+    ROWOW->RegisterSkillImpl(new ROWOWSkillChargeArrow(ROWOW_SKILL_MA_CHARGEARROW));
+    ROWOW->RegisterSkillImpl(new ROWOWTrapSkillImpl(ROWOW_SKILL_MA_SKIDTRAP));
+    ROWOW->RegisterSkillImpl(new ROWOWSkillLandMine(ROWOW_SKILL_MA_LANDMINE));
+    ROWOW->RegisterSkillImpl(new ROWOWSkillSandman(ROWOW_SKILL_MA_SANDMAN));
+    ROWOW->RegisterSkillImpl(new ROWOWSkillFreezingTrap(ROWOW_SKILL_MA_FREEZINGTRAP));
+    ROWOW->RegisterSkillImpl(new ROWOWSkillFocusedArrowStrike(ROWOW_SKILL_MA_SHARPSHOOTING));
     ROWOW->RegisterSkillImpl(new ROWOWSkillConcentration());
     ROWOW->RegisterSkillImpl(new ROWOWSkillArrowShower());
     ROWOW->RegisterSkillImpl(new ROWOWSkillChargeArrow());

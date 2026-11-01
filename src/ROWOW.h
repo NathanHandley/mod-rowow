@@ -219,6 +219,7 @@ struct ROWOWDataTable
 #define ROWOW_SPELL_WEAPON_HIT_SOUND_START          200003  // RO's weapon hit sounds, 200003-200010 (see GetWeaponHitSoundSpellID)
 #define ROWOW_SPELL_USE_ITEM                        200011  // What every usable RO item casts when used, which runs the item's RO script
 #define ROWOW_SPELL_TAME                            200012  // What a taming item casts: the use item spell with a target (RO's capture cursor)
+#define ROWOW_SPELL_FOLLOWER_ORDER                  200013  // A spot on the ground for a homunculus or mercenary (RO's Alt and click)
 #define ROWOW_SPELL_ID_FIXED_END                    200099  // The fixed RO spells end here (generated ones follow)
 #define ROWOW_SPELL_ID_RO_START                     200000  // RO spells are 200000-248999
 #define ROWOW_SPELL_ID_RO_END                       248999
@@ -226,6 +227,11 @@ struct ROWOWDataTable
 
 // The items the skills make or use by ID (rAthena's ITEMID_*)
 #define ROWOW_ITEMID_HOLY_WATER                     523
+#define ROWOW_ITEMID_MERCENARY_RED_POTION           12184
+#define ROWOW_ITEMID_MERCENARY_BLUE_POTION          12185
+#define ROWOW_ITEMID_M_CENTER_POTION                12241
+#define ROWOW_ITEMID_M_AWAKENING_POTION             12242
+#define ROWOW_ITEMID_M_BERSERK_POTION               12243
 #define ROWOW_ITEMID_EMPTY_BOTTLE                   713
 #define ROWOW_ITEMID_STONE                          7049
 #define ROWOW_ITEMID_FRAGMENT_OF_CRYSTAL            7321    // ITEMID_FRAGMENT_OF_CRYSTAL: what a Wizard's spirit link pays to get past Kaite
@@ -428,6 +434,8 @@ struct ROWOWDataTable
 // rAthena's object types (BL_*), as the battle config values name them
 #define ROWOW_BL_PC                                 0x0001
 #define ROWOW_BL_MOB                                0x0002
+#define ROWOW_BL_HOM                                0x0008  // A homunculus
+#define ROWOW_BL_MER                                0x0010  // A mercenary
 
 // An attack's kind and reach (rAthena's e_battle_flag), how the client shows it (e_damage_type), and what came of it (damage_lv)
 #define ROWOW_BF_WEAPON                             0x0001
@@ -665,8 +673,9 @@ struct ROWOWBattleConfig
     int32 PCDamageDelayRate = 100;
     int32 NaturalHealHPInterval = 6000;
     int32 NaturalHealSPInterval = 8000;
-    int32 EnableBaseAtk = ROWOW_BL_PC | 0x0008; // BL_PC | BL_HOM: monsters have no base attack
-    int32 EnableCritical = ROWOW_BL_PC | 0x0010; // BL_PC | BL_MER: monsters don't crit
+    int32 EnableBaseAtk = ROWOW_BL_PC | ROWOW_BL_HOM; // monsters have no base attack
+    int32 EnableCritical = ROWOW_BL_PC | ROWOW_BL_MER; // monsters don't crit
+    int32 CriticalRate = 100;
     int32 EnablePerfectFlee = ROWOW_BL_PC;
     int32 MobCriticalRate = 100;
     int32 MinHitRate = 5;
@@ -679,7 +688,7 @@ struct ROWOWBattleConfig
     int32 VitPenaltyTarget = ROWOW_BL_PC;
     int32 VitPenaltyCount = 3;
     int32 VitPenaltyNum = 5;
-    int32 AttackAttrNone = ROWOW_BL_MOB | 0x0004 | 0x0008; // BL_MOB | BL_PET | BL_HOM: their normal attacks are non-elemental
+    int32 AttackAttrNone = ROWOW_BL_MOB | 0x0004 | ROWOW_BL_HOM; // BL_MOB | BL_PET | BL_HOM: their normal attacks are non-elemental
     int32 AttrRecover = 1;
     int32 SkillMinDamage = 0;
     int32 ArrowDecrement = 1;
@@ -783,6 +792,22 @@ struct ROWOWBattleConfig
     int32 PetDistanceCheck = 5; // pet_distance_check
     int32 PetHideCheck = 1; // pet_hide_check
     int32 PetRename = 0; // pet_rename
+    int32 HomSetting = 0x3D; // hom_setting: ROWOW_HOMSET_*
+    int32 HomRename = 0; // hom_rename
+    int32 HomDelayResetVaporize = 1; // hom_delay_reset_vaporize (its pre-renewal default)
+    int32 HomDelayResetWarp = 1; // hom_delay_reset_warp (its pre-renewal default)
+    int32 HomunculusFriendlyRate = 100; // homunculus_friendly_rate
+    int32 HomunculusEvoIntimacyNeed = 91100; // homunculus_evo_intimacy_need
+    int32 HomunculusEvoIntimacyReset = 1000; // homunculus_evo_intimacy_reset
+    int32 HvanExplosionIntimate = 45000; // hvan_explosion_intimate
+    int32 HomunculusShowGrowth = 1; // homunculus_show_growth
+    int32 HomunculusAutoVapor = 80; // homunculus_auto_vapor
+    int32 HomMaxLevel = 99; // homunculus_max_level
+    int32 HomunculusStarvingRate = 10; // homunculus_starving_rate
+    int32 HomunculusStarvingDelay = 20000; // homunculus_starving_delay
+    int32 FeatureHomunculusAutofeed = 1; // feature.homunculus_autofeed
+    int32 FeatureHomunculusAutofeedRate = 30; // feature.homunculus_autofeed_rate
+    int32 AmotionMinSkillDelay = 1; // amotion_min_skill_delay
     int32 PetFriendlyRate = 100; // pet_friendly_rate
     int32 PetHungryDelayRate = 100; // pet_hungry_delay_rate
     int32 PetUnequipDestroy = 1; // pet_unequip_destroy
@@ -822,7 +847,7 @@ struct ROWOWBattleConfig
     int32 WeaponProduceRate = 100; // weapon_produce_rate (wp_rate): the percent of a forge's success chance that counts
     int32 PotionProduceRate = 100; // potion_produce_rate (pp_rate): ... of a brew's
     int32 OrideconResearchFix = 0; // oridecon_research_fix: Oridecon Research also helps forge level 3 weapons
-    int32 LandSkillLimit = ROWOW_BL_PC | 0x0008; // land_skill_limit: whose ground skills and summons are limited to their skill's count (BL_PC | BL_HOM)
+    int32 LandSkillLimit = ROWOW_BL_PC | ROWOW_BL_HOM; // land_skill_limit: whose ground skills and summons are limited to their skill's count
     int32 AlchemistSummonSetting = 15; // alchemist_summon_setting: 1 players can hit the plants, 2 the Marine Spheres, 4 one plant kind at a time
     int32 AlchemistSummonReward = 1; // alchemist_summon_reward: 1 Marine Spheres drop their items, 2 the plants too
     int32 FirstAttackLootBonus = 30; // first_attack_loot_bonus: the percent of all the damage the first attacker adds for the loot priority
@@ -992,6 +1017,8 @@ struct ROWOWBonus
 struct ROWOWStatus
 {
     bool IsPlayer = true; // A player's (BL_PC), or a monster's (BL_MOB)
+    int32 FollowerType = 0; // ROWOW_BL_HOM or ROWOW_BL_MER for a homunculus's or a mercenary's, which IsPlayer doesn't tell from a monster's
+    int32 HomBaseASPD = 0; // homunculusDB->baseASPD: a homunculus's ASPD works out from it
     uint32 Level = 1;
     int32 Stats[ROWOW_STAT_COUNT] = { };
     int32 JobBonusStats[ROWOW_STAT_COUNT] = { }; // The part of the stats that's the job bonus
@@ -1086,6 +1113,7 @@ struct ROWOWDamage
 struct ROWOWDamageLogEntry
 {
     ObjectGuid PlayerGUID;
+    int32 Flag = 0; // flag: ROWOW_MDLF_*, a homunculus's damage logged apart from its master's
     uint64 Damage = 0;
     uint64 DamageTanked = 0; // dmg_tanked: what the monster dealt to the player, which counts for the MVP
 };
@@ -1242,6 +1270,7 @@ struct ROWOWMobData : public DataMap::Base
     ObjectGuid LootWalkID; // ud.target: the floor item it's walking to
     std::vector<ROWOWDropItem> LootItems; // lootitems: what a looter picked up, which it drops when it dies
     bool IsNoRewards = false; // mob_dead's type 1 and 2: killed by status_kill, so no exp and no drops
+    ROWOWMobSkill FollowerSkill; // A homunculus's or mercenary's cast as a monster's skill row: its level, cast time and cancel.  SkillID 0 for none
 
     // unit_data
     uint64 CanMoveTime = 0; // canmove_tick
@@ -1551,6 +1580,186 @@ struct ROWOWPetOwner : public DataMap::Base
     ObjectGuid OwnerGUID;
 };
 
+// RO's homunculi and mercenaries (ROWOW_Follower.cpp, ROWOW_Homunculus.cpp and ROWOW_Mercenary.cpp, R11)
+#define ROWOW_HM_CLASS_BASE                         6001    // HM_CLASS_BASE
+#define ROWOW_HM_CLASS_MAX                          6016    // The last class that's pre-renewal's (HM_CLASS_MAX is the Homunculus S's)
+#define ROWOW_MERID_MER_ARCHER01                    6017
+#define ROWOW_MERID_MER_ARCHER10                    6026
+#define ROWOW_MERID_MER_LANCER01                    6027
+#define ROWOW_MERID_MER_LANCER10                    6036
+#define ROWOW_MERID_MER_SWORDMAN01                  6037
+#define ROWOW_MERID_MER_SWORDMAN10                  6046
+#define ROWOW_HOM_ST_ACTIVE                         0       // e_homun_state2: homunculus.vaporize
+#define ROWOW_HOM_ST_REST                           1
+#define ROWOW_HOM_ST_MORPH                          2
+#define ROWOW_HOMSET_NO_SUPPORT_SKILL               0x01    // e_hom_setting
+#define ROWOW_HOMSET_NO_INSTANT_LAND_SKILL          0x02
+#define ROWOW_HOMSET_FIRST_TARGET                   0x04
+#define ROWOW_HOMSET_COPY_SPEED                     0x08
+#define ROWOW_HOMSET_DISPLAY_LUK                    0x10
+#define ROWOW_HOMSET_SAME_MATK                      0x20
+#define ROWOW_HOMGRADE_HATE_WITH_PASSION            0       // e_homun_grade
+#define ROWOW_HOMGRADE_HATE                         1
+#define ROWOW_HOMGRADE_AWKWARD                      2
+#define ROWOW_HOMGRADE_SHY                          3
+#define ROWOW_HOMGRADE_NEUTRAL                      4
+#define ROWOW_HOMGRADE_CORDIAL                      5
+#define ROWOW_HOMGRADE_LOYAL                        6
+#define ROWOW_MDLF_NORMAL                           0       // e_mob_damagelog_flag
+#define ROWOW_MDLF_HOMUN                            1
+#define ROWOW_MAX_MER_DISTANCE                      15      // MAX_MER_DISTANCE
+#define ROWOW_MIN_DELAY_SLAVE                       200     // MIN_DELAY_SLAVE: the delay of what a client commands
+#define ROWOW_FOLLOWER_CORPSE_TIME_IN_MS            2000    // How long its dying frames show before it's taken off the map
+#define ROWOW_EMOTION_DELIGHT                       2       // emotion_type
+#define ROWOW_EMOTION_SWEAT                         4
+#define ROWOW_EMOTION_FRET                          6
+#define ROWOW_EMOTION_THINK                         9
+#define ROWOW_EMOTION_KEK                           16
+#define ROWOW_EMOTION_PROFUSELY_SWEAT               19
+#define ROWOW_EMOTION_SCRATCH                       20
+#define ROWOW_EMOTION_OK                            33
+
+// The AI each client runs for its homunculus or mercenary (data\ai\ai.lua, MyState)
+enum ROWOWFollowerState : uint8
+{
+    ROWOW_AI_IDLE_ST,
+    ROWOW_AI_FOLLOW_ST,
+    ROWOW_AI_CHASE_ST,
+    ROWOW_AI_ATTACK_ST,
+    ROWOW_AI_MOVE_CMD_ST,
+    ROWOW_AI_HOLD_CMD_ST,
+    ROWOW_AI_SKILL_AREA_CMD_ST,
+    ROWOW_AI_FOLLOW_CMD_ST
+};
+
+// s_hom_stats: a homunculus class's base, its growth per level and what evolving adds.  Stats are whole numbers here (the db's), hom.str and the like are in tenths
+struct ROWOWHomStats
+{
+    int32 HP = 0;
+    int32 SP = 0;
+    int32 Stats[ROWOW_STAT_COUNT] = { };
+};
+
+// s_homun_skill_tree_entry
+struct ROWOWHomSkillTreeEntry
+{
+    uint16 SkillID = 0;
+    uint16 Max = 0;
+    uint16 NeedLevel = 0;
+    uint32 Intimacy = 0; // In homunculus.intimacy's units
+    bool IsEvolution = false;
+    std::vector<std::pair<uint16, uint16>> Need; // Skill and level
+};
+
+// s_homunculus_db
+struct ROWOWHomunculusDB
+{
+    uint32 BaseClass = 0;
+    uint32 EvoClass = 0;
+    std::string Name;
+    uint32 FoodID = 0; // item_db Id
+    int32 HungryDelay = 60000;
+    uint8 Race = ROWOW_RACE_DEMIHUMAN;
+    uint8 Element = ROWOW_ELEMENT_NEUTRAL;
+    uint8 BaseSize = ROWOW_SIZE_SMALL;
+    uint8 EvoSize = ROWOW_SIZE_MEDIUM;
+    int32 BaseASPD = 700;
+    ROWOWHomStats Base;
+    ROWOWHomStats GrowthMin;
+    ROWOWHomStats GrowthMax;
+    ROWOWHomStats EvolutionMin;
+    ROWOWHomStats EvolutionMax;
+    std::vector<ROWOWHomSkillTreeEntry> SkillTree;
+};
+
+// s_mercenary_db
+struct ROWOWMercenaryDB
+{
+    uint32 ClassID = 0;
+    std::string Name;
+    uint32 Level = 1;
+    ROWOWStatus Status; // Its stats, as they stand before status_calc_misc
+    std::vector<std::pair<uint16, uint16>> Skills; // Skill and level
+};
+
+// What a homunculus and a mercenary share: the creature that shows it, walked from its master's update, and the AI each client runs for it.  On the master's identity,
+// so its master's thread is the only one that touches it
+struct ROWOWFollower
+{
+    uint32 ClassID = 0;
+    int32 FollowerType = ROWOW_BL_HOM;
+    ObjectGuid CreatureGUID; // The creature, on the master's map
+    ROWOWStatus BaseStatus; // base_status
+    uint32 HP = 0; // What it has while its creature isn't out; the creature's own HP and SP go by otherwise
+    uint32 SP = 0;
+    uint64 TeleportTime = 0; // masterteleport_timer: when it's put beside its master, 0 for no timer
+    uint64 NextThinkTime = 0; // The AI runs each MIN_FOLLOWERTHINKTIME
+    uint64 NextSearchTime = 0; // ... and looks around less often
+    uint8 State = ROWOW_AI_IDLE_ST; // MyState
+    ObjectGuid Enemy; // MyEnemy
+    int32 DestX = 0; // MyDestX, MyDestY
+    int32 DestY = 0;
+    float DestZ = 0; // The ground of a ground skill's spot
+    uint16 Skill = 0; // MySkill, MySkillLevel
+    uint16 SkillLevel = 0;
+    std::vector<std::pair<int32, int32>> ReservedMoves; // ResCmdList: the rest of a long move
+    uint64 RegenHPTime = 0; // regen.tick
+    uint64 RegenSPTime = 0;
+    uint32 SentHP = 0; // What its window last heard of, for clif_hom_info and clif_mercenary_updatestatus on a change
+    uint32 SentSP = 0;
+    uint64 NextInfoTime = 0;
+    std::unordered_map<uint16, uint64> SkillBlocks; // scd: when each skill can be used again
+};
+
+// s_homunculus and homun_data
+struct ROWOWHomunData : public ROWOWFollower
+{
+    ROWOWHomunculusDB const* DB = nullptr; // homunculusDB
+    uint32 PrevClass = 0;
+    std::string Name;
+    uint32 MaxHP = 0;
+    uint32 MaxSP = 0;
+    uint32 Intimacy = 0;
+    int32 Hunger = 0;
+    int32 SkillPoints = 0;
+    int32 Level = 1;
+    uint64 Exp = 0;
+    uint64 ExpNext = 0; // exp_next
+    bool IsRenamed = false; // rename_flag
+    int32 Vaporize = ROWOW_HOM_ST_ACTIVE;
+    int32 Stats[ROWOW_STAT_COUNT] = { }; // In tenths (hom.str, ...)
+    bool IsAutoFeed = false;
+    std::unordered_map<uint16, uint16> Skills; // hskill: known skills, by level (0 known, no point spent)
+    uint32 HungryTimer = 0; // ms to the next hom_hungry
+};
+
+// s_mercenary and s_mercenary_data
+struct ROWOWMercData : public ROWOWFollower
+{
+    ROWOWMercenaryDB const* DB = nullptr;
+    uint32 KillCount = 0;
+    int64 LifeTime = 0; // ms of its contract left, which only run while its master is in the RO world (life_time, contract_timer)
+    bool IsDevotion = false; // devotion_flag: it's devoted to its master
+};
+
+// A mercenary guild's standing with a character (mercenary_owner)
+struct ROWOWMercenaryOwner
+{
+    int32 ArchFaith = 0;
+    int32 ArchCalls = 0;
+    int32 SpearFaith = 0;
+    int32 SpearCalls = 0;
+    int32 SwordFaith = 0;
+    int32 SwordCalls = 0;
+};
+
+// On a homunculus's or mercenary's creature: its master
+struct ROWOWFollowerOwner : public DataMap::Base
+{
+    ObjectGuid OwnerGUID;
+    int32 FollowerType = 0;
+};
+
 // An item a new RO identity starts with (rAthena's start_items_pre)
 struct ROWOWStartItem
 {
@@ -1651,6 +1860,10 @@ struct ROWOWIdentity : public DataMap::Base
     bool IsSellingToShop = false; // A sell packet is being handled: its money gets Overcharge
     uint32 Option = 0; // status.option: the options kept with the identity (a Knight's or Crusader's Peco, ROWOW_OPTION_RIDING), saved with it
     std::unique_ptr<ROWOWPetData> Pet; // pd and status.pet_id: the pet that's out (mod_rowow_pet, with IsIncubate 0), null for none
+    std::unique_ptr<ROWOWHomunData> Homunculus; // hd and status.hom_id: the character's homunculus (mod_rowow_homunculus), whether or not it's out, null for none
+    std::unique_ptr<ROWOWMercData> Mercenary; // md and status.mer_id: the mercenary under contract (mod_rowow_mercenary), null for none
+    ROWOWMercenaryOwner MercenaryOwner; // arch_faith and the like (mod_rowow_mercenary_owner)
+    int32 FollowerOrderType = ROWOW_BL_HOM; // Whose ground order the next ROWOW_SPELL_FOLLOWER_ORDER is
     ObjectGuid PetCatchTargetGUID; // What the taming item's spell picked, for pet_catch_process_start
     uint32 PartyUpdateTimer = 0; // Time since UpdateParty last looked at its group
     uint32 PartyGroupGUID = 0; // The party it's in the member table of (ROWOWParty), 0 for none
@@ -1887,7 +2100,7 @@ public:
     int32 StatusBaseAmotionPC(ROWOWIdentity const& identity, ROWOWStatus const& status) const; // status_base_amotion_pc
     int32 StatusBaseAtk(ROWOWStatus const& status) const; // status_base_atk
     void StatusCalcMisc(ROWOWStatus& status, uint32 level) const; // status_calc_misc
-    static int32 GetBattleObjectType(ROWOWStatus const& status) { return status.IsPlayer == true ? ROWOW_BL_PC : ROWOW_BL_MOB; }
+    static int32 GetBattleObjectType(ROWOWStatus const& status) { return status.FollowerType != 0 ? status.FollowerType : (status.IsPlayer == true ? ROWOW_BL_PC : ROWOW_BL_MOB); }
     static int32 GetElementByName(std::string const& name); // An element (Ele_* without the prefix, any case), or -1
     uint32 StatusCalcMaxHPPC(ROWOWIdentity const& identity, ROWOWStatus const& status, ROWOWStatusChange const* sc) const; // status_calc_maxhp_pc
     uint32 StatusCalcMaxSPPC(ROWOWIdentity const& identity, ROWOWStatus const& status, ROWOWStatusChange const* sc) const; // status_calc_maxsp_pc
@@ -2102,6 +2315,76 @@ public:
     void PetOwnerDead(Player* sd); // pc_dead's pet part
     void PetOwnerLevelUp(Player* sd);
     void PetLoot(Player* sd, int32 max); // petloot
+
+    // RO homunculi and mercenaries: what they share (ROWOW_Follower.cpp)
+    void LoadFollowerData();
+    void RegisterFollowerCommands(); // The script commands of homunculi and mercenaries
+    bool IsROFollower(Unit const* unit) const; // A homunculus's or mercenary's creature
+    int32 GetFollowerType(Unit const* unit) const; // ROWOW_BL_HOM, ROWOW_BL_MER or 0
+    Player* GetFollowerMaster(Unit const* unit) const; // Its master, while on its map
+    ROWOWFollower* GetFollower(Unit const* unit) const; // What its master keeps of a homunculus's or mercenary's creature
+    ROWOWFollower* GetFollower(Player* sd, int32 followerType) const;
+    Creature* GetFollowerCreature(Player* sd, ROWOWFollower const& fd) const;
+    void LoadIdentityFollowers(Player* player, ROWOWIdentity& identity);
+    void SaveIdentityFollowers(Player* player, ROWOWIdentity& identity, CharacterDatabaseTransaction trans);
+    void UpdateFollowers(Player* sd, uint32 diff); // Its AI, regen, hunger and contract, from its master's update
+    void FollowerArrive(Player* sd); // Its master arrived on a map
+    void FollowerLeaveMap(Player* sd, bool isChangeMap); // unit_remove_map: its master leaves the map or the game
+    void FollowerMasterWarp(Player* sd, float x, float y, float z, float orientation); // pc_setpos on the same map
+    void FollowerMasterDead(Player* sd); // pc_dead
+    void FollowerDead(Creature* md); // hom_dead, mercenary_dead
+    void FollowerOrderFollow(Player* sd, int32 followerType); // FOLLOW_CMD
+    void FollowerOrderHold(Player* sd, int32 followerType); // HOLD_CMD
+    void FollowerOrderAttack(Player* sd, int32 followerType, Unit* target); // ATTACK_OBJECT_CMD
+    void FollowerOrderMove(Player* sd, int32 followerType, float x, float y, float z); // MOVE_CMD, or the ground skill picked for that spot
+    void FollowerOrderSkill(Player* sd, int32 followerType, uint16 skillID, uint16 skillLevel, Unit* target); // SKILL_OBJECT_CMD, or a ground skill that waits for its spot
+    void FollowerGiveStatusStart(Unit* bl, uint16 skillID); // skill_blockhomun_start, skill_blockmerc_start
+    bool FollowerSkillCheckCondition(Unit* bl, uint16 skillID, uint16 skillLevel, int32 type); // skill_check_condition_mercenary
+    void FollowerSetSkillBlock(Unit* bl, uint16 skillID, uint16 skillLevel); // The skill's own delay (homunculus) or cooldown (mercenary) at its cast end
+    void FollowerClearSkill(Unit* bl); // The cast it was told to make is over
+    void FollowerSendGroundOrder(Player* sd, int32 followerType); // The ground cursor, for FollowerOrderMove
+    void FollowerRefreshStatus(Player* sd, ROWOWFollower& fd); // status_calc_bl_ with the base status new
+    void StatusCalcBLFollower(Creature* md, ROWOWMobStatus* mobStatus); // status_calc_bl_ of what its statuses change on the creature
+    std::string GetFollowerStatusDump(Player* sd, int32 followerType); // The format of the oracle's @oraclehomstatus
+    int32 GetFollowerDamageLogFlag(Unit const* attacker) const; // mob_log_damage's flag
+
+    // RO homunculi (ROWOW_Homunculus.cpp)
+    ROWOWHomunData* GetHomunculus(Player const* player) const; // sd->hd
+    static bool HomIsActive(ROWOWHomunData const* hd); // hom_is_active, with the creature's HP kept in step by its master's update
+    bool HomCall(Player* sd); // hom_call
+    bool HomVaporize(Player* sd, int32 flag); // hom_vaporize
+    int32 HomRessurect(Player* sd, uint8 per, int32 x, int32 y); // hom_ressurect
+    void HomGainExp(Player* sd, ROWOWHomunData& hd, uint64 exp); // hom_gainexp
+    bool HomLevelUp(Player* sd, ROWOWHomunData& hd); // hom_levelup
+    bool HomEvolution(Player* sd, ROWOWHomunData& hd); // hom_evolution
+    bool HomShuffle(Player* sd, ROWOWHomunData& hd); // hom_shuffle
+    void HomMenu(Player* sd, int32 type); // hom_menu
+    bool HomFood(Player* sd, ROWOWHomunData& hd); // hom_food
+    void HomSkillUp(Player* sd, ROWOWHomunData& hd, uint16 skillID); // hom_skillup
+    void HomChangeName(Player* sd, std::string const& name); // hom_change_name
+    int16 HomCheckSkill(Unit const* hd, uint16 skillID) const; // hom_checkskill: 0 when bl isn't a homunculus
+    uint8 HomGetIntimacyGrade(ROWOWHomunData const& hd) const; // hom_get_intimacy_grade
+    uint32 HomIntimacyGrade2Intimacy(uint8 grade) const; // hom_intimacy_grade2intimacy
+    uint32 HomDecreaseIntimacy(ROWOWHomunData& hd, uint32 value); // hom_decrease_intimacy
+    uint32 HomIncreaseIntimacy(ROWOWHomunData& hd, uint32 value); // hom_increase_intimacy
+    void HomSetMaxLevels(Player* sd, int32 level); // For tests: levels it up to level
+    bool HomGMSetClass(Player* sd, uint32 classID); // For tests: a new homunculus of the class
+    void HomGMRefresh(Player* sd, ROWOWHomunData& hd); // For tests: its status again from what was set on it
+    ROWOWHomunculusDB const* GetHomunculusDBForTest(uint32 classID) const { return GetHomunculusDB(classID); }
+    void ClifHomInfo(Player* sd); // clif_hominfo and the rest of its window, for the RO_Identity addon
+
+    // RO mercenaries (ROWOW_Mercenary.cpp)
+    ROWOWMercData* GetMercenary(Player const* player) const; // sd->md
+    bool MercenaryCreate(Player* sd, uint32 classID, uint32 lifeTime); // mercenary_create
+    void MercenaryDelete(Player* sd, int32 reply); // mercenary_delete
+    void MercenaryKills(Player* sd); // mercenary_kills
+    int32 MercenaryGetGuild(ROWOWMercData const& md) const; // mercenary_get_guild
+    int32 MercenaryGetFaith(Player* sd) const; // mercenary_get_faith
+    void MercenarySetFaith(Player* sd, int32 value); // mercenary_set_faith
+    int32 MercenaryGetCalls(Player* sd) const; // mercenary_get_calls
+    void MercenarySetCalls(Player* sd, int32 value); // mercenary_set_calls
+    uint16 MercenaryCheckSkill(Unit const* md, uint16 skillID) const; // mercenary_checkskill: 0 when bl isn't a mercenary
+    void ClifMercenaryInfo(Player* sd); // clif_mercenary_info and the rest of its window, for the RO_Identity addon
     bool PCCheckWeaponType(Unit const* unit, uint32 weapons) const; // pc_check_weapontype: whether the player holds one of the weapon types
     void PCCheckAllowSkill(Player* player); // pc_checkallowskill: ends the statuses the equipment worn no longer allows
     ROWOWSkillCondition SkillGetRequirement(Player* sd, uint16 skillID, uint16 skillLevel) const; // skill_get_requirement
@@ -2169,6 +2452,7 @@ public:
     ROWOWSkillUnit* SkillInitUnit(Unit* src, ROWOWSkillUnitGroup& group, int32 index, int32 x, int32 y, int32 val1, int32 val2, bool hidden, int32 range,
         int64 limit); // skill_initunit
     void SkillDelUnit(Map* map, ROWOWSkillUnitGroup& group, int32 index); // skill_delunit
+    void SkillRemoveTrapOnCell(Unit* src, int32 x, int32 y); // A mercenary's Remove Trap: any trap on the cell goes
     void SkillDelUnitGroup(Map* map, std::shared_ptr<ROWOWSkillUnitGroup> group); // skill_delunitgroup
     void SkillClearUnitGroup(Unit* src); // skill_clear_unitgroup
     ROWOWSkillUnitGroupTickset* SkillUnitGroupTicksetSearch(Unit* bl, ROWOWSkillUnitGroup const& group, uint64 tick); // skill_unitgrouptickset_search
@@ -2188,6 +2472,7 @@ public:
     int32 MapForEachSkillUnitInArea(Map* map, int32 x0, int32 y0, int32 x1, int32 y1, std::function<int32(ROWOWSkillUnitGroup&, int32)> const& func); // map_foreachinallarea (BL_SKILL)
     int32 MapForEachInCellArea(Map* map, uint32 phaseMask, int32 x0, int32 y0, int32 x1, int32 y1, std::function<int32(Unit*)> const& func) const; // map_foreachinallarea (BL_CHAR), by cells
     bool GetCellWorldPosition(uint32 mapID, int32 cellX, int32 cellY, float& xOut, float& yOut) const; // An RO cell's middle in WoW's coordinates
+    void GetCellPositionBesideMaster(Player* sd, float& xOut, float& yOut, float& zOut) const; // unit_calc_pos for an arrival: 2 cells behind it on the ground near its height
     static uint8 UnitGetDir(Unit const* unit); // unit_getdir: the RO direction a unit faces
 
     // The cart (ROWOW_Cart.cpp): the port of rAthena's cart (pc.cpp's pc_setcart, pc_cart_additem, pc_cart_delitem, pc_putitemtocart,
@@ -2273,7 +2558,7 @@ public:
     // Devotion (the Crusader's sd->devotion and the devoted unit's SC_DEVOTION): the Crusader keeps a slot per devoted player, the devoted
     // player's status names the Crusader and the slot.  Both are on one map whenever either reads the other; a slot whose player no longer
     // names it is free (rAthena clears it from status_change_end, which here may run where the Crusader's map isn't)
-    Player* GetDevotionSource(Unit const* bl, bool isRangeChecked) const; // The devoting Crusader on the unit's map whose slot names it (and in reach)
+    Unit* GetDevotionSource(Unit const* bl, bool isRangeChecked) const; // The devoting Crusader on the unit's map whose slot names it (and in reach), or its mercenary
     Player* GetDevotedPlayer(Player* sd, int32 slot); // The player a slot devotes the Crusader to, on its map, or null (and the slot is let go)
     int32 PCDevotionSlot(Player* sd, ObjectGuid targetGUID, int32 count); // unit_skilluse_id2's slot search: the target's own, else a free one, -1
     void PCDelDevotions(Player* sd); // pc_dead's: every devotion of the Crusader ends
@@ -2663,6 +2948,40 @@ public:
     bool PartyCheckExpShare(ROWOWParty const& party) const; // party_check_exp_share (under PartyMutex)
     void SavePartyOption(uint32 groupGUID, ROWOWPartyOption const& option);
 
+    // RO homunculi and mercenaries (ROWOW_Follower.cpp, ROWOW_Homunculus.cpp, ROWOW_Mercenary.cpp)
+    std::unordered_map<uint32, uint32> FollowerEntriesByClassID; // mod_rowow_follower_look (startup only)
+    std::unordered_map<uint32, int32> FollowerTypesByEntry; // The creature entries of followers, for IsROFollower (startup only)
+    std::unordered_map<uint32, ROWOWHomunculusDB> HomunculiByClass; // homunculus_db, by each row's base and evolved class (startup only)
+    std::vector<uint64> HomunculusExpByLevel; // exp_homun (startup only)
+    std::unordered_map<uint32, ROWOWMercenaryDB> MercenariesByClass; // mercenary_db (startup only)
+    ROWOWHomunculusDB const* GetHomunculusDB(uint32 classID) const; // homun_search
+    uint64 HomGetNextExp(int32 level) const; // homun_exp_db.get_nextexp
+    void FollowerSpawn(Player* sd, ROWOWFollower& fd); // map_addblock and clif_spawn: its creature beside the master
+    void FollowerUnspawn(Player* sd, ROWOWFollower& fd); // Its HP and SP back from the creature, and the creature gone
+    void FollowerSaveVitals(Player* sd, ROWOWFollower& fd); // Its HP and SP from the creature
+    void FollowerSetSpeed(Creature* md, int32 speed);
+    void FollowerAI(Player* sd, ROWOWFollower& fd, Creature* md, uint64 tick); // ai.lua's AI()
+    void FollowerAttackTimerSub(Player* sd, ROWOWFollower& fd, Creature* md, ROWOWMobData* mob, uint64 tick); // unit_attack_timer_sub
+    void FollowerTeleportCheck(Player* sd, ROWOWFollower& fd, Creature* md, uint64 tick); // unit_check_start_teleport_timer
+    void FollowerNaturalHeal(Player* sd, ROWOWFollower& fd, Creature* md, ROWOWMobData const* mob, uint64 tick); // status_natural_heal
+    void FollowerMoveToOwner(Player* sd, ROWOWFollower& fd, Creature* md); // clif_parse_HomMoveToMaster
+    Unit* FollowerGetOwnerEnemy(Player* sd, Creature* md) const; // GetOwnerEnemy
+    Unit* FollowerGetMyEnemy(ROWOWFollower const& fd, Creature* md) const; // GetMyEnemy
+    bool FollowerIsInSight(Creature* md, Unit const* target, int32 range) const; // IsInAttackSight's distance
+    void FollowerSkillUseID(Player* sd, ROWOWFollower& fd, Creature* md, uint16 skillID, uint16 skillLevel, Unit* target); // clif_parse_UseSkillToId_homun and _mercenary
+    void FollowerSkillUsePos(Player* sd, ROWOWFollower& fd, Creature* md, uint16 skillID, uint16 skillLevel, int32 x, int32 y, float z); // clif_parse_UseSkillToPos_homun and _mercenary
+    bool FollowerSkillIsNotOk(Player* sd, ROWOWFollower& fd, uint16 skillID); // skill_isNotOk_hom, skill_isNotOk_mercenary
+    void StatusCalcHomunculus(ROWOWHomunData& hd, bool isFirst); // status_calc_homunculus_
+    void StatusCalcMercenary(Player* sd, ROWOWMercData& md, bool isFirst); // status_calc_mercenary_
+    void HomCalcSkillTree(ROWOWHomunData& hd); // hom_calc_skilltree
+    void HomCreate(Player* sd, ROWOWHomunData& hd, ROWOWHomunculusDB const& db); // hom_create_request and hom_recv_data
+    void HomDelete(Player* sd); // hom_delete
+    void HomSave(ROWOWHomunData const& hd, ObjectGuid::LowType charGUID, CharacterDatabaseTransaction trans) const; // hom_save
+    void HomHungry(Player* sd, ROWOWHomunData& hd, uint32 diff); // hom_hungry
+    void HomDeadOwn(Player* sd, ROWOWHomunData& hd); // hom_dead
+    void MercSave(ROWOWMercData const& md, ObjectGuid::LowType charGUID, CharacterDatabaseTransaction trans) const; // mercenary_save
+    void MercenaryUpdate(Player* sd, ROWOWMercData& md, uint32 diff); // The contract timer
+
     // RO taming pets (ROWOW_Pet.cpp)
     std::unordered_map<uint32, ROWOWPetDB> PetsByMobID; // pet_db (startup only)
     std::unordered_map<uint64, uint32> PetLookEntriesByKey; // By mob << 32 | accessory: its creature (startup only)
@@ -2688,6 +3007,7 @@ public:
     bool PetCreateEgg(Player* sd, ROWOWPetDB const& db); // pet_create_egg and pet_get_egg
     void PetCatchProcessEnd(Player* sd, Creature* md, uint32 itemID, uint8 flag); // pet_catch_process_end
     void PetFood(Player* sd, ROWOWPetData& pd); // pet_food
+    bool IsItemInGroup(std::string const& groupName, uint32 itemID) const; // itemdb_group.item_exists
     void PetPerformance(Player* sd, ROWOWPetData& pd); // pet_performance
     void PetUnequipItem(Player* sd, ROWOWPetData& pd); // pet_unequipitem
     void PetLootItemDrop(Player* sd, ROWOWPetData& pd, Player* receiver); // pet_lootitem_drop

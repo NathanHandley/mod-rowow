@@ -545,7 +545,7 @@ void ROWOWMod::RefreshIllusionOptionLooks(Player* player, ROWOWIllusion const* i
     // an aura the Crusader casts, so its beam goes from it
     uint32 wantedSpellIDs[4] = { 0, 0, 0, 0 };
     uint32 linkSpellID = 0;
-    Player* linkSource = nullptr;
+    Unit* linkSource = nullptr;
     if (illusion != nullptr && IsInROForm(player) == true)
     {
         if (GetSCE(player, ROWOW_SC_DEVOTION) != nullptr)

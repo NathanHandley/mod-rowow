@@ -223,7 +223,7 @@ namespace
     class ROWOWSkillDecreaseAgi : public ROWOWSkillImpl
     {
     public:
-        ROWOWSkillDecreaseAgi() : ROWOWSkillImpl(ROWOW_SKILL_AL_DECAGI) { }
+        explicit ROWOWSkillDecreaseAgi(uint16 skillID = ROWOW_SKILL_AL_DECAGI) : ROWOWSkillImpl(skillID) { }
 
         void CastendNoDamageID(Unit* src, Unit* bl, uint16 skillLevel, uint64 /*tick*/, int32& /*flag*/) const override
         {
@@ -383,7 +383,7 @@ namespace
     class ROWOWSkillLexDivina : public ROWOWSkillImpl
     {
     public:
-        ROWOWSkillLexDivina() : ROWOWSkillImpl(ROWOW_SKILL_PR_LEXDIVINA) { }
+        explicit ROWOWSkillLexDivina(uint16 skillID = ROWOW_SKILL_PR_LEXDIVINA) : ROWOWSkillImpl(skillID) { }
 
         void CastendNoDamageID(Unit* src, Unit* target, uint16 skillLevel, uint64 tick, int32& flag) const override
         {
@@ -987,6 +987,13 @@ void AddROWOWSkillsAcolyte()
     ROWOW->RegisterSkillImpl(new ROWOWSkillHeal());
     ROWOW->RegisterSkillImpl(new ROWOWSkillTeleport());
     ROWOW->RegisterSkillImpl(new ROWOWSkillBlessingIncreaseAgi(ROWOW_SKILL_AL_BLESSING));
+
+    // A mercenary's own of these (skills/mercenary): the same but for their SkillID
+    ROWOW->RegisterSkillImpl(new ROWOWSkillBlessingIncreaseAgi(ROWOW_SKILL_MER_BLESSING));
+    ROWOW->RegisterSkillImpl(new ROWOWSkillBlessingIncreaseAgi(ROWOW_SKILL_MER_INCAGI));
+    ROWOW->RegisterSkillImpl(new ROWOWSkillDecreaseAgi(ROWOW_SKILL_MER_DECAGI));
+    ROWOW->RegisterSkillImpl(new ROWOWSkillLexDivina(ROWOW_SKILL_MER_LEXDIVINA));
+    ROWOW->RegisterSkillImpl(new ROWOWStatusSkillImpl(ROWOW_SKILL_MER_KYRIE));
     ROWOW->RegisterSkillImpl(new ROWOWSkillBlessingIncreaseAgi(ROWOW_SKILL_AL_INCAGI));
     ROWOW->RegisterSkillImpl(new ROWOWSkillDecreaseAgi());
     ROWOW->RegisterSkillImpl(new ROWOWSkillPartyStatus(ROWOW_SKILL_AL_ANGELUS));

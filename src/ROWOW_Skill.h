@@ -261,6 +261,8 @@ enum ROWOWRequireState : uint8
 
 // Ground skill units (skill.hpp)
 #define ROWOW_SKILLUNITTIMER_INTERVAL               100     // SKILLUNITTIMER_INTERVAL: how often skill_unit_timer runs over a map's units (ms)
+#define ROWOW_MC_SKILLBASE                          8201    // MC_SKILLBASE: where a mercenary's skills start
+#define ROWOW_MAX_MERCSKILL                         41      // MAX_MERCSKILL
 #define ROWOW_MAX_SKILLUNITGROUPTICKSET             25      // MAX_SKILLUNITGROUPTICKSET: the unit groups a unit remembers being hit by
 #define ROWOW_MAX_SQUARE_LAYOUT                     7       // MAX_SQUARE_LAYOUT: the square layouts go up to 15x15
 #define ROWOW_SKILL_UNIT_GROUP_ID_START             1500    // skill_unit_group_newid starts at MAX_SKILL (group IDs never look like skill IDs)
@@ -1032,5 +1034,7 @@ void AddROWOWSkillsTaekwon();
 void AddROWOWSkillsGunslinger();
 void AddROWOWSkillsNinja();
 void AddROWOWSkillsNpc();
+void AddROWOWSkillsHomunculus();
+void AddROWOWSkillsMercenary();
 
 #endif

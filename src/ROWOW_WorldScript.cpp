@@ -56,6 +56,7 @@ public:
         ROWOW->LoadPetData(); // After the items and the bonus engine, which its rows and scripts use
         ROWOW->LoadPartyData();
         ROWOW->LoadSkillData(); // After the items, whose names the skills' item costs use
+        ROWOW->LoadFollowerData(); // After the items and skills homunculi and mercenaries name
         ROWOW->LoadMobSkillData(); // After the skills, which its rows' target rules read
         ROWOW->LoadFloorItemData(); // After the items and the monsters' statuses
         ROWOW->LoadAbraData();

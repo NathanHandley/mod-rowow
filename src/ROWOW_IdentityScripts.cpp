@@ -105,6 +105,7 @@ public:
         ROWOW->UpdateUnitRun(player);
         ROWOW->UpdateParty(player, p_time);
         ROWOW->UpdatePet(player, p_time);
+        ROWOW->UpdateFollowers(player, p_time);
 
         // A vendor stays sitting by its shop: standing up or walking away closes it
         ROWOWIdentity* identity = ROWOW->GetIdentity(player);
@@ -121,6 +122,7 @@ public:
         ROWOW->SkillClearUnitGroup(player);
         ROWOW->SkillClearTimerSkill(player);
         ROWOW->PetLeaveMap(player);
+        ROWOW->FollowerLeaveMap(player, false);
         ROWOW->PartyRemoveMember(player);
     }
 
@@ -138,13 +140,15 @@ public:
         // Every character has the world travel spell (new ones start with it)
         if (player->HasSpell(ROWOW_SPELL_WORLD_TRAVEL) == false && sSpellMgr->GetSpellInfo(ROWOW_SPELL_WORLD_TRAVEL) != nullptr)
             player->learnSpell(ROWOW_SPELL_WORLD_TRAVEL);
+        if (player->HasSpell(ROWOW_SPELL_FOLLOWER_ORDER) == false && sSpellMgr->GetSpellInfo(ROWOW_SPELL_FOLLOWER_ORDER) != nullptr)
+            player->learnSpell(ROWOW_SPELL_FOLLOWER_ORDER);
 
         // The pet loads after the character is placed on the map, so it's put away again here
         if (ROWOW->IsInROForm(player) == true)
             player->UnsummonPetTemporaryIfAny();
     }
 
-    bool OnPlayerBeforeTeleport(Player* player, uint32 mapid, float x, float y, float /*z*/, float /*orientation*/, uint32 /*options*/, Unit* /*target*/) override
+    bool OnPlayerBeforeTeleport(Player* player, uint32 mapid, float x, float y, float z, float orientation, uint32 /*options*/, Unit* /*target*/) override
     {
         // Remember where the character came into the RO world from, and where the identity left it, for the world travel spell
         if (ROWOW->IsEnabled == false || player == nullptr || player->IsInWorld() == false)
@@ -159,9 +163,11 @@ public:
                 ROWOW->SkillClearUnitGroup(player);
                 ROWOW->SkillClearTimerSkill(player);
                 ROWOW->PetLeaveMap(player);
+                ROWOW->FollowerLeaveMap(player, true);
             }
             else
             {
+                ROWOW->FollowerMasterWarp(player, x, y, z, orientation);
                 ROWOW->PCSetInvincibleTimer(player);
                 ROWOWIdentity* identity = ROWOW->GetIdentity(player);
                 identity->InvinciblePositionX = x;
@@ -438,7 +444,7 @@ public:
             ROWOW->MobLogDamage(victim->ToCreature(), attacker, damage);
 
         // status_damage's mob_log_damage(src, target, 0, dhp): what a monster deals counts for its MVP
-        if (attacker != nullptr && attacker != victim && attacker->IsCreature() == true && victim->IsPlayer() == true)
+        if (attacker != nullptr && attacker != victim && attacker->IsCreature() == true && (victim->IsPlayer() == true || ROWOW->IsROFollower(victim) == true))
             ROWOW->MobLogDamage(attacker->ToCreature(), victim, 0, damage);
 
         // A monster's death is coming: its dead skills, and the revives that take the death away
@@ -476,6 +482,7 @@ public:
                 ROWOW->PCDelSpiritBall(player, ROWOW->PCGetSpiritBall(player), 0);
                 ROWOW->PCSetDieCounter(player, ROWOW->GetIdentityVariable(*ROWOW->GetIdentity(player), ROWOW_PCDIECOUNTER_VAR) + 1);
                 ROWOW->PetOwnerDead(player);
+                ROWOW->FollowerMasterDead(player);
             }
         }
         if (unit->IsCreature() == true)
@@ -601,6 +608,23 @@ public:
             { "statup",   HandleROStatUpCommand, SEC_PLAYER,     Console::No },
             { "partyoption", HandleROPartyOptionCommand, SEC_PLAYER, Console::No },
             { "pet",      HandleROPetCommand,    SEC_PLAYER,     Console::No },
+            { "hom",      HandleROHomCommand,    SEC_PLAYER,     Console::No },
+            { "homname",  HandleROHomNameCommand, SEC_PLAYER,    Console::No },
+            { "homorder", HandleROHomOrderCommand, SEC_PLAYER,   Console::No },
+            { "homskill", HandleROHomSkillCommand, SEC_PLAYER,   Console::No },
+            { "homskillup", HandleROHomSkillUpCommand, SEC_PLAYER, Console::No },
+            { "homautofeed", HandleROHomAutoFeedCommand, SEC_PLAYER, Console::No },
+            { "homset",   HandleROHomSetCommand, SEC_GAMEMASTER, Console::No },
+            { "homstatus", HandleROHomStatusCommand, SEC_GAMEMASTER, Console::No },
+            { "hombattle", HandleROHomBattleCommand, SEC_GAMEMASTER, Console::No },
+            { "homforce", HandleROHomForceCommand, SEC_GAMEMASTER, Console::No },
+            { "homforceskill", HandleROHomForceSkillCommand, SEC_GAMEMASTER, Console::No },
+            { "merbattle", HandleROMerBattleCommand, SEC_GAMEMASTER, Console::No },
+            { "merorder", HandleROMerOrderCommand, SEC_PLAYER,   Console::No },
+            { "merskill", HandleROMerSkillCommand, SEC_PLAYER,   Console::No },
+            { "merdismiss", HandleROMerDismissCommand, SEC_PLAYER, Console::No },
+            { "merset",   HandleROMerSetCommand, SEC_GAMEMASTER, Console::No },
+            { "merstatus", HandleROMerStatusCommand, SEC_GAMEMASTER, Console::No },
             { "petname",  HandleROPetNameCommand, SEC_PLAYER,    Console::No },
             { "pethatch", HandleROPetHatchCommand, SEC_PLAYER,   Console::No },
             { "petset",   HandleROPetSetCommand, SEC_GAMEMASTER, Console::No },
@@ -830,6 +854,259 @@ public:
         if (ROWOW->IsInROForm(player) == false)
             return false;
         ROWOW->PetMenu(player, int32(menuNum));
+        return true;
+    }
+
+    static bool HandleROHomCommand(ChatHandler* handler, uint32 menuNum)
+    {
+        // The homunculus window's menu (clif_parse_HomMenu): 0 information, 1 feed, 2 delete
+        Player* player = handler->GetSession()->GetPlayer();
+        if (ROWOW->IsInROForm(player) == false)
+            return false;
+        ROWOW->HomMenu(player, int32(menuNum));
+        return true;
+    }
+
+    static bool HandleROHomNameCommand(ChatHandler* handler, Tail name)
+    {
+        // The homunculus window's rename (clif_parse_ChangeHomunculusName)
+        Player* player = handler->GetSession()->GetPlayer();
+        if (ROWOW->IsInROForm(player) == false)
+            return false;
+        ROWOW->HomChangeName(player, std::string(name));
+        return true;
+    }
+
+    // ai.lua's commands: follow (Alt+T), hold, attack the selected monster, and move (the next ROWOW_SPELL_FOLLOWER_ORDER's spot, RO's Alt and click)
+    static bool HandleFollowerOrder(ChatHandler* handler, int32 followerType, std::string_view order)
+    {
+        Player* player = handler->GetSession()->GetPlayer();
+        if (ROWOW->IsInROForm(player) == false)
+            return false;
+        if (order == "follow")
+            ROWOW->FollowerOrderFollow(player, followerType);
+        else if (order == "hold")
+            ROWOW->FollowerOrderHold(player, followerType);
+        else if (order == "attack")
+            ROWOW->FollowerOrderAttack(player, followerType, player->GetSelectedUnit());
+        else if (order == "move")
+            ROWOW->FollowerSendGroundOrder(player, followerType);
+        else
+            return false;
+        return true;
+    }
+
+    static bool HandleROHomOrderCommand(ChatHandler* handler, std::string_view order)
+    {
+        return HandleFollowerOrder(handler, ROWOW_BL_HOM, order);
+    }
+
+    static bool HandleROMerOrderCommand(ChatHandler* handler, std::string_view order)
+    {
+        return HandleFollowerOrder(handler, ROWOW_BL_MER, order);
+    }
+
+    static bool HandleROHomSkillCommand(ChatHandler* handler, uint32 skillID, uint32 skillLevel)
+    {
+        // A skill of the homunculus window, on the selected unit (the master for a support skill, itself for a self skill)
+        Player* player = handler->GetSession()->GetPlayer();
+        if (ROWOW->IsInROForm(player) == false)
+            return false;
+        ROWOW->FollowerOrderSkill(player, ROWOW_BL_HOM, uint16(skillID), uint16(skillLevel), player->GetSelectedUnit());
+        return true;
+    }
+
+    static bool HandleROMerSkillCommand(ChatHandler* handler, uint32 skillID, uint32 skillLevel)
+    {
+        Player* player = handler->GetSession()->GetPlayer();
+        if (ROWOW->IsInROForm(player) == false)
+            return false;
+        ROWOW->FollowerOrderSkill(player, ROWOW_BL_MER, uint16(skillID), uint16(skillLevel), player->GetSelectedUnit());
+        return true;
+    }
+
+    static bool HandleROHomSkillUpCommand(ChatHandler* handler, uint32 skillID)
+    {
+        // pc_skillup's homunculus branch
+        Player* player = handler->GetSession()->GetPlayer();
+        ROWOWHomunData* hd = ROWOW->IsInROForm(player) == true ? ROWOW->GetHomunculus(player) : nullptr;
+        if (hd == nullptr)
+            return false;
+        ROWOW->HomSkillUp(player, *hd, uint16(skillID));
+        return true;
+    }
+
+    static bool HandleROHomAutoFeedCommand(ChatHandler* handler, uint32 isOn)
+    {
+        // clif_parse_configuration's CONFIG_HOMUNCULUS_AUTOFEED
+        Player* player = handler->GetSession()->GetPlayer();
+        ROWOWHomunData* hd = ROWOW->IsInROForm(player) == true ? ROWOW->GetHomunculus(player) : nullptr;
+        if (hd == nullptr || ROWOW->BattleConfig.FeatureHomunculusAutofeed == 0)
+            return false;
+        hd->IsAutoFeed = isOn != 0;
+        ROWOW->ClifHomInfo(player);
+        return true;
+    }
+
+    static bool HandleROHomSetCommand(ChatHandler* handler, std::string_view field, int64 value)
+    {
+        // For tests: class (a new homunculus of it), level, intimacy, hunger, exp, gainexp, hp, sp, skill points
+        Player* player = handler->GetSession()->GetPlayer();
+        ROWOWIdentity* identity = ROWOW->GetIdentity(player);
+        if (field == "class")
+            return ROWOW->HomGMSetClass(player, uint32(value));
+        ROWOWHomunData* hd = identity->Homunculus.get();
+        if (hd == nullptr)
+            return false;
+        if (field == "evolve")
+            return ROWOW->HomEvolution(player, *hd);
+        if (field == "level")
+            ROWOW->HomSetMaxLevels(player, int32(value));
+        else if (field == "intimacy")
+            hd->Intimacy = uint32(value);
+        else if (field == "hunger")
+            hd->Hunger = int32(value);
+        else if (field == "exp")
+            hd->Exp = uint64(value);
+        else if (field == "gainexp")
+            ROWOW->HomGainExp(player, *hd, uint64(value));
+        else if (field == "points")
+            hd->SkillPoints = int32(value);
+        else if (field == "hungertimer")
+            hd->HungryTimer = uint32(value);
+        else if (Creature* md = ROWOW->GetFollowerCreature(player, *hd); md != nullptr && field == "hp")
+            md->SetHealth(uint32(value));
+        else if (md != nullptr && field == "sp")
+            md->SetPower(POWER_MANA, uint32(value));
+        else
+            return false;
+        ROWOW->ClifHomInfo(player);
+        handler->PSendSysMessage("Homunculus {}: class {}, level {}, exp {}/{}, intimacy {}, hunger {}, points {}, hp {}, vaporize {}", hd->Name, hd->ClassID, hd->Level, hd->Exp, hd->ExpNext, hd->Intimacy, hd->Hunger,
+            hd->SkillPoints, hd->HP, hd->Vaporize);
+        return true;
+    }
+
+    static bool HandleROHomStatusCommand(ChatHandler* handler)
+    {
+        Player* player = handler->GetSession()->GetPlayer();
+        handler->PSendSysMessage("{}", ROWOW->GetFollowerStatusDump(player, ROWOW_BL_HOM));
+        return true;
+    }
+
+    static bool HandleROMerStatusCommand(ChatHandler* handler)
+    {
+        Player* player = handler->GetSession()->GetPlayer();
+        handler->PSendSysMessage("{}", ROWOW->GetFollowerStatusDump(player, ROWOW_BL_MER));
+        return true;
+    }
+
+    static bool HandleROHomForceCommand(ChatHandler* handler, uint32 classID, int32 level, uint32 maxHP, uint32 maxSP, int32 str, int32 agi, int32 vit, int32 int_, int32 dex, int32 luk, uint32 intimacy, int32 hunger)
+    {
+        // For tests, the oracle's @oraclehom set: stats whole, no skills known
+        Player* player = handler->GetSession()->GetPlayer();
+        ROWOWHomunData* hd = ROWOW->GetHomunculus(player);
+        ROWOWHomunculusDB const* db = ROWOW->GetHomunculusDBForTest(classID);
+        if (hd == nullptr || db == nullptr)
+            return false;
+        hd->DB = db;
+        hd->ClassID = classID;
+        hd->Level = level;
+        hd->MaxHP = maxHP;
+        hd->MaxSP = maxSP;
+        hd->Stats[ROWOW_STAT_STR] = str * 10;
+        hd->Stats[ROWOW_STAT_AGI] = agi * 10;
+        hd->Stats[ROWOW_STAT_VIT] = vit * 10;
+        hd->Stats[ROWOW_STAT_INT] = int_ * 10;
+        hd->Stats[ROWOW_STAT_DEX] = dex * 10;
+        hd->Stats[ROWOW_STAT_LUK] = luk * 10;
+        hd->Intimacy = intimacy;
+        hd->Hunger = hunger;
+        hd->Skills.clear();
+        ROWOW->HomGMRefresh(player, *hd);
+        return true;
+    }
+
+    static bool HandleROHomForceSkillCommand(ChatHandler* handler, uint32 skillID, uint32 skillLevel)
+    {
+        // For tests, the oracle's @oraclehom skill
+        Player* player = handler->GetSession()->GetPlayer();
+        ROWOWHomunData* hd = ROWOW->GetHomunculus(player);
+        if (hd == nullptr)
+            return false;
+        hd->Skills[uint16(skillID)] = uint16(skillLevel);
+        ROWOW->HomGMRefresh(player, *hd);
+        return true;
+    }
+
+    static bool RunFollowerBattle(ChatHandler* handler, int32 followerType, uint32 swings, Optional<uint32> skillID, Optional<uint32> skillLevel)
+    {
+        // RO attacks between the homunculus or mercenary and the selected monster, not dealt, as the oracle's @oraclehom dmg and @oraclemer dmg print them
+        Player* player = handler->GetSession()->GetPlayer();
+        Creature* mob = handler->getSelectedCreature();
+        ROWOWFollower* fd = ROWOW->GetFollower(player, followerType);
+        Creature* md = fd != nullptr ? ROWOW->GetFollowerCreature(player, *fd) : nullptr;
+        if (md == nullptr || mob == nullptr || ROWOW->GetROMobID(mob) == 0)
+        {
+            handler->SendSysMessage("Select an RO monster, with the homunculus or mercenary out.");
+            return false;
+        }
+        bool isHomunculus = followerType == ROWOW_BL_HOM;
+        RunBattleSwings(handler, isHomunculus == true ? "hom2mob" : "mer2mob", swings, md, mob, ROWOW_BF_WEAPON, 0, 0, 0);
+        RunBattleSwings(handler, isHomunculus == true ? "mob2hom" : "mob2mer", swings, mob, md, ROWOW_BF_WEAPON, 0, 0, 0);
+        ROWOWSkill const* skill = skillID.has_value() == true ? ROWOW->GetSkill(uint16(*skillID)) : nullptr;
+        if (skill == nullptr)
+            return true;
+        uint16 level = uint16(skillLevel.value_or(1));
+        BattlePrint(handler, fmt::format("skill id={} lv={} cast_ms={} delay_ms={} heal={}", *skillID, level, ROWOW->SkillCastFix(md, uint16(*skillID), level), ROWOW->SkillDelayFix(md, uint16(*skillID), level),
+            ROWOW->SkillCalcHeal(md, player, uint16(*skillID), level, true)));
+        if (skill->AttackType == ROWOW_BF_WEAPON || skill->AttackType == ROWOW_BF_MAGIC || skill->AttackType == ROWOW_BF_MISC)
+            RunBattleSwings(handler, isHomunculus == true ? "homskill" : "merskill", swings, md, mob, skill->AttackType, uint16(*skillID), level, 0);
+        return true;
+    }
+
+    static bool HandleROHomBattleCommand(ChatHandler* handler, uint32 swings, Optional<uint32> skillID, Optional<uint32> skillLevel)
+    {
+        return RunFollowerBattle(handler, ROWOW_BL_HOM, swings, skillID, skillLevel);
+    }
+
+    static bool HandleROMerBattleCommand(ChatHandler* handler, uint32 swings, Optional<uint32> skillID, Optional<uint32> skillLevel)
+    {
+        return RunFollowerBattle(handler, ROWOW_BL_MER, swings, skillID, skillLevel);
+    }
+
+    static bool HandleROMerDismissCommand(ChatHandler* handler)
+    {
+        // clif_parse_mercenary_action's delete
+        Player* player = handler->GetSession()->GetPlayer();
+        if (ROWOW->IsInROForm(player) == false || ROWOW->GetMercenary(player) == nullptr)
+            return false;
+        ROWOW->MercenaryDelete(player, 2);
+        return true;
+    }
+
+    static bool HandleROMerSetCommand(ChatHandler* handler, std::string_view field, int64 value)
+    {
+        // For tests: lifetime in ms, kills, hp, sp, faith; create <class> makes one for 30 minutes
+        Player* player = handler->GetSession()->GetPlayer();
+        if (field == "create")
+            return ROWOW->MercenaryCreate(player, uint32(value), 1800000);
+        ROWOWMercData* md = ROWOW->GetMercenary(player);
+        if (md == nullptr)
+            return false;
+        if (field == "lifetime")
+            md->LifeTime = value;
+        else if (field == "kills")
+            md->KillCount = uint32(value);
+        else if (field == "faith")
+            ROWOW->MercenarySetFaith(player, int32(value) - ROWOW->MercenaryGetFaith(player));
+        else if (Creature* creature = ROWOW->GetFollowerCreature(player, *md); creature != nullptr && field == "hp")
+            creature->SetHealth(uint32(value));
+        else if (creature != nullptr && field == "sp")
+            creature->SetPower(POWER_MANA, uint32(value));
+        else
+            return false;
+        ROWOW->ClifMercenaryInfo(player);
+        handler->PSendSysMessage("Mercenary {}: lifetime {}, kills {}, hp {}, faith {}, calls {}", md->DB->Name, md->LifeTime, md->KillCount, md->HP, ROWOW->MercenaryGetFaith(player), ROWOW->MercenaryGetCalls(player));
         return true;
     }
 
@@ -2157,6 +2434,9 @@ public:
         trans->Append("DELETE FROM `mod_rowow_identity_cart` WHERE `guid` = {}", guid);
         trans->Append("DELETE FROM `mod_rowow_identity_memo` WHERE `guid` = {}", guid);
         trans->Append("DELETE FROM `mod_rowow_identity_quest` WHERE `guid` = {}", guid);
+        trans->Append("DELETE FROM `mod_rowow_homunculus` WHERE `CharacterGUID` = {}", guid);
+        trans->Append("DELETE FROM `mod_rowow_mercenary` WHERE `CharacterGUID` = {}", guid);
+        trans->Append("DELETE FROM `mod_rowow_mercenary_owner` WHERE `CharacterGUID` = {}", guid);
         CharacterDatabase.DirectCommitTransaction(trans); // Before the new identity's save, which is queued
         player->CustomData.Erase("ROWOWIdentity");
         if (wasInForm == true)

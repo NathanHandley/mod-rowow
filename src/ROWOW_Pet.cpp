@@ -415,6 +415,27 @@ void ROWOWMod::PetSetSpeed(Player* sd, ROWOWPetData& pd, int32 speed)
     md->SetSpeed(MOVE_RUN, yardsPerSecond / baseMoveSpeed[MOVE_RUN], true);
 }
 
+void ROWOWMod::GetCellPositionBesideMaster(Player* sd, float& xOut, float& yOut, float& zOut) const
+{
+    // unit_calc_pos on the master's own cell, on the ground near its height, or the master's own spot
+    int32 x = 0, y = 0, toX = 0, toY = 0;
+    GetUnitCell(sd, x, y);
+    xOut = sd->GetPositionX();
+    yOut = sd->GetPositionY();
+    zOut = sd->GetPositionZ();
+    if (UnitCalcPos(sd->GetMap(), x, y, x, y, UnitGetDir(sd), toX, toY) == false)
+        return;
+    float cellX = 0, cellY = 0;
+    if (GetCellWorldPosition(sd->GetMapId(), toX, toY, cellX, cellY) == false)
+        return;
+    float cellZ = sd->GetMap()->GetHeight(sd->GetPhaseMask(), cellX, cellY, sd->GetPositionZ() + ROWOW_SKILL_CELL_GROUND_SEARCH_HEIGHT, true, ROWOW_SKILL_CELL_GROUND_SEARCH_DISTANCE);
+    if (cellZ <= INVALID_HEIGHT)
+        return;
+    xOut = cellX;
+    yOut = cellY;
+    zOut = cellZ;
+}
+
 void ROWOWMod::PetSpawn(Player* sd, ROWOWPetData& pd)
 {
     // pet_data_init's placing and clif_spawn: 2 cells behind the master, on the ground near its height
@@ -426,23 +447,8 @@ void ROWOWMod::PetSpawn(Player* sd, ROWOWPetData& pd)
         LOG_ERROR("module.ROWOW", "ROWOWMod::PetSpawn: pet {} has no creature (run the converter)", pd.Pet.MobID);
         return;
     }
-    int32 x = 0, y = 0, toX = 0, toY = 0;
-    GetUnitCell(sd, x, y);
-    float worldX = sd->GetPositionX(), worldY = sd->GetPositionY(), worldZ = sd->GetPositionZ();
-    if (UnitCalcPos(sd->GetMap(), x, y, x, y, UnitGetDir(sd), toX, toY) == true)
-    {
-        float cellX = 0, cellY = 0;
-        if (GetCellWorldPosition(sd->GetMapId(), toX, toY, cellX, cellY) == true)
-        {
-            float cellZ = sd->GetMap()->GetHeight(sd->GetPhaseMask(), cellX, cellY, sd->GetPositionZ() + ROWOW_SKILL_CELL_GROUND_SEARCH_HEIGHT, true, ROWOW_SKILL_CELL_GROUND_SEARCH_DISTANCE);
-            if (cellZ > INVALID_HEIGHT)
-            {
-                worldX = cellX;
-                worldY = cellY;
-                worldZ = cellZ;
-            }
-        }
-    }
+    float worldX = 0, worldY = 0, worldZ = 0;
+    GetCellPositionBesideMaster(sd, worldX, worldY, worldZ);
     TempSummon* md = sd->SummonCreature(entry, worldX, worldY, worldZ, sd->GetOrientation(), TEMPSUMMON_MANUAL_DESPAWN);
     if (md == nullptr)
         return;

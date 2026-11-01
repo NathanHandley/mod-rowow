@@ -454,29 +454,48 @@ namespace
         }
     };
 
-    // SkillCallHomunculus, SkillVaporize and SkillHomunculusResurrection: the homunculus comes with R11; until then there is none to call,
-    // rest or bring back, so they fail without using anything up
-    class ROWOWSkillHomunculus : public ROWOWSkillImpl
+    // SkillCallHomunculus: a character's first call makes its homunculus from the skill's Embryo (hom_call).  rAthena's char server answers after the requirement took it; here the
+    // homunculus is there at once, and the requirement leaves a character with one alone, so the Embryo goes first.  The next calls bring it back from its rest
+    class ROWOWSkillCallHomunculus : public ROWOWSkillImpl
     {
     public:
-        explicit ROWOWSkillHomunculus(uint16 skillID) : ROWOWSkillImpl(skillID) { }
+        ROWOWSkillCallHomunculus() : ROWOWSkillImpl(ROWOW_SKILL_AM_CALLHOMUN) { }
 
-        void CastendNoDamageID(Unit* src, Unit* /*target*/, uint16 /*skillLevel*/, uint64 /*tick*/, int32& flag) const override
+        void CastendNoDamageID(Unit* src, Unit* /*target*/, uint16 skillLevel, uint64 /*tick*/, int32& /*flag*/) const override
         {
-            Fail(src, flag);
-        }
-
-        void CastendPos2(Unit* src, int32 /*x*/, int32 /*y*/, uint16 /*skillLevel*/, uint64 /*tick*/, int32& flag) const override
-        {
-            Fail(src, flag);
-        }
-
-    private:
-        void Fail(Unit* src, int32& flag) const
-        {
-            if (Player* sd = src->ToPlayer())
+            Player* sd = src->ToPlayer();
+            if (sd == nullptr)
+                return;
+            if (ROWOW->GetHomunculus(sd) == nullptr)
+                ROWOW->SkillConsumeRequirement(sd, SkillID, skillLevel, 2);
+            if (ROWOW->HomCall(sd) == false)
                 ROWOW->ClifSkillFail(sd, SkillID, ROWOW_USESKILL_FAIL_LEVEL);
-            flag |= ROWOW_SKILL_NOCONSUME_REQ;
+        }
+    };
+
+    // SkillVaporize: the homunculus to rest, with its state
+    class ROWOWSkillVaporize : public ROWOWSkillImpl
+    {
+    public:
+        ROWOWSkillVaporize() : ROWOWSkillImpl(ROWOW_SKILL_AM_REST) { }
+
+        void CastendNoDamageID(Unit* src, Unit* /*target*/, uint16 /*skillLevel*/, uint64 /*tick*/, int32& /*flag*/) const override
+        {
+            if (Player* sd = src->ToPlayer(); sd != nullptr && ROWOW->HomVaporize(sd, ROWOW_HOM_ST_REST) == false)
+                ROWOW->ClifSkillFail(sd, SkillID, ROWOW_USESKILL_FAIL_LEVEL);
+        }
+    };
+
+    // SkillHomunculusResurrection: a dead homunculus back, with 20% of its HP a level
+    class ROWOWSkillHomunculusResurrection : public ROWOWSkillImpl
+    {
+    public:
+        ROWOWSkillHomunculusResurrection() : ROWOWSkillImpl(ROWOW_SKILL_AM_RESURRECTHOMUN) { }
+
+        void CastendPos2(Unit* src, int32 x, int32 y, uint16 skillLevel, uint64 /*tick*/, int32& /*flag*/) const override
+        {
+            if (Player* sd = src->ToPlayer(); sd != nullptr && ROWOW->HomRessurect(sd, uint8(20 * skillLevel), x, y) == 0)
+                ROWOW->ClifSkillFail(sd, SkillID, ROWOW_USESKILL_FAIL_LEVEL);
         }
     };
 
@@ -807,9 +826,9 @@ void AddROWOWSkillsMerchant()
     ROWOW->RegisterSkillImpl(new ROWOWSkillChemicalProtection(ROWOW_SKILL_AM_CP_ARMOR, ROWOW_EQUIP_POSITION_ARMOR));
     ROWOW->RegisterSkillImpl(new ROWOWSkillChemicalProtection(ROWOW_SKILL_AM_CP_HELM, ROWOW_EQUIP_POSITION_HEAD_TOP));
     ROWOW->RegisterSkillImpl(new ROWOWSkillPreparePotion());
-    ROWOW->RegisterSkillImpl(new ROWOWSkillHomunculus(ROWOW_SKILL_AM_CALLHOMUN));
-    ROWOW->RegisterSkillImpl(new ROWOWSkillHomunculus(ROWOW_SKILL_AM_REST));
-    ROWOW->RegisterSkillImpl(new ROWOWSkillHomunculus(ROWOW_SKILL_AM_RESURRECTHOMUN));
+    ROWOW->RegisterSkillImpl(new ROWOWSkillCallHomunculus());
+    ROWOW->RegisterSkillImpl(new ROWOWSkillVaporize());
+    ROWOW->RegisterSkillImpl(new ROWOWSkillHomunculusResurrection());
     ROWOW->RegisterSkillImpl(new ROWOWSkillTwilightAlchemy(ROWOW_SKILL_AM_TWILIGHT1, 504)); // Prepare 200 White Potions.
     ROWOW->RegisterSkillImpl(new ROWOWSkillTwilightAlchemy(ROWOW_SKILL_AM_TWILIGHT2, 547)); // Prepare 200 Slim White Potions.
     ROWOW->RegisterSkillImpl(new ROWOWSkillTwilightAlchemy3());

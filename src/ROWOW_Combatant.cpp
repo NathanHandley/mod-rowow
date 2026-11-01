@@ -29,7 +29,7 @@ bool ROWOWMod::IsROCombatant(Unit const* unit) const
     if (unit == nullptr || IsEnabled == false)
         return false;
     if (unit->IsCreature() == true)
-        return GetROMobID(unit->ToCreature()) != 0;
+        return GetROMobID(unit->ToCreature()) != 0 || IsROFollower(unit) == true;
     if (unit->IsPlayer() == true)
         return IsInROForm(unit->ToPlayer());
     return false;

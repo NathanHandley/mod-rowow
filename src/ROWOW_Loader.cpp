@@ -27,6 +27,7 @@ void AddROWOWWaitingRoomScripts();
 void AddROWOWFloorItemScripts();
 void AddROWOWPartyScripts();
 void AddROWOWPetScripts();
+void AddROWOWFollowerScripts();
 
 void Addmod_rowowScripts()
 {
@@ -43,4 +44,5 @@ void Addmod_rowowScripts()
     AddROWOWFloorItemScripts();
     AddROWOWPartyScripts();
     AddROWOWPetScripts();
+    AddROWOWFollowerScripts();
 }

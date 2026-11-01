@@ -302,7 +302,37 @@ void ROWOWMod::LoadSkillUnitData()
     }
     else
         LOG_ERROR("module.ROWOW", "ROWOWMod::LoadSkillUnitData found no mod_rowow_skill_unit_spell table, so ground skills don't show on the ground (run the converter)");
+
+    // A mercenary's skill has the one spell, whose unit shows at each of its levels
+    for (auto& skillByID : SkillsByID)
+    {
+        ROWOWSkill& skill = skillByID.second;
+        if (skillByID.first < ROWOW_MC_SKILLBASE || skillByID.first >= ROWOW_MC_SKILLBASE + ROWOW_MAX_MERCSKILL || skill.UnitSpellIDsByLevel.empty() == true)
+            continue;
+        skill.UnitSpellIDsByLevel.resize(skill.MaxLevel, skill.UnitSpellIDsByLevel[0]);
+        skill.IsUnitSpellPerCellByLevel.resize(skill.MaxLevel, skill.IsUnitSpellPerCellByLevel[0]);
+        skill.SpringSpellIDsByLevel.resize(skill.MaxLevel, skill.SpringSpellIDsByLevel[0]);
+    }
     LOG_INFO("module.ROWOW", "ROWOWMod::LoadSkillUnitData built {} unit layouts and loaded {} unit spells", SkillUnitLayouts.size(), unitSpellCount);
+}
+
+void ROWOWMod::SkillRemoveTrapOnCell(Unit* src, int32 x, int32 y)
+{
+    // SkillMercenaryRemoveTrap: mercenaries can remove any trap
+    Map* map = src->GetMap();
+    std::shared_ptr<ROWOWSkillUnitGroup> trapGroup;
+    int32 trapIndex = -1;
+    MapForEachSkillUnitInArea(map, x, y, x, y, [this, map, &trapGroup, &trapIndex](ROWOWSkillUnitGroup& group, int32 index)
+    {
+        ROWOWSkill const* skill = GetSkill(group.SkillID);
+        if (trapGroup != nullptr || skill == nullptr || skill->Inf2[ROWOW_INF2_ISTRAP] == false)
+            return 0;
+        trapGroup = SkillID2Group(map, group.GroupID);
+        trapIndex = index;
+        return 1;
+    });
+    if (trapGroup != nullptr)
+        SkillDelUnit(map, *trapGroup, trapIndex);
 }
 
 ROWOWMapSkillUnits* ROWOWMod::GetMapSkillUnits(Map* map, bool isCreated) const

@@ -429,6 +429,8 @@ namespace
             return 90;
         if (sc->HasSCE(ROWOW_SC_DEFSET) == true)
             return SCVal(sc, ROWOW_SC_DEFSET, 1);
+        if (ROWOW->GetFollowerType(bl) == ROWOW_BL_HOM && sc->HasSCE(ROWOW_SC_DEFENCE) == true)
+            def += SCVal(sc, ROWOW_SC_DEFENCE, 2);
         if (sc->HasSCE(ROWOW_SC_DRUMBATTLE) == true)
             def += SCVal(sc, ROWOW_SC_DRUMBATTLE, 3);
         if (sc->HasSCE(ROWOW_SC_INCDEFRATE) == true)
@@ -1015,11 +1017,27 @@ void ROWOWMod::StatusCalcBLMain(Unit const* unit, ROWOWStatus const& baseStatus,
     status.Hit = StatusCalcHit(unit, sc, b.Hit + (stats[ROWOW_STAT_DEX] - bStats[ROWOW_STAT_DEX]));
     status.Flee = StatusCalcFlee(unit, sc, b.Flee + (stats[ROWOW_STAT_AGI] - bStats[ROWOW_STAT_AGI]));
     status.Def = StatusCalcDef(unit, sc, b.Def);
+    if (b.FollowerType == ROWOW_BL_HOM)
+        status.Def += stats[ROWOW_STAT_VIT] / 5 - bStats[ROWOW_STAT_VIT] / 5;
     status.Def2 = StatusCalcDef2(unit, sc, b.Def2 + (stats[ROWOW_STAT_VIT] - bStats[ROWOW_STAT_VIT]));
     status.MDef = StatusCalcMdef(unit, sc, b.MDef);
+    if (b.FollowerType == ROWOW_BL_HOM)
+        status.MDef += stats[ROWOW_STAT_INT] / 5 - bStats[ROWOW_STAT_INT] / 5;
     status.MDef2 = StatusCalcMdef2(unit, sc, b.MDef2 + (stats[ROWOW_STAT_INT] - bStats[ROWOW_STAT_INT]) + ((stats[ROWOW_STAT_VIT] - bStats[ROWOW_STAT_VIT]) / 2));
 
     status.Speed = StatusCalcSpeed(unit, sc, b.Bonus, b.Speed);
+    if (b.FollowerType != 0)
+    {
+        // A homunculus copies its master's speed (hom_setting), its own speed buffs and debuffs over it.  A mercenary simply walks at it
+        ROWOWStatus const* masterStatus = GetROStatus(BattleGetMaster(unit));
+        if (masterStatus != nullptr && masterStatus != &status && BattleGetMaster(unit) != unit)
+        {
+            if (b.FollowerType == ROWOW_BL_MER)
+                status.Speed = masterStatus->Speed;
+            else if ((BattleConfig.HomSetting & ROWOW_HOMSET_COPY_SPEED) != 0)
+                status.Speed = StatusCalcSpeed(unit, sc, b.Bonus, masterStatus->Speed);
+        }
+    }
     if (sd != nullptr && status.Speed < BattleConfig.MaxWalkSpeed)
     {
         // max_walk_speed is kept as the fastest walk speed (battle.cpp turns the percent into DEFAULT_WALK_SPEED * 100 / max_walk_speed)
@@ -1106,6 +1124,9 @@ void ROWOWMod::StatusCalcBLMain(Unit const* unit, ROWOWStatus const& baseStatus,
                 matkMax = matkMax * b.Bonus.MatkRate / 100;
             }
         }
+        // Homunculus: its Min-Matk is always the same as its Max
+        if (b.FollowerType == ROWOW_BL_HOM && (BattleConfig.HomSetting & ROWOW_HOMSET_SAME_MATK) != 0)
+            matkMin = std::max(matkMin, matkMax);
         if (sc != nullptr)
         {
             if (ROWOWStatusChangeEntry const* magicPower = sc->GetSCE(ROWOW_SC_MAGICPOWER); magicPower != nullptr && magicPower->Val4 != 0)
@@ -1144,6 +1165,16 @@ void ROWOWMod::StatusCalcBLMain(Unit const* unit, ROWOWStatus const& baseStatus,
                 status.DamageMotion = status.DamageMotion * BattleConfig.PCDamageDelayRate / 100;
         }
     }
+    else if (b.FollowerType == ROWOW_BL_HOM)
+    {
+        int32 amotion = (1000 - 4 * stats[ROWOW_STAT_AGI] - stats[ROWOW_STAT_DEX]) * b.HomBaseASPD / 1000;
+        amotion = StatusCalcAspdRate(unit, sc, status.WeaponType, amotion);
+        amotion = amotion * status.AspdRate / 1000;
+        amotion = StatusCalcFixAspd(unit, sc, amotion);
+        status.AttackMotion = std::clamp(amotion, ROWOW_MAX_ASPD_NOPC, ROWOW_MIN_ASPD); // MAX_ASPD_NOPC / AMOTION_DIVIDER_NOPC, MIN_ASPD / AMOTION_DIVIDER_NOPC
+        status.AttackDelay = status.AttackMotion;
+        status.DamageMotion = std::clamp(800 - stats[ROWOW_STAT_AGI] * 4, 400, 800);
+    }
     else
     {
         // Mercenary and mobs
@@ -1164,6 +1195,26 @@ void ROWOWMod::StatusCalcBLMain(Unit const* unit, ROWOWStatus const& baseStatus,
     {
         StatusCalcRegen(unit, status);
         StatusCalcRegenRate(sd, sc, status);
+    }
+    else if (b.FollowerType != 0)
+    {
+        // status_calc_regen: the plain values, at least 1, then a homunculus's skills or a mercenary's own values
+        StatusCalcRegen(nullptr, status);
+        status.RegenHP = std::max(status.RegenHP, 1);
+        status.RegenSP = std::max(status.RegenSP, 1);
+        if (b.FollowerType == ROWOW_BL_HOM)
+        {
+            if (int32 skill = HomCheckSkill(unit, ROWOW_SKILL_HAMI_SKIN); skill > 0)
+                status.RegenHP = std::clamp(status.RegenHP * (100 + 5 * skill) / 100, 1, int32(SHRT_MAX));
+            if (int32 skill = HomCheckSkill(unit, ROWOW_SKILL_HLIF_BRAIN); skill > 0)
+                status.RegenSP = std::clamp(status.RegenSP * (100 + 3 * skill) / 100, 1, int32(SHRT_MAX));
+        }
+        else
+        {
+            status.RegenHP = std::clamp(int32((status.MaxHP * status.Stats[ROWOW_STAT_VIT] / 10000.0 + 1.0) * 6.0), 1, int32(SHRT_MAX));
+            status.RegenSP = std::clamp(int32((status.MaxSP * (status.Stats[ROWOW_STAT_INT] + 10.0) / 750.0) + 1.0), 1, int32(SHRT_MAX));
+        }
+        StatusCalcRegenRate(nullptr, sc, status);
     }
 }
 
@@ -1201,6 +1252,11 @@ void ROWOWMod::StatusCalcBL(Unit* unit, std::bitset<ROWOW_SCB_MAX> flag)
                 creature->SetHealth(mobStatus->Status.MaxHP);
         }
         creature->SetAttackTime(BASE_ATTACK, uint32(mobStatus->Status.AttackDelay));
+        if (IsROFollower(creature) == true)
+        {
+            StatusCalcBLFollower(creature, mobStatus);
+            return;
+        }
     }
     if (flag[ROWOW_SCB_SPEED] == true)
     {

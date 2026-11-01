@@ -1,0 +1,49 @@
+-- RO's homunculi and mercenaries (mod-rowow, R11): rAthena's homunculus, skill_homunculus, mercenary and mercenary_owner tables, one row of each per character.
+-- The stats of mod_rowow_homunculus are in tenths, as hom.str is.  `Skills` is <skill>:<level>,...
+CREATE TABLE IF NOT EXISTS `mod_rowow_homunculus` (
+	`CharacterGUID` INT(10) UNSIGNED NOT NULL DEFAULT '0',
+	`Class` INT(10) UNSIGNED NOT NULL DEFAULT '0',
+	`PrevClass` INT(10) UNSIGNED NOT NULL DEFAULT '0',
+	`Name` VARCHAR(48) NOT NULL DEFAULT '',
+	`Level` SMALLINT(5) NOT NULL DEFAULT '1',
+	`Exp` BIGINT(20) UNSIGNED NOT NULL DEFAULT '0',
+	`Intimacy` INT(10) UNSIGNED NOT NULL DEFAULT '0',
+	`Hunger` SMALLINT(5) NOT NULL DEFAULT '0',
+	`Str` INT(10) NOT NULL DEFAULT '0',
+	`Agi` INT(10) NOT NULL DEFAULT '0',
+	`Vit` INT(10) NOT NULL DEFAULT '0',
+	`Int` INT(10) NOT NULL DEFAULT '0',
+	`Dex` INT(10) NOT NULL DEFAULT '0',
+	`Luk` INT(10) NOT NULL DEFAULT '0',
+	`HP` INT(10) UNSIGNED NOT NULL DEFAULT '0',
+	`MaxHP` INT(10) UNSIGNED NOT NULL DEFAULT '0',
+	`SP` INT(10) UNSIGNED NOT NULL DEFAULT '0',
+	`MaxSP` INT(10) UNSIGNED NOT NULL DEFAULT '0',
+	`SkillPoints` SMALLINT(5) NOT NULL DEFAULT '0',
+	`IsRenamed` TINYINT(3) UNSIGNED NOT NULL DEFAULT '0',
+	`Vaporize` TINYINT(3) NOT NULL DEFAULT '0',
+	`IsAutoFeed` TINYINT(3) UNSIGNED NOT NULL DEFAULT '0',
+	`Skills` VARCHAR(255) NOT NULL DEFAULT '',
+	PRIMARY KEY (`CharacterGUID`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `mod_rowow_mercenary` (
+	`CharacterGUID` INT(10) UNSIGNED NOT NULL DEFAULT '0',
+	`Class` INT(10) UNSIGNED NOT NULL DEFAULT '0',
+	`HP` INT(10) UNSIGNED NOT NULL DEFAULT '0',
+	`SP` INT(10) UNSIGNED NOT NULL DEFAULT '0',
+	`KillCount` INT(10) UNSIGNED NOT NULL DEFAULT '0',
+	`LifeTime` BIGINT(20) NOT NULL DEFAULT '0',
+	PRIMARY KEY (`CharacterGUID`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `mod_rowow_mercenary_owner` (
+	`CharacterGUID` INT(10) UNSIGNED NOT NULL DEFAULT '0',
+	`ArchFaith` INT(10) NOT NULL DEFAULT '0',
+	`ArchCalls` INT(10) NOT NULL DEFAULT '0',
+	`SpearFaith` INT(10) NOT NULL DEFAULT '0',
+	`SpearCalls` INT(10) NOT NULL DEFAULT '0',
+	`SwordFaith` INT(10) NOT NULL DEFAULT '0',
+	`SwordCalls` INT(10) NOT NULL DEFAULT '0',
+	PRIMARY KEY (`CharacterGUID`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

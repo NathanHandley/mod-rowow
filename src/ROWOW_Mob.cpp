@@ -356,7 +356,7 @@ void ROWOWMod::MobAISubHardActiveSearch(Creature* md, ROWOWMobData* mob, Unit* b
     // mob_ai_sub_hard_activesearch.  If can't seek yet, not an enemy, or you can't attack it, skip.  A summoned plant goes by RO's sides alone: WoW lets
     // no creature attack a neutral one, and most monsters are neutral to a player's faction, which the plant has
     bool isSummon = md->CustomData.Get<ROWOWMobSummon>("ROWOWMobSummon") != nullptr;
-    if (target == bl || bl == md || (isSummon == false && md->IsValidAttackTarget(bl) == false) || StatusCheckSkillUse(md, bl, 0, 0) == false)
+    if (target == bl || bl == md || (isSummon == false && IsROFollower(bl) == false && md->IsValidAttackTarget(bl) == false) || StatusCheckSkillUse(md, bl, 0, 0) == false)
         return;
     if ((mode & ROWOW_MODE_TARGETWEAK) != 0)
     {
@@ -369,6 +369,8 @@ void ROWOWMod::MobAISubHardActiveSearch(Creature* md, ROWOWMobData* mob, Unit* b
         return;
     if (MobCanTarget(md, bl) == false)
         return; // Gangster paradise protection.
+    if ((BattleConfig.HomSetting & ROWOW_HOMSET_FIRST_TARGET) != 0 && target != nullptr && GetFollowerType(target) == ROWOW_BL_HOM && GetFollowerType(bl) != ROWOW_BL_HOM)
+        return; // For some reason Homun targets are never overridden.
     int32 dist = DistanceBL(md, bl);
     if ((target == nullptr || CheckDistanceBL(md, target, dist) == false) && BattleCheckRange(md, bl, range2) == true) // Pick closest target?
     {
@@ -413,6 +415,13 @@ void ROWOWMod::MobForEachEnemyInRange(Creature* md, int32 range, std::function<v
         for (ObjectGuid const& summonGUID : ud->SummonGUIDs)
             if (Creature* summon = ObjectAccessor::GetCreature(*md, summonGUID); summon != nullptr && summon->IsInWorld() == true && CheckDistanceBL(md, summon, range) == true)
                 func(summon);
+        for (int32 followerType : { ROWOW_BL_HOM, ROWOW_BL_MER })
+        {
+            ROWOWFollower const* fd = GetFollower(sd, followerType);
+            Creature* follower = fd != nullptr ? GetFollowerCreature(sd, *fd) : nullptr;
+            if (follower != nullptr && follower->IsAlive() == true && CheckDistanceBL(md, follower, range) == true)
+                func(follower);
+        }
     }
 }
 

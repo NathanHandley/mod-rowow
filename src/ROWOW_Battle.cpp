@@ -662,7 +662,7 @@ uint8 ROWOWMod::BattleWeaponAttack(Unit* src, Unit* target, ROWOWDamage& wdOut)
     if (GetSCE(target, ROWOW_SC_DEVOTION) != nullptr)
     {
         int64 damage = wdOut.Damage + wdOut.Damage2;
-        if (Player* d_bl = GetDevotionSource(target, true))
+        if (Unit* d_bl = GetDevotionSource(target, true))
         {
             // Only trigger if the devoted player was hit
             if (damage > 0)
@@ -1458,7 +1458,11 @@ ROWOWDamage ROWOWMod::BattleCalcMiscAttack(Unit* src, Unit* target, uint16 skill
             md.Flag |= ROWOW_BF_WEAPON;
             break;
         case ROWOW_SKILL_HT_LANDMINE:
+        case ROWOW_SKILL_MA_LANDMINE:
             md.Damage = int64(skillLevel * (sstatus->Stats[ROWOW_STAT_DEX] + 75.0) * (100.0 + sstatus->Stats[ROWOW_STAT_INT]) / 100.0);
+            break;
+        case ROWOW_SKILL_HVAN_EXPLOSION:
+            md.Damage = int64(sstatus->MaxHP) * (50 + 50 * skillLevel) / 100;
             break;
         case ROWOW_SKILL_HT_BLASTMINE:
             md.Damage = int64(skillLevel * (sstatus->Stats[ROWOW_STAT_DEX] / 2.0 + 50.0) * (100.0 + sstatus->Stats[ROWOW_STAT_INT]) / 100.0);
@@ -2012,6 +2016,11 @@ void ROWOWMod::BattleCalcSkillBaseDamage(ROWOWDamage& wd, Unit* src, Unit* targe
             wd.Damage = sstatus->MaxHP * 9 / 100;
             wd.Damage2 = 0;
             return;
+        case ROWOW_SKILL_HFLI_SBR44:
+            if (GetFollowerType(src) == ROWOW_BL_HOM)
+                if (ROWOWFollower const* fd = GetFollower(src))
+                    wd.Damage = static_cast<ROWOWHomunData const*>(fd)->Intimacy;
+            return;
         case ROWOW_SKILL_LK_SPIRALPIERCE:
         case ROWOW_SKILL_ML_SPIRALPIERCE:
         {
@@ -2449,6 +2458,7 @@ void ROWOWMod::BattleCalcElementDamage(ROWOWDamage& wd, Unit* src, Unit* target,
         switch (skillID)
         {
             case ROWOW_SKILL_PA_SACRIFICE:
+            case ROWOW_SKILL_HFLI_SBR44:
                 wd.Damage = BattleAttrFix(src, target, wd.Damage, rightElement, tstatus->DefElement, tstatus->ElementLevel, 1);
                 if (isLeftHanded == true)
                     wd.Damage2 = BattleAttrFix(src, target, wd.Damage2, leftElement, tstatus->DefElement, tstatus->ElementLevel, 1);
@@ -2766,7 +2776,8 @@ int64 ROWOWMod::BattleCalcDamage(Unit* src, Unit* target, ROWOWDamage& d, int64 
         // Damage increasing effects
         if (tsc->HasSCE(ROWOW_SC_AETERNA) == true && skillID != ROWOW_SKILL_PF_SOULBURN)
         {
-            damage *= 2; // (Lex Aeterna only doubles damage of regular attacks from mercenaries, and there are none)
+            if (GetFollowerType(src) != ROWOW_BL_MER || skillID == 0)
+                damage *= 2; // Lex Aeterna only doubles damage of regular attacks from mercenaries
             if (skillID != ROWOW_SKILL_ASC_BREAKER || (flag & ROWOW_BF_WEAPON) == 0)
                 StatusChangeEnd(target, ROWOW_SC_AETERNA); // Shouldn't end until Breaker's non-weapon part connects.
         }
@@ -3052,7 +3063,7 @@ int64 ROWOWMod::BattleCalcReturnDamage(Unit* tbl, Unit* src, int64 damage, int32
             if (ROWOWStatusChangeEntry const* sce = tsc->GetSCE(ROWOW_SC_REFLECTSHIELD))
             {
                 bool isInheritedSkillOnly = skillID == 0 && BattleConfig.DevotionRDamageSkillOnly != 0 && sce->Val4 != 0;
-                if (Player* d_bl = GetDevotionSource(tbl, false))
+                if (Unit* d_bl = GetDevotionSource(tbl, false))
                 {
                     // Don't reflect non-skill attack if has SC_REFLECTSHIELD from Devotion bonus inheritance
                     if (isInheritedSkillOnly == true || DistanceBL(tbl, d_bl) > tsc->GetSCE(ROWOW_SC_DEVOTION)->Val3)
