@@ -2116,7 +2116,7 @@ void ROWOWMod::BattleCalcSkillBaseDamage(ROWOWDamage& wd, Unit* src, Unit* targe
     if (int32 skill = sd != nullptr && sd->GetGroup() != nullptr ? PCCheckSkill(sd, ROWOW_SKILL_TK_POWER) : 0; skill > 0)
     {
         // party_foreachsamemap(party_sub_count): exclude the player himself [Inkfish].  Reduce count by one (self) [Tydus1]
-        int32 i = PartyForEachSameMap(sd, 0, [](Unit* member) { return member->IsPlayer() == true && member->IsAlive() == true ? 1 : 0; });
+        int32 i = PartyForEachSameMap(sd, 0, [](Unit* /*member*/) { return 1; });
         if (i > 1)
             AttackAddRate(wd, isLeftHanded, 2 * skill * (i - 1));
     }

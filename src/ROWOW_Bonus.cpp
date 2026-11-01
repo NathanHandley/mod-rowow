@@ -1213,6 +1213,10 @@ void ROWOWMod::StatusCalcPCItems(Player* player, ROWOWIdentity const& identity, 
         runScript(roAmmo->BonusScript.get(), ammoItem, ROWOW_LR_FLAG_ARROW, ROWOW_EQUIP_POSITION_AMMO, 0);
     }
 
+    // Pet Bonus: the script of the pet that's out, which reads its intimacy.  (status_calc_pc_sub's pd->bonus is petskillbonus, a SupportScript's)
+    if (identity.Pet != nullptr && identity.Pet->DB != nullptr)
+        runScript(identity.Pet->DB->BonusScript.get(), nullptr, ROWOW_LR_FLAG_NONE, 0, 0);
+
     // Item combos: every combo whose items are all worn
     std::unordered_set<uint32> wornItemIDs;
     for (WornItem const& wornItem : wornItems)

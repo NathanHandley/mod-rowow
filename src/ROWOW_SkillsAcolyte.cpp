@@ -545,7 +545,7 @@ namespace
                 ROWOWSkillAreaTemp outerAreaTemp = ud->AreaTemp;
                 ud->AreaTemp.Values[0] = 0;
                 int32 areaFlag = flag | ROWOW_BCT_PARTY | 1;
-                ROWOW->PartyForEachSameMap(sd, ROWOWSkill::GetLevelValue(ROWOW->GetSkill(SkillID)->SplashArea, skillLevel), [this, src, skillLevel, tick, areaFlag](Unit* member)
+                ROWOW->PartyForEachSameMap(sd, ROWOW->SkillGetSplash(SkillID, skillLevel), [this, src, skillLevel, tick, areaFlag](Unit* member)
                 {
                     return ROWOW->SkillCastendNoDamageID(src, member, SkillID, skillLevel, tick, areaFlag);
                 });

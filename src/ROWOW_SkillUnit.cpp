@@ -390,7 +390,7 @@ int32 ROWOWMod::MapForEachInCellArea(Map* map, uint32 phaseMask, int32 x0, int32
     int32 returnCount = 0;
     for (Unit* unit : units)
     {
-        if (unit->IsInWorld() == false || unit->GetMap() != map || GetROStatus(unit) == nullptr)
+        if (unit->IsInWorld() == false || unit->GetMap() != map || IsROCombatant(unit) == false) // Not a pet, which has a status to walk by
             continue;
         int32 unitX = 0, unitY = 0;
         GetUnitCell(unit, unitX, unitY);

@@ -318,15 +318,14 @@ int32 ROWOWMod::SkillBreakEquip(Unit* src, Unit* bl, uint32 where, int32 rate, i
 
 void ROWOWMod::PCSetInvincibleTimer(Player* player)
 {
-    // pc_setinvincibletimer: no monster or skill targets the player for player_invincible_time after it arrives on a map or revives (WoW's
-    // immunity to NPCs keeps the monsters' AI off it meanwhile)
+    // pc_setinvincibletimer: no monster or skill targets the player for player_invincible_time after it arrives on a map or revives.  RO's checks alone
+    // hold that (battle_check_target, the monster AI's target checks): WoW's immunity to NPCs would have the client refuse the player's own skills on monsters
     if (BattleConfig.PCInvincibleTime <= 0 || IsInROForm(player) == false)
         return;
     ROWOWIdentity* identity = GetIdentity(player);
     identity->InvincibleEndTime = GetTick() + uint64(BattleConfig.PCInvincibleTime);
     identity->InvinciblePositionX = player->GetPositionX();
     identity->InvinciblePositionY = player->GetPositionY();
-    player->SetImmuneToNPC(true); // Nothing else makes a player in the form immune to NPCs, so its end always takes it off
 }
 
 void ROWOWMod::PCDelInvincibleTimer(Player* player)
@@ -336,7 +335,6 @@ void ROWOWMod::PCDelInvincibleTimer(Player* player)
     if (identity == nullptr || identity->InvincibleEndTime == 0)
         return;
     identity->InvincibleEndTime = 0;
-    player->SetImmuneToNPC(false);
     std::vector<uint16> skillUnitCell;
     int32 x = 0, y = 0;
     GetUnitCell(player, x, y);

@@ -439,6 +439,43 @@ bool ROWOWMod::UnitWalkToXY(Creature* md, int32 x, int32 y)
     return UnitWalkPath(md, mob, path, x0, y0, false);
 }
 
+bool ROWOWMod::UnitCalcPos(Map* map, int32 x0, int32 y0, int32 tx, int32 ty, uint8 dir, int32& xOut, int32& yOut) const
+{
+    // unit_calc_pos: the cell 2 cells behind the master's facing, or 1, or the same at a random direction, or the master's own, that a pet (or homunculus, or mercenary) on x0, y0
+    // can reach.  False when none is
+    ROWOWMapGrid const* mapGrid = GetMapGrid(map->GetId());
+    if (mapGrid == nullptr || dir >= ROWOW_RO_DIRECTION_COUNT)
+        return false;
+    auto canReach = [&](int32 x, int32 y)
+    {
+        if (x == x0 && y == y0) // Same place
+            return true;
+        std::vector<uint8> path;
+        return PathSearch(path, map, *mapGrid, x0, y0, x, y, ROWOW_CELL_CHKNOPASS);
+    };
+    auto tryDirection = [&](uint8 direction)
+    {
+        // 2 cells from Master Position, or 1
+        int32 dx = -DirectionX[direction] * 2;
+        int32 dy = -DirectionY[direction] * 2;
+        xOut = tx + dx;
+        yOut = ty + dy;
+        if (canReach(xOut, yOut) == true)
+            return true;
+        xOut += dx > 0 ? -1 : (dx < 0 ? 1 : 0);
+        yOut += dy > 0 ? -1 : (dy < 0 ? 1 : 0);
+        return canReach(xOut, yOut);
+    };
+    if (tryDirection(dir) == true)
+        return true;
+    for (int32 i = 0; i < 12; i++)
+        if (tryDirection(uint8(urand(0, ROWOW_RO_DIRECTION_COUNT - 1))) == true) // Pick a Random Dir
+            return true;
+    xOut = tx; // Exactly Master Position
+    yOut = ty;
+    return canReach(xOut, yOut);
+}
+
 bool ROWOWMod::UnitWalkToBL(Creature* md, ROWOWMobData* mob, Unit* tbl, int32 range, bool isAttackContinue)
 {
     // unit_walktobl: to a cell beside the target ("monsters always target an adjacent tile even if ranged"), which unit_update_chase ends when the

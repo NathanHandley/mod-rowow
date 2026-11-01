@@ -521,7 +521,7 @@ int32 ROWOWMod::MapForEachInArea(Unit* origin, int32 x0, int32 y0, int32 x1, int
     int32 returnCount = 0;
     for (Unit* unit : units)
     {
-        if (unit->IsInWorld() == false || GetROStatus(unit) == nullptr)
+        if (unit->IsInWorld() == false || IsROCombatant(unit) == false) // Not a pet, which has a status to walk by
             continue;
         int32 unitX = 0, unitY = 0;
         GetUnitCell(unit, unitX, unitY);
@@ -1478,21 +1478,8 @@ bool ROWOWMod::SkillCheckConditionCastBegin(Player* sd, uint16 skillID, uint16 s
         case ROWOW_SKILL_AM_TWILIGHT2:
         case ROWOW_SKILL_AM_TWILIGHT3:
         {
-            // party_skill_check: Twilight Pharmacy needs a Super Novice in the party (2) or a Taekwon (3).  rAthena counts the party online
-            // anywhere; here only the members on the caster's map (another map's identities belong to its own thread)
-            uint16 neededJobID = skillID == ROWOW_SKILL_AM_TWILIGHT2 ? ROWOW_JOB_SUPER_NOVICE : ROWOW_JOB_TAEKWON;
-            bool isInParty = false;
-            if (sd->GetGroup() != nullptr)
-            {
-                PartyForEachSameMap(sd, 0, [this, neededJobID, &isInParty](Unit* member)
-                {
-                    Player* memberPlayer = member->ToPlayer();
-                    if (memberPlayer != nullptr && IsInROForm(memberPlayer) == true && GetNonBabyJobID(GetIdentity(memberPlayer)->JobID) == neededJobID)
-                        isInParty = true;
-                    return 0;
-                });
-            }
-            if (isInParty == false)
+            // party_skill_check: Twilight Pharmacy needs a Super Novice in the party (2) or a Taekwon (3), online anywhere
+            if (PartySkillCheckJob(sd, skillID == ROWOW_SKILL_AM_TWILIGHT2 ? ROWOW_JOB_SUPER_NOVICE : ROWOW_JOB_TAEKWON) == false)
             {
                 ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_LEVEL);
                 return false;

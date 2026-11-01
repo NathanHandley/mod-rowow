@@ -1040,12 +1040,17 @@ namespace
         }
     };
 
-    // SkillBeastlyHypnosis: a monster's pet capture (pet_catch_process_start), which comes with the taming pets (R11); until then the pick
-    // does nothing
+    // SkillBeastlyHypnosis: Abracadabra's pet capture, which can catch anything that's a pet (pet_catch_process_start)
     class ROWOWSkillBeastlyHypnosis : public ROWOWSkillImpl
     {
     public:
         ROWOWSkillBeastlyHypnosis() : ROWOWSkillImpl(ROWOW_SKILL_SA_TAMINGMONSTER) { }
+
+        void CastendNoDamageID(Unit* src, Unit* /*target*/, uint16 /*skillLevel*/, uint64 /*tick*/, int32& /*flag*/) const override
+        {
+            if (Player* sd = src->ToPlayer())
+                ROWOW->PetCatchProcessStart(sd, 0, ROWOW_PET_CATCH_UNIVERSAL_ALL);
+        }
     };
 
     // SkillSuicide: the caster dies

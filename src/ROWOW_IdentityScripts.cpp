@@ -103,6 +103,8 @@ public:
         ROWOW->UpdateSpiritBalls(player);
         ROWOW->UpdateSkillSit(player);
         ROWOW->UpdateUnitRun(player);
+        ROWOW->UpdateParty(player, p_time);
+        ROWOW->UpdatePet(player, p_time);
 
         // A vendor stays sitting by its shop: standing up or walking away closes it
         ROWOWIdentity* identity = ROWOW->GetIdentity(player);
@@ -112,12 +114,14 @@ public:
 
     void OnPlayerLogout(Player* player) override
     {
-        // unit_remove_map's skill_clear_unitgroup and vending_closevending (no autotrade)
+        // unit_remove_map's skill_clear_unitgroup and vending_closevending (no autotrade), its pet going with it, and party_send_logout
         if (ROWOW->IsEnabled == false || ROWOW->IsInROForm(player) == false)
             return;
         ROWOW->VendingCloseVending(player);
         ROWOW->SkillClearUnitGroup(player);
         ROWOW->SkillClearTimerSkill(player);
+        ROWOW->PetLeaveMap(player);
+        ROWOW->PartyRemoveMember(player);
     }
 
     bool OnPlayerCanRegenerate(Player* player) override
@@ -154,6 +158,7 @@ public:
             {
                 ROWOW->SkillClearUnitGroup(player);
                 ROWOW->SkillClearTimerSkill(player);
+                ROWOW->PetLeaveMap(player);
             }
             else
             {
@@ -470,6 +475,7 @@ public:
                 ROWOW->PCDelDevotions(player);
                 ROWOW->PCDelSpiritBall(player, ROWOW->PCGetSpiritBall(player), 0);
                 ROWOW->PCSetDieCounter(player, ROWOW->GetIdentityVariable(*ROWOW->GetIdentity(player), ROWOW_PCDIECOUNTER_VAR) + 1);
+                ROWOW->PetOwnerDead(player);
             }
         }
         if (unit->IsCreature() == true)
@@ -593,6 +599,16 @@ public:
             { "sync",     HandleROSyncCommand,   SEC_PLAYER,     Console::No },
             { "hair",     HandleROHairCommand,   SEC_PLAYER,     Console::No },
             { "statup",   HandleROStatUpCommand, SEC_PLAYER,     Console::No },
+            { "partyoption", HandleROPartyOptionCommand, SEC_PLAYER, Console::No },
+            { "pet",      HandleROPetCommand,    SEC_PLAYER,     Console::No },
+            { "petname",  HandleROPetNameCommand, SEC_PLAYER,    Console::No },
+            { "pethatch", HandleROPetHatchCommand, SEC_PLAYER,   Console::No },
+            { "petset",   HandleROPetSetCommand, SEC_GAMEMASTER, Console::No },
+            { "floortake", HandleROFloorTakeCommand, SEC_GAMEMASTER, Console::No },
+            { "expinfo",  HandleROExpInfoCommand, SEC_GAMEMASTER, Console::No },
+            { "petmake",  HandleROPetMakeCommand, SEC_GAMEMASTER, Console::No },
+            { "petloot",  HandleROPetLootCommand, SEC_GAMEMASTER, Console::No },
+            { "pettamerate", HandleROPetTameRateCommand, SEC_GAMEMASTER, Console::No },
             { "wear",     HandleROWearCommand,   SEC_PLAYER,     Console::No },
             { "takeoff",  HandleROTakeOffCommand, SEC_PLAYER,    Console::No },
             { "identify", HandleROIdentifyCommand, SEC_PLAYER,   Console::No },
@@ -691,6 +707,8 @@ public:
             ROWOW->SendSkillsToClient(player, *ROWOW->GetIdentity(player), true);
             ROWOW->SendSpiritBallsToClient(player);
             ROWOW->SendQuestsToClient(player);
+            ROWOW->ClifSendPetStatus(player);
+            ROWOW->SendPartyToClient(player);
             ROWOW->GetIdentity(player)->SentWaitingRoomMessage.clear();
         }
         return true;
@@ -793,6 +811,111 @@ public:
     {
         Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
         return (player != nullptr && ROWOW->IsInROForm(player) == true) ? player : nullptr;
+    }
+
+    static bool HandleROPartyOptionCommand(ChatHandler* handler, uint32 expShare, uint32 itemShare, uint32 itemEven)
+    {
+        // The RO_Identity addon's party window, for clif_parse_PartyChangeOption
+        Player* player = handler->GetSession()->GetPlayer();
+        if (ROWOW->IsInROForm(player) == false)
+            return false;
+        ROWOW->PartyChangeOption(player, expShare != 0, uint8((itemShare != 0 ? 1 : 0) | (itemEven != 0 ? 2 : 0)));
+        return true;
+    }
+
+    static bool HandleROPetCommand(ChatHandler* handler, uint32 menuNum)
+    {
+        // The pet window's menu (clif_parse_PetMenu): 0 status, 1 feed, 2 performance, 3 return to egg, 4 take the accessory off
+        Player* player = handler->GetSession()->GetPlayer();
+        if (ROWOW->IsInROForm(player) == false)
+            return false;
+        ROWOW->PetMenu(player, int32(menuNum));
+        return true;
+    }
+
+    static bool HandleROPetNameCommand(ChatHandler* handler, Tail name)
+    {
+        // The pet window's rename (clif_parse_ChangePetName)
+        Player* player = handler->GetSession()->GetPlayer();
+        if (ROWOW->IsInROForm(player) == false)
+            return false;
+        ROWOW->PetChangeName(player, std::string(name));
+        return true;
+    }
+
+    static bool HandleROPetHatchCommand(ChatHandler* handler, uint32 itemGUID)
+    {
+        // The pet window's pick of an egg (clif_parse_SelectEgg)
+        Player* player = handler->GetSession()->GetPlayer();
+        if (ROWOW->IsInROForm(player) == false)
+            return false;
+        ROWOW->PetSelectEgg(player, itemGUID);
+        return true;
+    }
+
+    static bool HandleROPetSetCommand(ChatHandler* handler, std::string kind, int32 value)
+    {
+        // GM: .ro petset hungry|intimate <value>, for tests: the pet's value and what follows from it, as a feeding would leave it
+        Player* player = handler->GetSession()->GetPlayer();
+        ROWOWPetData* pd = ROWOW->GetPet(player);
+        if (pd == nullptr)
+        {
+            handler->SendSysMessage("No pet is out.");
+            return false;
+        }
+        if (kind == "hungry")
+        {
+            pd->Pet.Hungry = std::clamp(value, 0, 100);
+            pd->HungryTimer = std::min<uint32>(pd->HungryTimer, 1000);
+        }
+        else if (kind == "intimate")
+        {
+            pd->Pet.Intimate = std::clamp(value, 0, 1000);
+            ROWOW->RefreshROForm(player);
+        }
+        ROWOW->ClifSendPetStatus(player);
+        handler->PSendSysMessage("Pet {}: hungry {}, intimate {}, equip {}", pd->Pet.Name, pd->Pet.Hungry, pd->Pet.Intimate, pd->Pet.EquipID);
+        return true;
+    }
+
+    static bool HandleROPetMakeCommand(ChatHandler* handler, uint32 mobID)
+    {
+        // GM: the script command makepet, an egg of the monster's pet
+        auto petIter = ROWOW->PetsByMobID.find(mobID);
+        if (petIter == ROWOW->PetsByMobID.end())
+        {
+            handler->SendSysMessage("That monster isn't a pet.");
+            return false;
+        }
+        return ROWOW->PetCreateEgg(handler->GetSession()->GetPlayer(), petIter->second);
+    }
+
+    static bool HandleROPetLootCommand(ChatHandler* handler, int32 max)
+    {
+        // GM: the script command petloot, which no pre-renewal pet has by itself
+        ROWOW->PetLoot(handler->GetSession()->GetPlayer(), max);
+        return true;
+    }
+
+    static bool HandleROPetTameRateCommand(ChatHandler* handler, uint32 runs)
+    {
+        // GM: pet_catch_process_end's rate on the selected monster, the rate in 10000 and how often it would land in runs rolls
+        Creature* md = handler->getSelectedCreature();
+        if (md == nullptr)
+            return false;
+        auto petIter = ROWOW->PetsByMobID.find(ROWOW->GetROMobID(md));
+        if (petIter == ROWOW->PetsByMobID.end())
+        {
+            handler->SendSysMessage("That monster isn't a pet.");
+            return false;
+        }
+        int32 rate = ROWOW->PetCatchRate(handler->GetSession()->GetPlayer(), petIter->second, md);
+        uint32 hits = 0;
+        for (uint32 run = 0; run < runs; run++)
+            if (uint32(rand32() % 10000) < uint32(rate))
+                hits++;
+        handler->PSendSysMessage("rate {} hp {}/{} hits {} of {}", rate, md->GetHealth(), md->GetMaxHealth(), hits, runs);
+        return true;
     }
 
     static bool HandleROCartCommand(ChatHandler* handler)
@@ -1475,6 +1598,33 @@ public:
         return guid.IsEmpty() == false;
     }
 
+    static bool HandleROFloorTakeCommand(ChatHandler* handler)
+    {
+        // GM: pc_takeitem of the closest floor item, as a click on it, saying if it was had
+        Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
+        ROWOWMapFloorItems const* floorItems = player != nullptr ? player->GetMap()->CustomData.Get<ROWOWMapFloorItems>("ROWOWMapFloorItems") : nullptr;
+        if (floorItems == nullptr)
+            return false;
+        int32 x = 0, y = 0;
+        ROWOW->GetUnitCell(player, x, y);
+        ObjectGuid closest;
+        int32 closestDistance = 0;
+        for (auto const& floorItem : floorItems->ItemsByGUID)
+        {
+            int32 distance = std::max(std::abs(floorItem.second.X - x), std::abs(floorItem.second.Y - y));
+            if (closest.IsEmpty() == true || distance < closestDistance)
+            {
+                closest = floorItem.first;
+                closestDistance = distance;
+            }
+        }
+        if (closest.IsEmpty() == true)
+            return false;
+        bool isHad = ROWOW->PCTakeItem(player, closest, false);
+        handler->PSendSysMessage("floortake {} at distance {}", isHad == true ? "ok" : "refused", closestDistance);
+        return true;
+    }
+
     static bool HandleROFloorItemsCommand(ChatHandler* handler)
     {
         Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
@@ -2064,6 +2214,19 @@ public:
         }
         ROWOW->RefreshROForm(player);
         handler->PSendSysMessage("{} is now base level {} and job level {}.", player->GetName(), identity->BaseLevel, identity->JobLevel);
+        return true;
+    }
+
+    static bool HandleROExpInfoCommand(ChatHandler* handler)
+    {
+        // What the rAthena oracle's @oracleexp prints, and the party's options, for comparing what a kill gave
+        Player* player = handler->getSelectedPlayerOrSelf();
+        if (player == nullptr || ROWOW->IsInROForm(player) == false)
+            return false;
+        ROWOWIdentity const* identity = ROWOW->GetIdentity(player);
+        ROWOWPartyOption option = ROWOW->GetPartyOption(player->GetGroup());
+        handler->PSendSysMessage("expinfo {} base {} job {} blvl {} jlvl {} party {} exp {} item {} spheres {}", player->GetName(), identity->BaseExp, identity->JobExp, identity->BaseLevel, identity->JobLevel,
+            player->GetGroup() != nullptr ? 1 : 0, option.IsExpShare == true ? 1 : 0, uint32(option.Item), ROWOW->PCGetSpiritBall(player));
         return true;
     }
 

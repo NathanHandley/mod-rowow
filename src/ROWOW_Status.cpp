@@ -332,6 +332,19 @@ void ROWOWMod::LoadStatusData()
         readValue("cart_revo_knockback", BattleConfig.CartRevoKnockback);
         readValue("arrow_shower_knockback", BattleConfig.ArrowShowerKnockback);
         readValue("player_invincible_time", BattleConfig.PCInvincibleTime);
+        readValue("party_even_share_bonus", BattleConfig.PartyEvenShareBonus);
+        readValue("party_item_share_type", BattleConfig.PartyShareType);
+        readValue("show_party_share_picker", BattleConfig.PartyShowSharePicker);
+        readValue("show_picker.item_type", BattleConfig.ShowPickerItemType);
+        readValue("pet_legacy_formula", BattleConfig.PetLegacyFormula);
+        readValue("pet_catch_rate", BattleConfig.PetCatchRate);
+        readValue("pet_distance_check", BattleConfig.PetDistanceCheck);
+        readValue("pet_hide_check", BattleConfig.PetHideCheck);
+        readValue("pet_rename", BattleConfig.PetRename);
+        readValue("pet_friendly_rate", BattleConfig.PetFriendlyRate);
+        readValue("pet_hungry_delay_rate", BattleConfig.PetHungryDelayRate);
+        readValue("pet_unequip_destroy", BattleConfig.PetUnequipDestroy);
+        readValue("pet_walk_speed", BattleConfig.PetWalkSpeed);
         int32 maxCartWeight = BattleConfig.MaxCartWeight / 10; // The setting is in whole weight, the cart counts tenths (battle_adjust_conf)
         readValue("max_cart_weight", maxCartWeight);
         BattleConfig.MaxCartWeight = maxCartWeight * 10;
@@ -1181,15 +1194,42 @@ uint64 ROWOWMod::PCNextJobExp(ROWOWIdentity const& identity) const
     return job->JobExpByLevel[identity.JobLevel - 1];
 }
 
-void ROWOWMod::PCGainExp(Player* player, uint64 baseExp, uint64 jobExp)
+void ROWOWMod::PCCalcExp(Player* player, uint64& baseExp, uint64& jobExp, Unit const* src) const
 {
-    // pc_gainexp.  (The exp bonuses of gear and statuses, pc_calcexp, come with them)
+    // pc_calcexp: the receiver's own exp bonuses against the source, and the boosts, which a quest's exp (no source) gets too
+    int32 bonus = 0;
+    ROWOWIdentity const* identity = player->CustomData.Get<ROWOWIdentity>("ROWOWIdentity");
+    if (ROWOWStatus const* status = src != nullptr ? GetROStatus(src) : nullptr)
+    {
+        ROWOWBonus const& playerBonus = identity->Status.Bonus;
+        bonus += playerBonus.ExpAddRace[status->Race];
+        bonus += playerBonus.ExpAddRace[ROWOW_RACE_ALL];
+        bonus += playerBonus.ExpAddClass[status->Class];
+        bonus += playerBonus.ExpAddClass[ROWOW_CLASS_ALL];
+    }
+    // Give EXPBOOST for quests even if src is nullptr.
+    if (ROWOWStatusChangeEntry const* sce = GetSCE(player, ROWOW_SC_EXPBOOST))
+        bonus += sce->Val1;
+    if (baseExp != 0)
+        baseExp = std::clamp<uint64>(uint64(double(baseExp) + double(baseExp) * (bonus / 100.)), 1, std::numeric_limits<uint32>::max());
+
+    // Give JEXPBOOST for quests even if src is nullptr.
+    if (ROWOWStatusChangeEntry const* sce = GetSCE(player, ROWOW_SC_JEXPBOOST))
+        bonus += sce->Val1;
+    if (jobExp != 0)
+        jobExp = std::clamp<uint64>(uint64(double(jobExp) + double(jobExp) * (bonus / 100.)), 1, std::numeric_limits<uint32>::max());
+}
+
+void ROWOWMod::PCGainExp(Player* player, uint64 baseExp, uint64 jobExp, Unit* src)
+{
+    // pc_gainexp
     ROWOWIdentity* identity = GetIdentity(player);
     if (identity->IsInForm == false || player->IsAlive() == false)
         return;
 
     bool isMaxBaseLevel = PCIsMaxBaseLevel(*identity);
     bool isMaxJobLevel = PCIsMaxJobLevel(*identity);
+    PCCalcExp(player, baseExp, jobExp, src);
     uint64 nextBaseExp = PCNextBaseExp(*identity);
     uint64 nextJobExp = PCNextJobExp(*identity);
     if (isMaxBaseLevel == true)
@@ -1272,6 +1312,7 @@ bool ROWOWMod::PCCheckBaseLevelUp(Player* player)
     }
     PCLevelUpAngel(player);
     CastLevelUpEffect(player, ROWOW_SPELL_BASE_LEVEL_UP);
+    PetOwnerLevelUp(player);
     ChatHandler(player->GetSession()).PSendSysMessage("Base level up! You are now base level {}.", identity->BaseLevel);
     return true;
 }
@@ -1396,8 +1437,8 @@ void ROWOWMod::MobLogDamage(Creature* creature, Unit* attacker, uint32 damage, u
 void ROWOWMod::MobDeadExp(Creature* creature, Unit* killer)
 {
     // The exp part of mob_dead: each attacker's share of the damage (exp_calc_type 0, Aegis's) of the monster's base and job exp, more
-    // for each extra attacker (exp_bonus_attacker).  Attackers off the map don't count, and dead ones get nothing.  (Parties share their
-    // members' exp evenly in RO only when set to; Warcraft's groups have no such setting, so each member keeps their own here)
+    // for each extra attacker (exp_bonus_attacker).  Attackers off the map don't count, and dead ones get nothing.  An attacker's share goes to its party
+    // when that's set to Even Share (party_exp_share), all its members' shares in one sum, the members' own bonuses applying to what each gets (pc_calcexp)
     ROWOWDamageLog* damageLog = creature->CustomData.Get<ROWOWDamageLog>("ROWOWDamageLog");
     if (damageLog == nullptr || damageLog->Entries.empty() == true)
         return;
@@ -1453,6 +1494,13 @@ void ROWOWMod::MobDeadExp(Creature* creature, Unit* killer)
         entries[0].Damage += entries[0].Damage;
     }
 
+    struct PartyShare
+    {
+        Group* PartyGroup = nullptr;
+        uint64 BaseExp = 0;
+        uint64 JobExp = 0;
+    };
+    std::vector<PartyShare> partyShares;
     for (size_t i = 0; i < entries.size(); i++)
     {
         if (players[i] == nullptr)
@@ -1472,24 +1520,35 @@ void ROWOWMod::MobDeadExp(Creature* creature, Unit* killer)
             per += per * ((count - 1) * BattleConfig.ExpBonusAttacker) / 100.;
         }
 
-        // The killer's gear's exp bonus against the monster's race and class (bExpAddRace, bExpAddClass)
-        if (ROWOWStatus const* mobStatus = GetROStatus(creature))
-        {
-            ROWOWBonus const& bonus = GetIdentity(players[i])->Status.Bonus;
-            if (bonus.ExpAddRace[mobStatus->Race] != 0)
-                per += per * bonus.ExpAddRace[mobStatus->Race] / 100.;
-            if (bonus.ExpAddRace[ROWOW_RACE_ALL] != 0)
-                per += per * bonus.ExpAddRace[ROWOW_RACE_ALL] / 100.;
-            if (bonus.ExpAddClass[mobStatus->Class] != 0)
-                per += per * bonus.ExpAddClass[mobStatus->Class] / 100.;
-            if (bonus.ExpAddClass[ROWOW_CLASS_ALL] != 0)
-                per += per * bonus.ExpAddClass[ROWOW_CLASS_ALL] / 100.;
-        }
-
         uint64 baseExp = mobBaseExp != 0 ? uint64(std::clamp(double(mobBaseExp) * per * bonus / 100., 1.0, double(std::numeric_limits<uint32>::max()))) : 0;
         uint64 jobExp = mobJobExp != 0 ? uint64(std::clamp(double(mobJobExp) * per * bonus / 100., 1.0, double(std::numeric_limits<uint32>::max()))) : 0;
-        PCGainExp(players[i], baseExp, jobExp);
+
+        // Locate the party, possibly add it; else its own
+        bool isOwnExp = true;
+        if (Group* group = players[i]->GetGroup())
+        {
+            auto shareIter = std::find_if(partyShares.begin(), partyShares.end(), [group](PartyShare const& share) { return share.PartyGroup == group; });
+            if (shareIter != partyShares.end())
+            {
+                shareIter->BaseExp += baseExp;
+                shareIter->JobExp += jobExp;
+                isOwnExp = false;
+            }
+            else if (GetPartyOption(group).IsExpShare == true)
+            {
+                PartyShare share;
+                share.PartyGroup = group;
+                share.BaseExp = baseExp;
+                share.JobExp = jobExp;
+                partyShares.push_back(share);
+                isOwnExp = false;
+            }
+        }
+        if (isOwnExp == true)
+            PCGainExp(players[i], baseExp, jobExp, creature);
     }
+    for (PartyShare const& share : partyShares)
+        PartyExpShare(share.PartyGroup, creature, share.BaseExp, share.JobExp);
 }
 
 void ROWOWMod::UpdateNaturalRegen(Player* player, uint32 diff)

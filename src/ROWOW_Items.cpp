@@ -194,6 +194,7 @@ void ROWOWMod::LoadItemScriptData()
     ROWOWSCRIPT->Clear();
     if (IsEnabled == false)
         return;
+    RegisterPetCommands();
 
     // Item names, for the scripts and groups that name items
     for (char const* itemTableName : { ROWOW_DATA_TABLE_ITEM, ROWOW_DATA_TABLE_ITEM_RENEWAL })
@@ -951,6 +952,8 @@ bool ROWOWMod::PCIsUseItem(Player* player, Item const* item, bool isReporting)
     ROWOWIdentity* identity = GetIdentity(player);
     if (roItem == nullptr || identity->IsInForm == false)
         return false;
+    if (roItem->Type == ROWOW_ITEM_TYPE_PETARMOR)
+        return identity->Pet != nullptr; // clif_parse_EquipItem: the pet's, not a script's
     if (roItem->Type != ROWOW_ITEM_TYPE_HEALING && roItem->Type != ROWOW_ITEM_TYPE_USABLE && roItem->Type != ROWOW_ITEM_TYPE_DELAYCONSUME && roItem->Type != ROWOW_ITEM_TYPE_CASH)
         return false;
     if (roItem->UseScript == nullptr || roItem->UseScript->IsRunnable() == false)
@@ -1067,6 +1070,11 @@ void ROWOWMod::PCUseItem(Player* player, ObjectGuid itemGUID)
         return;
     ROWOWItem const* roItem = GetROItem(item);
     ROWOWIdentity* identity = GetIdentity(player);
+    if (roItem->Type == ROWOW_ITEM_TYPE_PETARMOR)
+    {
+        PetEquipItem(player, item);
+        return;
+    }
 
     // Used up now, unless what its script does uses it up (delay consume), and the next item use waits item_use_interval
     uint32 itemTemplateID = item->GetEntry();

@@ -669,7 +669,7 @@ bool ROWOWMod::PCCantAct(Player* sd) const
 
 bool ROWOWMod::PCTakeItem(Player* sd, ObjectGuid const& guid, bool isGreed)
 {
-    // pc_takeitem: false when it can't be had (fail: clif_additem).  The party rules (even share, a member's priority) come with RO's parties, R11
+    // pc_takeitem: false when it can't be had (fail: clif_additem)
     Map* map = sd->GetMap();
     ROWOWFloorItem const* fitem = MapFindFloorItem(map, guid);
     if (fitem == nullptr)
@@ -680,6 +680,9 @@ bool ROWOWMod::PCTakeItem(Player* sd, ObjectGuid const& guid, bool isGreed)
         return false; // Distance is too far
     if (ROWOWStatusChange const* sc = GetStatusChange(static_cast<Unit const*>(sd)); sc != nullptr && sc->Cant.PickUp == true)
         return false;
+    Group* group = sd->GetGroup();
+    ROWOWPartyOption option = GetPartyOption(group);
+    bool isShare = group != nullptr && (option.Item & 1) != 0;
 
     // Time the player needs to wait until the item can be taken.  By default the player needs to wait for top, second and third attacker loot priority
     // times.  This applies even if there are no second or third top attackers
@@ -687,15 +690,28 @@ bool ROWOWMod::PCTakeItem(Player* sd, ObjectGuid const& guid, bool isGreed)
     ObjectGuid charID = sd->GetGUID();
     if (fitem->FirstGetCharID.IsEmpty() == true || fitem->FirstGetCharID == charID)
         itemGetTick = 0; // Top attacker or no attacker, no wait time
-    else if (fitem->SecondGetCharID.IsEmpty() == false && fitem->SecondGetCharID == charID)
+    else if (fitem->SecondGetCharID.IsEmpty() == false && fitem->SecondGetCharID == charID && isShare == false)
         itemGetTick = fitem->FirstGetTick; // Second top attacker, needs to wait for top attacker
-    else if (fitem->ThirdGetCharID.IsEmpty() == false && fitem->ThirdGetCharID == charID)
+    else if (fitem->ThirdGetCharID.IsEmpty() == false && fitem->ThirdGetCharID == charID && isShare == false)
         itemGetTick = fitem->SecondGetTick; // Third top attacker, needs to wait for top and second attacker
+    else if (isShare == true)
+    {
+        // Party member loot priority.  Only if the top attackers are still online, party members gain the loot priority; check if the top attackers are a
+        // party member and apply corresponding wait time.  (Group::IsMember reads the group's own list; a connected player is looked up, not touched)
+        auto isOnlineMember = [group](ObjectGuid const& guid) { return guid.IsEmpty() == false && group->IsMember(guid) == true && ObjectAccessor::FindConnectedPlayer(guid) != nullptr; };
+        if (isOnlineMember(fitem->FirstGetCharID) == true)
+            itemGetTick = 0;
+        else if (isOnlineMember(fitem->SecondGetCharID) == true)
+            itemGetTick = fitem->FirstGetTick;
+        else if (isOnlineMember(fitem->ThirdGetCharID) == true)
+            itemGetTick = fitem->SecondGetTick;
+    }
     if (GetTick() < itemGetTick)
         return false; // Cannot get item when wait time is still active
 
-    // pc_additem's failure tells the player, and the item stays where it is
-    if (PCAddItem(sd, fitem->Item.ItemTemplateID, fitem->Item.Amount, fitem->Item.IsIdentified) == false)
+    // This function takes care of giving the item to whoever should have it, considering party-share options.  pc_additem's failure tells the player, and the
+    // item stays where it is
+    if (PartyShareLoot(sd, group, option, fitem->Item, fitem->FirstGetCharID) == false)
     {
         ChatHandler(sd->GetSession()).SendSysMessage(GET_ITEM_FAILED_TEXT);
         return true;

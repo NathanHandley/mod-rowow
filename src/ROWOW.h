@@ -28,6 +28,7 @@
 #include "ROWOW_Skill.h"
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <deque>
 #include <functional>
@@ -43,7 +44,9 @@
 
 class ChatHandler;
 class Creature;
+class Field;
 class GameObject;
+class Group;
 class Item;
 class Map;
 class Player;
@@ -215,6 +218,7 @@ struct ROWOWDataTable
 #define ROWOW_SPELL_JOB_LEVEL_UP                    200002  // RO's job level up effect
 #define ROWOW_SPELL_WEAPON_HIT_SOUND_START          200003  // RO's weapon hit sounds, 200003-200010 (see GetWeaponHitSoundSpellID)
 #define ROWOW_SPELL_USE_ITEM                        200011  // What every usable RO item casts when used, which runs the item's RO script
+#define ROWOW_SPELL_TAME                            200012  // What a taming item casts: the use item spell with a target (RO's capture cursor)
 #define ROWOW_SPELL_ID_FIXED_END                    200099  // The fixed RO spells end here (generated ones follow)
 #define ROWOW_SPELL_ID_RO_START                     200000  // RO spells are 200000-248999
 #define ROWOW_SPELL_ID_RO_END                       248999
@@ -770,6 +774,19 @@ struct ROWOWBattleConfig
     int32 CartRevoKnockback = 1; // Cart Revolution pushes west, as officially
     int32 ArrowShowerKnockback = 1; // Arrow Shower pushes away from where the arrows fall (0: away from the archer)
     int32 PCInvincibleTime = 3000; // player_invincible_time: ms a player can't be targeted after arriving on a map or reviving
+    int32 PartyEvenShareBonus = 0; // party_even_share_bonus
+    int32 PartyShareType = 0; // party_item_share_type: &1 only items with an owner, &2 round robin
+    int32 PartyShowSharePicker = 1; // show_party_share_picker
+    int32 ShowPickerItemType = 112; // show_picker.item_type
+    int32 PetLegacyFormula = 0; // pet_legacy_formula
+    int32 PetCatchRate = 100; // pet_catch_rate
+    int32 PetDistanceCheck = 5; // pet_distance_check
+    int32 PetHideCheck = 1; // pet_hide_check
+    int32 PetRename = 0; // pet_rename
+    int32 PetFriendlyRate = 100; // pet_friendly_rate
+    int32 PetHungryDelayRate = 100; // pet_hungry_delay_rate
+    int32 PetUnequipDestroy = 1; // pet_unequip_destroy
+    int32 PetWalkSpeed = 1; // pet_walk_speed
     int32 MaxCartWeight = 80000; // In tenths: max_cart_weight (8000) times 10
     int32 VendingMaxValue = 1000000000;
     int32 VendingOverMax = 1; // A sale may take the vendor past the zeny cap (what's over is lost)
@@ -1423,6 +1440,117 @@ struct ROWOWQuestEntry
     int32 Counts[ROWOW_MAX_QUEST_OBJECTIVES] = { 0, 0, 0 }; // The kills made of each objective
 };
 
+// RO's parties (ROWOW_Party.cpp, R11).  A WoW group is the party; this is what RO keeps beside it, under ROWOWMod::PartyMutex
+#define ROWOW_PARTY_SHARE_LEVEL                     15u     // party_share_level (inter_athena.conf): the base levels even share spans
+
+// party.exp and party.item
+struct ROWOWPartyOption
+{
+    bool IsExpShare = false; // party.exp: Even Share, or Each Take
+    uint8 Item = 0; // party.item: &1 a member's priority on items, &2 the even share of what's picked up
+};
+
+// A member in the RO world, as the char server's party data has it
+struct ROWOWPartyMember
+{
+    uint32 BaseLevel = 1;
+    uint16 JobID = ROWOW_JOB_NOVICE;
+};
+
+struct ROWOWParty
+{
+    ROWOWPartyOption Option;
+    uint32 ItemTurn = 0; // itemc: whose turn party_item_share_type's round robin is
+    std::unordered_map<uint32, ROWOWPartyMember> MembersByGUID; // By character GUID: the members online to the party
+};
+
+// RO's taming pets (ROWOW_Pet.cpp, R11)
+#define ROWOW_PET_INTIMATE_NONE                     0       // e_pet_intimate_level
+#define ROWOW_PET_INTIMATE_AWKWARD                  1
+#define ROWOW_PET_INTIMATE_SHY                      100
+#define ROWOW_PET_INTIMATE_NEUTRAL                  250
+#define ROWOW_PET_INTIMATE_CORDIAL                  750
+#define ROWOW_PET_INTIMATE_LOYAL                    910
+#define ROWOW_PET_INTIMATE_MAX                      1000
+#define ROWOW_PET_HUNGRY_NONE                       0       // e_pet_hungry
+#define ROWOW_PET_HUNGRY_VERY_HUNGRY                10
+#define ROWOW_PET_HUNGRY_HUNGRY                     25
+#define ROWOW_PET_HUNGRY_NEUTRAL                    75
+#define ROWOW_PET_HUNGRY_SATISFIED                  90
+#define ROWOW_PET_HUNGRY_STUFFED                    100
+#define ROWOW_PET_CATCH_NORMAL                      0       // e_pet_catch_flag
+#define ROWOW_PET_CATCH_UNIVERSAL_NO_BOSS           1
+#define ROWOW_PET_CATCH_UNIVERSAL_ALL               2
+#define ROWOW_PET_NAME_LENGTH                       23      // NAME_LENGTH
+#define ROWOW_ITEM_PET_ENCHANTMENT_SLOT             PROP_ENCHANTMENT_SLOT_0 // Where an egg names its pet, a slot the RO item code doesn't use
+#define ROWOW_ITEM_PET_ENCHANTMENT_START            0x40000000u // An egg's enchantment ID is this + the pet's ID: past any SpellItemEnchantment row, so it shows nothing and does nothing
+
+// s_pet_db, a row of pet_db
+struct ROWOWPetDB
+{
+    uint32 MobID = 0; // class_
+    uint32 ItemID = 0; // itemID, the taming item
+    uint32 EggID = 0;
+    uint32 AcceID = 0;
+    uint32 FoodID = 0;
+    int32 Fullness = 0; // What hunger drops by each HungryDelay
+    int32 HungryDelay = 60000; // ms
+    int32 HungerIncrease = 20; // pet_db's default: no pre-renewal row sets it
+    int32 RHungry = 50; // IntimacyFed
+    int32 RFull = -100; // IntimacyOverfed
+    int32 Intimate = 250; // IntimacyStart
+    int32 Die = -20; // IntimacyOwnerDie
+    int32 HungryIntimacyDec = -5; // pet_db's default: no pre-renewal row sets it
+    int32 Capture = 0; // CaptureRate, in 10000
+    bool IsSpecialPerformance = true; // s_perfor
+    std::shared_ptr<ROWOWScript> BonusScript; // pet_bonus_script
+};
+
+// s_pet, a row of mod_rowow_pet
+struct ROWOWPet
+{
+    uint32 PetID = 0;
+    uint32 OwnerGUID = 0; // char_id
+    uint32 MobID = 0; // class_
+    std::string Name;
+    uint32 Level = 1;
+    uint32 EggID = 0; // egg_id
+    uint32 EquipID = 0; // equip: the accessory it wears (item_db Id)
+    int32 Intimate = 0;
+    int32 Hungry = 0;
+    bool IsRenamed = false; // rename_flag
+    bool IsIncubate = true; // incubate: in its egg
+};
+
+// pet_data: the pet that's out, on its master's identity.  Its master's thread is the only one that touches it
+struct ROWOWPetData
+{
+    ROWOWPet Pet;
+    ROWOWPetDB const* DB = nullptr;
+    ObjectGuid CreatureGUID; // The creature that shows it, on the master's map
+    uint32 HungryTimer = 0; // ms to the next pet_hungry
+    uint32 ThinkTimer = 0;
+    uint64 LastThinkTime = 0;
+    uint64 NextWalkTime = 0; // next_walktime
+    int32 MoveFailCount = 0; // move_fail_count
+    int32 Speed = 0; // status.speed
+    int32 Range2 = 10; // db->range2 and range3, what it sees and how far from its master it may be
+    int32 Range3 = 12;
+    int32 ToX = 0; // ud.to_x, ud.to_y: where it's walking
+    int32 ToY = 0;
+    uint64 TeleportTime = 0; // masterteleport_timer: when it's put beside its master, 0 for no timer
+    uint64 CanActTime = 0; // canact_tick: no picking up before it
+    int32 LootMax = 0; // loot->max: 0 for no loot (petloot)
+    std::vector<ROWOWDropItem> LootItems; // loot->item
+    ObjectGuid LootTargetID; // target_id, a floor item
+};
+
+// On a pet's creature: its master, which the click on it asks for
+struct ROWOWPetOwner : public DataMap::Base
+{
+    ObjectGuid OwnerGUID;
+};
+
 // An item a new RO identity starts with (rAthena's start_items_pre)
 struct ROWOWStartItem
 {
@@ -1522,6 +1650,12 @@ struct ROWOWIdentity : public DataMap::Base
     bool IsSuperNoviceDeadFlag = false; // state.snovice_dead_flag: its angel saved it from death, until its next base level
     bool IsSellingToShop = false; // A sell packet is being handled: its money gets Overcharge
     uint32 Option = 0; // status.option: the options kept with the identity (a Knight's or Crusader's Peco, ROWOW_OPTION_RIDING), saved with it
+    std::unique_ptr<ROWOWPetData> Pet; // pd and status.pet_id: the pet that's out (mod_rowow_pet, with IsIncubate 0), null for none
+    ObjectGuid PetCatchTargetGUID; // What the taming item's spell picked, for pet_catch_process_start
+    uint32 PartyUpdateTimer = 0; // Time since UpdateParty last looked at its group
+    uint32 PartyGroupGUID = 0; // The party it's in the member table of (ROWOWParty), 0 for none
+    uint32 PartyBaseLevel = 0; // ... and the level and job that has of it
+    uint16 PartyJobID = 0;
     std::array<ObjectGuid, ROWOW_MAX_DEVOTION> DevotionGUIDs; // devotion: the players its Devotion protects, by slot (a slot holds while that
                                                               // player's SC_DEVOTION names this one and the slot)
 
@@ -1771,7 +1905,8 @@ public:
     uint64 PCNextJobExp(ROWOWIdentity const& identity) const; // pc_nextjobexp
     bool PCIsMaxBaseLevel(ROWOWIdentity const& identity) const; // pc_is_maxbaselv
     bool PCIsMaxJobLevel(ROWOWIdentity const& identity) const; // pc_is_maxjoblv
-    void PCGainExp(Player* player, uint64 baseExp, uint64 jobExp); // pc_gainexp
+    void PCGainExp(Player* player, uint64 baseExp, uint64 jobExp, Unit* src = nullptr); // pc_gainexp: src is the exp's source (the monster), for the bonuses against it
+    void PCCalcExp(Player* player, uint64& baseExp, uint64& jobExp, Unit const* src) const; // pc_calcexp
     bool PCCheckBaseLevelUp(Player* player); // pc_checkbaselevelup
     bool PCCheckJobLevelUp(Player* player); // pc_checkjoblevelup
     void PCDeadPenalty(Player* player); // The exp penalty part of pc_dead
@@ -1933,6 +2068,40 @@ public:
         std::function<int32(Unit*)> const& func) const; // map_foreachindir (BL_CHAR): a path of cells from x0,y0 toward x1,y1
     int32 SkillAreaSub(Unit* bl, Unit* src, uint16 skillID, uint16 skillLevel, uint64 tick, int32 flag, ROWOWSkillAreaFunc func); // skill_area_sub
     int32 PartyForEachSameMap(Player* sd, int32 range, std::function<int32(Unit*)> const& func) const; // party_foreachsamemap (ROWOW_Skills.cpp)
+
+    // RO parties (ROWOW_Party.cpp)
+    void LoadPartyData();
+    ROWOWPartyOption GetPartyOption(Group const* group);
+    void SendPartyToClient(Player* player);
+    void UpdateParty(Player* player, uint32 diff); // From the player's update: the party's table follows its group, level and job
+    void PartyRemoveMember(Player* player); // Offline to the party: out of the RO world or the game
+    void PartyDisband(Group const* group); // party_broken
+    void PartyChangeOption(Player* sd, bool isExpShare, uint8 item); // party_changeoption
+    bool PartySkillCheckJob(Player const* sd, uint16 jobID); // party_check_state: a member online anywhere of the job
+    void PartyExpShare(Group* group, Creature* src, uint64 baseExp, uint64 jobExp); // party_exp_share
+    bool PartyShareLoot(Player* sd, Group* group, ROWOWPartyOption const& option, ROWOWDropItem const& item, ObjectGuid const& firstCharID); // party_share_loot
+
+    // RO taming pets (ROWOW_Pet.cpp)
+    void LoadPetData();
+    void RegisterPetCommands(); // pet, bpet, makepet, getpetinfo and petloot
+    ROWOWPetData* GetPet(Player const* player) const; // sd->pd
+    void LoadIdentityPet(Player* player, ROWOWIdentity& identity);
+    void SaveIdentityPet(Player* player, ROWOWIdentity& identity, CharacterDatabaseTransaction trans) const;
+    void UpdatePet(Player* sd, uint32 diff); // pet_hungry and pet_ai_hard, from its master's update
+    void PetArrive(Player* sd); // Its master arrived on a map
+    void PetLeaveMap(Player* sd); // unit_remove_map: its master leaves the map or the game
+    void ClifSendPetStatus(Player* sd); // clif_send_petstatus
+    void ClifSendEgg(Player* sd); // clif_sendegg
+    void PetSelectEgg(Player* sd, ObjectGuid::LowType itemGUID); // pet_select_egg
+    bool PetReturnEgg(Player* sd); // pet_return_egg
+    void PetCatchProcessStart(Player* sd, uint32 itemID, uint8 flag); // pet_catch_process_start
+    int32 PetCatchRate(Player const* sd, ROWOWPetDB const& pet, Creature const* md) const; // pet_catch_process_end's pet_catch_rate
+    void PetMenu(Player* sd, int32 menuNum); // pet_menu
+    bool PetEquipItem(Player* sd, Item* item); // pet_equipitem
+    void PetChangeName(Player* sd, std::string const& name); // pet_change_name
+    void PetOwnerDead(Player* sd); // pc_dead's pet part
+    void PetOwnerLevelUp(Player* sd);
+    void PetLoot(Player* sd, int32 max); // petloot
     bool PCCheckWeaponType(Unit const* unit, uint32 weapons) const; // pc_check_weapontype: whether the player holds one of the weapon types
     void PCCheckAllowSkill(Player* player); // pc_checkallowskill: ends the statuses the equipment worn no longer allows
     ROWOWSkillCondition SkillGetRequirement(Player* sd, uint16 skillID, uint16 skillLevel) const; // skill_get_requirement
@@ -2326,6 +2495,7 @@ public:
     uint32 UnitEscape(Creature* md, Unit* target, int32 dist, uint8 flag); // unit_escape: the walk's time, 0 for no walk
     Unit* BattleGetTargeted(Unit* target) const; // battle_gettargeted: one of those aiming at it
     bool UnitWalkToXY(Creature* md, int32 x, int32 y); // unit_walktoxy
+    bool UnitCalcPos(Map* map, int32 x0, int32 y0, int32 tx, int32 ty, uint8 dir, int32& xOut, int32& yOut) const; // unit_calc_pos: a cell beside the master for a pet, homunculus or mercenary at x0, y0
     bool UnitWalkToBL(Creature* md, ROWOWMobData* mob, Unit* tbl, int32 range, bool isAttackContinue); // unit_walktobl
     bool UnitUpdateChase(Creature* md, ROWOWMobData* mob, uint64 tick); // unit_update_chase
     void UnitStopWalking(Creature* md); // unit_stop_walking, leaving movement the core controls alone
@@ -2486,6 +2656,44 @@ public:
     std::unordered_map<ObjectGuid::LowType, ROWOWNpc*> NpcsByCreatureSpawnID;
     std::unordered_map<std::string, int64> BattleFlagsByName; // getbattleflag: the battle config's values by name (lowercase)
     std::mutex NpcStateMutex; // The NPCs' shown state and timers, and the queues below, which map threads change
+
+    // RO parties (ROWOW_Party.cpp)
+    std::mutex PartyMutex; // Over PartiesByGroupGUID, which every member's thread reads and writes.  Never held across a call into the core
+    std::unordered_map<uint32, ROWOWParty> PartiesByGroupGUID;
+    bool PartyCheckExpShare(ROWOWParty const& party) const; // party_check_exp_share (under PartyMutex)
+    void SavePartyOption(uint32 groupGUID, ROWOWPartyOption const& option);
+
+    // RO taming pets (ROWOW_Pet.cpp)
+    std::unordered_map<uint32, ROWOWPetDB> PetsByMobID; // pet_db (startup only)
+    std::unordered_map<uint64, uint32> PetLookEntriesByKey; // By mob << 32 | accessory: its creature (startup only)
+    std::unordered_map<uint64, std::vector<std::string>> PetTalkLinesByKey; // By mob, hunger and act (startup only)
+    std::atomic<uint32> LastPetID { 0 }; // The char server's pet id
+    bool ReadPetRow(Field const* fields, ROWOWPet& petOut) const;
+    void PetDataInit(ROWOWIdentity& identity, ROWOWPet const& pet); // pet_data_init, without the placing
+    void SavePet(ROWOWPet const& pet, CharacterDatabaseTransaction trans) const;
+    Creature* GetPetCreature(Player* sd, ROWOWPetData const& pd) const;
+    uint32 GetPetLookEntry(uint32 mobID, uint32 equipItemID) const;
+    static int32 PetHungryVal(ROWOWPetData const& pd); // pet_hungry_val
+    static uint32 GetEggPetID(Item const* item); // The pet an egg holds, 0 for none
+    void ClifPetTalk(Player* sd, ROWOWPetData& pd, uint8 act); // clif_pet_emotion
+    void PetSetIntimate(Player* sd, ROWOWPetData& pd, int32 value); // pet_set_intimate
+    void PetHungry(Player* sd, ROWOWPetData& pd, uint32 diff); // pet_hungry
+    int32 PetGetWalkSpeed(Player const* sd) const; // get_pet_walk_speed
+    void PetSetSpeed(Player* sd, ROWOWPetData& pd, int32 speed);
+    void PetSpawn(Player* sd, ROWOWPetData& pd);
+    void PetUnspawn(Player* sd, ROWOWPetData& pd);
+    void PetRefreshName(Player* sd, ROWOWPetData const& pd);
+    void PetRefreshLook(Player* sd, ROWOWPetData const& pd);
+    void PetFree(Player* sd); // unit_free of a lost pet
+    bool PetCreateEgg(Player* sd, ROWOWPetDB const& db); // pet_create_egg and pet_get_egg
+    void PetCatchProcessEnd(Player* sd, Creature* md, uint32 itemID, uint8 flag); // pet_catch_process_end
+    void PetFood(Player* sd, ROWOWPetData& pd); // pet_food
+    void PetPerformance(Player* sd, ROWOWPetData& pd); // pet_performance
+    void PetUnequipItem(Player* sd, ROWOWPetData& pd); // pet_unequipitem
+    void PetLootItemDrop(Player* sd, ROWOWPetData& pd, Player* receiver); // pet_lootitem_drop
+    ROWOWFloorItem const* PetLootSearch(Player const* sd, Creature* md, ROWOWPetData const& pd, int32 range) const; // pet_ai_sub_hard_lootsearch
+    void PetRandomWalk(Creature* md, ROWOWMobData* mob, ROWOWPetData& pd, uint64 tick); // pet_randomwalk
+    void PetAISubHard(Player* sd, ROWOWPetData& pd, uint64 tick); // pet_ai_sub_hard
     std::vector<ROWOWNpcEvent> PendingNpcEvents;
     std::set<uint32> NpcVisibilityChangedIDs; // NPCs whose creatures the next world update shows or hides
     std::set<uint32> RunningNpcTimerIDs;

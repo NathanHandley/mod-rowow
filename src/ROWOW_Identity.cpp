@@ -537,6 +537,7 @@ ROWOWIdentity* ROWOWMod::GetIdentity(Player* player)
     LoadIdentityCart(player, *identity);
     LoadIdentityMemo(player, *identity);
     LoadIdentityQuests(player, *identity);
+    LoadIdentityPet(player, *identity);
     PCCalcSkillTree(*identity);
     return identity;
 }
@@ -599,6 +600,7 @@ void ROWOWMod::SaveIdentity(Player* player, CharacterDatabaseTransaction trans)
     SaveIdentityCart(player, *identity, trans);
     SaveIdentityMemo(player, *identity, trans);
     SaveIdentityQuests(player, *identity, trans);
+    SaveIdentityPet(player, *identity, trans);
 }
 
 bool ROWOWMod::IsSpellKeptInROForm(SpellInfo const* spellInfo) const
@@ -878,8 +880,9 @@ void ROWOWMod::CompleteROFormChange(Player* player)
     {
         SendSkillsToClient(player, *identity, true);
         SendCartToClient(player, *identity, true);
-        // clif_parse_LoadEndAck: arriving on a map makes the player invincible for a moment (pc_setinvincibletimer)
+        // clif_parse_LoadEndAck: arriving on a map makes the player invincible for a moment (pc_setinvincibletimer), and its pet arrives with it
         PCSetInvincibleTimer(player);
+        PetArrive(player);
     }
 }
 
@@ -963,14 +966,12 @@ void ROWOWMod::LeaveROForm(Player* player)
     if (identity->IsInForm == false)
         return;
 
-    // The form's values to keep, and its statuses (leaving the RO world is RO's logout).  The arrival invincibility is the form's: WoW's
-    // immunity to NPCs goes with it (a reset identity would no longer know of it)
+    // The form's values to keep, and its statuses (leaving the RO world is RO's logout, also to its party, and its pet stays behind).  The arrival
+    // invincibility is the form's
     LeaveStatusChanges(player, *identity);
-    if (identity->InvincibleEndTime != 0)
-    {
-        identity->InvincibleEndTime = 0;
-        player->SetImmuneToNPC(false);
-    }
+    identity->InvincibleEndTime = 0;
+    PetLeaveMap(player);
+    PartyRemoveMember(player);
     identity->Zeny = player->GetMoney();
     if (player->IsAlive() == true)
     {
