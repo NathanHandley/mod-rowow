@@ -31,8 +31,9 @@
 using namespace std;
 
 // Kafra storage (R8.2, R12): RO's storage is account wide, and so is the Ragnarok tab of the bank window, which a Kafra opens (plan section 8
-// items 7 and 14, RONotes\world-bank-tabs.md).  The tab takes RO items only, the core holds them (account_bank_item, world 1), and any banker
-// in any world reaches it.  The Character and Account tabs are beside it, and the guild's bank when the guild has bought a tab, in the stock guild
+// items 7 and 14, RONotes\world-bank-tabs.md).  The tab takes RO items only, in its item slots and in general bags of any game in its bag slots,
+// the core holds them (account_bank_item, world 1), its corner shows zeny, and any banker in any world reaches it.  Its bag slots are bought with
+// gold, out of the form, at a stock banker.  The Character and Account tabs are beside it, and the guild's bank when the guild has bought a tab, in the stock guild
 // bank window.  Neither needs a banker in reach: the player is its own banker, as AzerothCore's bank command (.character check bank) does for the
 // bank and the core's SendShowGuildBank (MergedWorlds) does for the guild bank.  The client opens the guild bank window on a list it didn't ask for
 // on an RO map (MergedWorldClient ro-guild-storage).  Zeny never moves into or out of the guild bank (plan section 8 item 5)
@@ -59,6 +60,23 @@ InventoryResult ROWOWMod::StorageCanAddItem(Player* player, Item const* item, ui
     if (GetROItem(item) == nullptr || ItemDBIsRestricted(item, &ROWOWItem::IsNoStorage) == true)
         return EQUIP_ERR_ACCOUNT_BANK_ITEM_NOT_ALLOWED;
     return EQUIP_ERR_OK;
+}
+
+uint32 ROWOWMod::StorageGetZeny(Player* player)
+{
+    // In the form the character's money is its zeny, and out of it the money is gold
+    ROWOWIdentity* identity = GetIdentity(player);
+    return identity->IsInForm == true ? player->GetMoney() : identity->Zeny;
+}
+
+std::string ROWOWMod::StorageCurrencyText(Player* player)
+{
+    uint32 zeny = StorageGetZeny(player);
+    GetIdentity(player)->StorageZenyShown = zeny;
+    std::string text = std::to_string(zeny);
+    for (int32 i = int32(text.size()) - 3; i > 0; i -= 3)
+        text.insert(i, ",");
+    return text + " z";
 }
 
 int32 ROWOWMod::StorageGuildStorageOpen(Player* player)
@@ -132,7 +150,18 @@ public:
 class ROWOW_StoragePlayerScript : public PlayerScript
 {
 public:
-    ROWOW_StoragePlayerScript() : PlayerScript("ROWOW_StoragePlayerScript", { PLAYERHOOK_ON_MAP_CHANGED, PLAYERHOOK_CAN_BANK_ITEM, PLAYERHOOK_CAN_GUILD_BANK_ITEM }) {}
+    ROWOW_StoragePlayerScript() : PlayerScript("ROWOW_StoragePlayerScript", { PLAYERHOOK_ON_UPDATE, PLAYERHOOK_ON_MAP_CHANGED, PLAYERHOOK_CAN_BANK_ITEM, PLAYERHOOK_CAN_BUY_BANK_SLOT,
+        PLAYERHOOK_ON_BANK_CURRENCY_TEXT, PLAYERHOOK_CAN_GUILD_BANK_ITEM }) {}
+
+    void OnPlayerUpdate(Player* player, uint32 /*p_time*/) override
+    {
+        // Zeny changes with the tab showing, a Kafra's fee or a shop's sale, and every path ends in the money or the identity, so this watches them.  The
+        // player's own map thread, and it only writes to its own session and identity
+        if (ROWOW->IsEnabled == false || player->GetBankTabShowing() != WORLD_BANK_RAGNAROK + 1)
+            return;
+        if (ROWOW->StorageGetZeny(player) != ROWOW->GetIdentity(player)->StorageZenyShown)
+            player->SendBankCurrencyText(WORLD_BANK_RAGNAROK);
+    }
 
     void OnPlayerMapChanged(Player* player) override
     {
@@ -150,6 +179,20 @@ public:
         InventoryResult storageResult = ROWOW->StorageCanAddItem(player, item, world);
         if (world == WORLD_BANK_RAGNAROK || storageResult != EQUIP_ERR_OK)
             result = storageResult;
+    }
+
+    void OnPlayerCanBuyBankSlot(Player* player, bool& result) override
+    {
+        // Bag slots cost gold on every tab, and zeny never pays one (plan section 8 item 13).  The form can't change with the bank open: leaving it
+        // changes map, which closes the bank
+        if (ROWOW->IsEnabled == true && ROWOW->IsInROForm(player) == true)
+            result = false;
+    }
+
+    void OnPlayerBankCurrencyText(Player* player, uint8 world, std::string& text) override
+    {
+        if (ROWOW->IsEnabled == true && world == WORLD_BANK_RAGNAROK)
+            text = ROWOW->StorageCurrencyText(player);
     }
 
     void OnPlayerCanGuildBankItem(Player* player, Item const* item, InventoryResult& result) override

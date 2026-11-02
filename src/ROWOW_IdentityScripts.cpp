@@ -477,7 +477,6 @@ public:
             case CMSG_GUILD_BANK_DEPOSIT_MONEY:
             case CMSG_GUILD_BANK_WITHDRAW_MONEY:
             case CMSG_GUILD_BANK_BUY_TAB:
-            case CMSG_BUY_BANK_SLOT:
             case CMSG_REPAIR_ITEM:
             case CMSG_TRAINER_BUY_SPELL:
             case CMSG_ACTIVATETAXI:

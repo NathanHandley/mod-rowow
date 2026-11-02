@@ -1874,6 +1874,7 @@ struct ROWOWIdentity : public DataMap::Base
     std::unordered_map<uint32, uint32> ItemDelayEndTimes; // By item_db Id: when each item with a reuse delay can be used again
     bool IsIdentifyMenuOpen = false; // A Magnifier's list of items to appraise is up (menuskill_id MC_IDENTIFY)
     uint8 StorageFlag = 0; // state.storage_flag: a Kafra opened its storage (1, the bank window) on this map, until it leaves the map
+    uint32 StorageZenyShown = 0; // The zeny last sent for the Ragnarok tab's corner
     std::map<uint16, uint16> SkillLevelsByID; // The skills learned (mod_rowow_identity_skill), and their levels
     bool AreSkillsChanged = false;
     std::set<uint16> TreeSkillIDs; // The skills of the tree it may use and raise now, learned or not (pc_calc_skilltree sets their id)
@@ -3178,6 +3179,8 @@ public:
     // one (plan section 8 items 7 and 14), each with the player as its own banker as AzerothCore's bank command does
     void StorageStorageOpen(Player* player); // storage_storageopen: the bank window, on the Ragnarok tab
     InventoryResult StorageCanAddItem(Player* player, Item const* item, uint8 world); // storage_additem's checks, on a bank tab
+    uint32 StorageGetZeny(Player* player);              // In the form or out of it
+    std::string StorageCurrencyText(Player* player);    // The Ragnarok tab's corner
     int32 StorageGuildStorageOpen(Player* player); // storage_guild_storageopen: ROWOW_GSTORAGE_*; the guild bank window opens at the next world update
     void StorageClose(Player* player); // Leaving the map: the storage ends (storage_storageclose, storage_guild_storageclose)
     void OpenPendingGuildStorages(); // The world update, with the maps idle: the guild bank windows asked for
