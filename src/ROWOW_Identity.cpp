@@ -26,6 +26,7 @@
 #include "ObjectMgr.h"
 #include "Player.h"
 #include "QueryResult.h"
+#include "SpellAuraEffects.h"
 #include "SpellAuras.h"
 #include "SpellInfo.h"
 #include "SpellMgr.h"
@@ -192,6 +193,7 @@ void ROWOWMod::LoadIdentityData()
     StartMapID = 0;
     StartItems.clear();
     StartZeny = 0;
+    StartBagItemTemplateID = 0;
     if (IsEnabled == false)
         return;
 
@@ -352,8 +354,21 @@ void ROWOWMod::LoadIdentityData()
                 StartZeny = uint32(strtoul(value.c_str(), nullptr, 10));
         }
     }
-    LOG_INFO("module.ROWOW", "ROWOWMod::LoadIdentityData loaded {} jobs, {} map names, {} items and {} start items (start map {} cell {},{})", JobsByID.size(),
-        MapIDsByMapName.size(), ItemTemplateIDs.size(), StartItems.size(), StartMapID, StartCellX, StartCellY);
+
+    // The general bag a new identity is given: the converter's one container in its RO item range (none from an older convert)
+    for (auto const& itemTemplateByEntry : *sObjectMgr->GetItemTemplateStore())
+    {
+        ItemTemplate const& itemTemplate = itemTemplateByEntry.second;
+        if (itemTemplate.ItemId < ROWOW_ITEM_TEMPLATE_ENTRY_START || itemTemplate.ItemId > ROWOW_ITEM_TEMPLATE_ENTRY_END || itemTemplate.Class != ITEM_CLASS_CONTAINER ||
+            itemTemplate.ContainerSlots == 0)
+            continue;
+        if (StartBagItemTemplateID == 0 || itemTemplate.ItemId < StartBagItemTemplateID)
+            StartBagItemTemplateID = itemTemplate.ItemId;
+    }
+    if (StartBagItemTemplateID == 0)
+        LOG_ERROR("module.ROWOW", "ROWOWMod::LoadIdentityData found no start bag in the RO item range, so new RO identities get no bags");
+    LOG_INFO("module.ROWOW", "ROWOWMod::LoadIdentityData loaded {} jobs, {} map names, {} items and {} start items (start map {} cell {},{}), start bag {}", JobsByID.size(),
+        MapIDsByMapName.size(), ItemTemplateIDs.size(), StartItems.size(), StartMapID, StartCellX, StartCellY, StartBagItemTemplateID);
 }
 
 uint64 ROWOWMod::GetIllusionJobKey(std::string const& jobKey, bool isMale)
@@ -751,6 +766,16 @@ void ROWOWMod::EnterROForm(Player* player)
     identity->WoWPowerType = uint8(player->getPowerType());
     for (uint8 attackType = 0; attackType < MAX_ATTACK; attackType++)
         identity->WoWAttackTimes[attackType] = player->GetAttackTime(WeaponAttackType(attackType));
+    // Its stance or form, from one of its own spells: the arrival takes it off with the buffs, and leaving puts it back (RestoreWoWShapeshift)
+    identity->WoWShapeshiftSpellID = 0;
+    for (AuraEffect const* shapeshift : player->GetAuraEffectsByType(SPELL_AURA_MOD_SHAPESHIFT))
+    {
+        if (player->HasSpell(shapeshift->GetId()) == true)
+        {
+            identity->WoWShapeshiftSpellID = shapeshift->GetId();
+            break;
+        }
+    }
     identity->IsInForm = true;
 
     // The client forgets the character's spells (the server keeps them, and refuses them while in the form), keeping the form's
@@ -843,34 +868,16 @@ void ROWOWMod::CompleteROFormChange(Player* player)
                 player->SetPower(POWER_MANA, std::min(formSP, player->GetMaxPower(POWER_MANA)));
             }
 
-            // A new identity gets the start items in the bags and worn in their RO equipment positions, and is saved with them
+            // A new identity gets its general bags, then the start items in the bags and worn in their RO equipment positions, and is saved
+            // with them
             if (identity->IsNewIdentityPending == true)
             {
+                GiveStartBags(player);
                 for (ROWOWStartItem const& startItem : StartItems)
                 {
                     Item* item = nullptr;
-                    ItemPosCountVec itemDestination;
-                    if (player->CanStoreNewItem(NULL_BAG, NULL_SLOT, itemDestination, startItem.ItemTemplateID, startItem.Amount) == EQUIP_ERR_OK)
-                    {
-                        item = player->StoreNewItem(itemDestination, startItem.ItemTemplateID, true);
-                        if (item != nullptr)
-                            player->SendNewItem(item, startItem.Amount, true, false);
-                    }
-                    if (item == nullptr)
-                    {
-                        // No room: it comes by mail instead (and isn't worn)
-                        CharacterDatabaseTransaction mailTrans = CharacterDatabase.BeginTransaction();
-                        MailDraft draft("Ragnarok Online", "Your bags were too full for this, so it was sent to you here.");
-                        if (Item* mailItem = Item::CreateItem(startItem.ItemTemplateID, startItem.Amount, player))
-                        {
-                            mailItem->SaveToDB(mailTrans);
-                            draft.AddItem(mailItem);
-                        }
-                        draft.SendMailTo(mailTrans, MailReceiver(player), MailSender(MAIL_NORMAL, 0, MAIL_STATIONERY_GM));
-                        CharacterDatabase.CommitTransaction(mailTrans);
-                        continue;
-                    }
-                    if (startItem.EquipPosition != 0)
+                    GiveStartItemOrMail(player, startItem.ItemTemplateID, startItem.Amount, &item);
+                    if (item != nullptr && startItem.EquipPosition != 0) // One sent by mail isn't worn
                         identity->ItemGUIDsByEquipPosition[startItem.EquipPosition] = item->GetGUID().GetCounter();
                 }
                 identity->IsEquipmentChanged = true;
@@ -916,6 +923,7 @@ void ROWOWMod::CompleteROFormChange(Player* player)
             player->ResummonPetTemporaryUnSummonedIfAny();
         }
         identity->SuspendedPassiveSpellIDs.clear();
+        RestoreWoWShapeshift(player, *identity);
         if (player->IsAlive() == true)
         {
             player->SetHealth(std::min(health, player->GetMaxHealth()));
@@ -937,6 +945,66 @@ void ROWOWMod::CompleteROFormChange(Player* player)
         PetArrive(player);
         FollowerArrive(player);
     }
+}
+
+void ROWOWMod::GiveStartItemOrMail(Player* player, uint32 itemTemplateID, uint32 amount, Item** itemOut)
+{
+    // Into the bags, or with no room, by mail (the mail is the character's, taken out of the form)
+    Item* item = nullptr;
+    ItemPosCountVec itemDestination;
+    if (player->CanStoreNewItem(NULL_BAG, NULL_SLOT, itemDestination, itemTemplateID, amount) == EQUIP_ERR_OK)
+    {
+        item = player->StoreNewItem(itemDestination, itemTemplateID, true);
+        if (item != nullptr)
+            player->SendNewItem(item, amount, true, false);
+    }
+    if (itemOut != nullptr)
+        *itemOut = item;
+    if (item != nullptr)
+        return;
+    CharacterDatabaseTransaction mailTrans = CharacterDatabase.BeginTransaction();
+    MailDraft draft("Ragnarok Online", "Your bags were too full for this, so it was sent to you here.");
+    if (Item* mailItem = Item::CreateItem(itemTemplateID, amount, player))
+    {
+        mailItem->SaveToDB(mailTrans);
+        draft.AddItem(mailItem);
+    }
+    draft.SendMailTo(mailTrans, MailReceiver(player), MailSender(MAIL_NORMAL, 0, MAIL_STATIONERY_GM));
+    CharacterDatabase.CommitTransaction(mailTrans);
+}
+
+void ROWOWMod::GiveStartBags(Player* player)
+{
+    // RO has 100 inventory entries of up to 30,000, a new Warcraft character a 16 slot backpack, so a new identity is given a few general bags
+    // (Nathan 2026-11-02).  Each goes in an empty bag slot; once those are taken, into the bags, and with no room there, by mail
+    if (StartBagItemTemplateID == 0)
+        return;
+    for (uint32 bagIndex = 0; bagIndex < ROWOW_START_BAG_COUNT; bagIndex++)
+    {
+        uint16 equipDestination = 0;
+        if (player->CanEquipNewItem(NULL_SLOT, equipDestination, StartBagItemTemplateID, false) == EQUIP_ERR_OK)
+        {
+            if (Item* bag = player->EquipNewItem(equipDestination, StartBagItemTemplateID, true))
+            {
+                player->SendNewItem(bag, 1, true, false);
+                continue;
+            }
+        }
+        GiveStartItemOrMail(player, StartBagItemTemplateID, 1, nullptr);
+    }
+}
+
+void ROWOWMod::RestoreWoWShapeshift(Player* player, ROWOWIdentity& identity)
+{
+    // Leaving the form: the stance or form the character came in with, which the arrival took off with its buffs.  When that isn't known (it
+    // logged in in the form), a Warrior goes back to Battle Stance, and the others to none.  Cast as the passive auras are, at no cost
+    uint32 spellID = identity.WoWShapeshiftSpellID;
+    identity.WoWShapeshiftSpellID = 0;
+    if (spellID == 0 && player->getClass() == CLASS_WARRIOR)
+        spellID = ROWOW_SPELL_WARRIOR_BATTLE_STANCE;
+    if (spellID == 0 || player->IsAlive() == false || player->HasSpell(spellID) == false || player->GetShapeshiftForm() != FORM_NONE)
+        return;
+    player->CastSpell(player, spellID, true);
 }
 
 void ROWOWMod::RefreshROFormValues(Player* player, ROWOWIdentity& identity)

@@ -99,6 +99,11 @@ public:
         hasOffhandAttack = false;
         extraRange = ROWOW->GetAutoAttackExtraRange(player, victim);
 
+        // RO turns a character to what it attacks, so the swing is never refused for WoW's facing ("You are facing the wrong way!").  The
+        // client turns the character too (ro-facing); this covers a swing that comes before its turn does
+        if (victim != nullptr && player->HasInArc(2 * float(M_PI) / 3, victim) == false)
+            player->SetOrientation(player->GetAngle(victim));
+
         // clif_parse_ActionRequest: no attacking from a shop or a room (pc_cant_act)
         if (ROWOW->PCCanMoveAt(player) == false)
         {

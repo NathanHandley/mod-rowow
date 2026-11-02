@@ -225,6 +225,14 @@ struct ROWOWDataTable
 #define ROWOW_SPELL_ID_RO_START                     200000  // RO spells are 200000-248999
 #define ROWOW_SPELL_ID_RO_END                       248999
 #define ROWOW_SPELL_AUTO_ATTACK                     6603    // WoW's Attack, which the RO form keeps for auto attack
+#define ROWOW_SPELL_WARRIOR_BATTLE_STANCE           2457    // A Warrior's stance on leaving the form when the one it came in with isn't known
+
+// The converter's RO item templates (RO_SQL_ITEM_TEMPLATE_ENTRY_START..END): the RO items, the companion carriers and the start bag
+#define ROWOW_ITEM_TEMPLATE_ENTRY_START             200000
+#define ROWOW_ITEM_TEMPLATE_ENTRY_END               239999
+
+// The general bags a new identity is given (Nathan 2026-11-02): four of the converter's 24 slot bag, close to RO's 100 inventory entries
+#define ROWOW_START_BAG_COUNT                       4
 
 // The items the skills make or use by ID (rAthena's ITEMID_*)
 #define ROWOW_ITEMID_HOLY_WATER                     523
@@ -2006,6 +2014,7 @@ struct ROWOWIdentity : public DataMap::Base
     uint32 WoWPowers[MAX_POWERS] = { };
     uint8 WoWPowerType = 0;
     uint32 WoWAttackTimes[ROWOW_ATTACK_TYPE_COUNT] = { };
+    uint32 WoWShapeshiftSpellID = 0; // The stance or form the character came in with (the arrival takes it off), 0 for none or not known
     std::vector<uint32> HiddenSpellIDs; // The character's spells the client was told to forget for the form
     std::vector<uint32> SuspendedPassiveSpellIDs; // The passive auras of those, taken off for the form and cast again on leaving it
 };
@@ -2068,6 +2077,7 @@ public:
     int32 StartCellY = 0;
     std::vector<ROWOWStartItem> StartItems;
     uint32 StartZeny = 0;
+    uint32 StartBagItemTemplateID = 0; // The general bag a new identity is given ROWOW_START_BAG_COUNT of, 0 when the converter made none
     std::unordered_map<uint32, ROWOWItem> ItemsByItemTemplateID;
     ROWOWBattleConfig BattleConfig;
     std::unordered_set<uint32> NoPenaltyMapIDs; // RO maps with rAthena's nopenalty map flag (no exp lost on death)
@@ -2205,6 +2215,10 @@ public:
     void RefreshROFormValues(Player* player, ROWOWIdentity& identity); // The level, exp bar, status and maximums
     void RefreshROFormLook(Player* player); // The job's look
     void RemoveROFormAuras(Player* player); // The job's look, its head and headgear
+    void GiveStartBags(Player* player); // A new identity's general bags: in the empty bag slots, then the bags, then by mail
+    void GiveStartItemOrMail(Player* player, uint32 itemTemplateID, uint32 amount, Item** itemOut); // Into the bags, or by mail when there's no room
+    void RestoreWoWShapeshift(Player* player, ROWOWIdentity& identity); // Leaving the form: the stance or form the character came in with
+    bool IsInNpcClickRange(Player const* player, Creature const* creature) const; // npc_checknear: an RO NPC on an RO map answers from here
     bool IsSpellKeptInROForm(SpellInfo const* spellInfo) const;
     bool IsROCompanionPetSpell(SpellInfo const* spellInfo) const; // An RO companion pet's summon, which the form keeps
     bool IsROCompanionPetCarrier(ItemTemplate const* itemTemplate) const; // An item teaching an RO companion pet, which the form can use

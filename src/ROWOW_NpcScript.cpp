@@ -879,6 +879,18 @@ void ROWOWMod::UpdatePlayerNpcScripts(Player* player, uint32 diff)
         EndNpcRun(player);
 }
 
+bool ROWOWMod::IsInNpcClickRange(Player const* player, Creature const* creature) const
+{
+    // npc_checknear: on the same map and at most AREA_SIZE + 1 cells away on each axis, whatever the height between (RO's cells have none) and
+    // whatever stands in the way.  A class-less NPC is clicked from anywhere
+    if (player->GetMapId() != creature->GetMapId())
+        return false;
+    ROWOWNpc const* npc = GetCreatureNpc(creature);
+    if (npc != nullptr && npc->IsClassless() == true)
+        return true;
+    return DistanceBL(player, creature) <= BattleConfig.AreaSize + 1;
+}
+
 void ROWOWMod::CheckNpcTouchAreas(Player* player)
 {
     // unit_walktoxy_timer's npc_touchnext_areanpc and npc_touch_area_allnpc, when the player is on another cell (its map's thread).  Not
@@ -1568,7 +1580,18 @@ public:
 class ROWOW_NpcScriptPlayerScript : public PlayerScript
 {
 public:
-    ROWOW_NpcScriptPlayerScript() : PlayerScript("ROWOW_NpcScriptPlayerScript", { PLAYERHOOK_ON_UPDATE, PLAYERHOOK_ON_LOGIN, PLAYERHOOK_ON_LOGOUT }) {}
+    ROWOW_NpcScriptPlayerScript() : PlayerScript("ROWOW_NpcScriptPlayerScript", { PLAYERHOOK_ON_UPDATE, PLAYERHOOK_ON_LOGIN, PLAYERHOOK_ON_LOGOUT,
+        PLAYERHOOK_ON_CREATURE_INTERACTION_REACH }) {}
+
+    void OnPlayerCreatureInteractionReach(Player* player, Creature const* creature, bool& isInReach) override
+    {
+        // On an RO map an NPC answers its click, and every packet after it (the gossip's choices, a shop's list, purchases and sales), from
+        // RO's click range in cells, not WoW's yards with the height between (npc_checknear).  The RO NPC window's own steps are chat
+        // commands, which UpdatePlayerNpcScripts holds to the same range
+        if (ROWOW->IsEnabled == false || ROWOW->IsROMap(player->GetMapId()) == false)
+            return;
+        isInReach = ROWOW->IsInNpcClickRange(player, creature);
+    }
 
     void OnPlayerUpdate(Player* player, uint32 p_time) override
     {
