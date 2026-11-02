@@ -21,6 +21,7 @@
 #include "Chat.h"
 #include "GameTime.h"
 #include "Group.h"
+#include "GroupMgr.h"
 #include "Guild.h"
 #include "GuildMgr.h"
 #include "Log.h"
@@ -52,6 +53,13 @@ using namespace std;
 
 namespace
 {
+    // e_broadcast_flags: announce's target, and its NPC source
+    constexpr int64 ANNOUNCE_TARGET_MASK = 0x07;
+    constexpr int64 ANNOUNCE_TARGET_MAP = 1;
+    constexpr int64 ANNOUNCE_TARGET_AREA = 2;
+    constexpr int64 ANNOUNCE_TARGET_SELF = 3;
+    constexpr int64 ANNOUNCE_SOURCE_NPC = 0x08;
+
     std::string ToLower(std::string text)
     {
         for (char& curChar : text)
@@ -796,30 +804,57 @@ void ROWOWMod::RegisterNpcScriptCommands()
     });
 
     // Announcements go out from the world update (to players on any map)
-    auto queueAnnouncement = [this](uint32 mapID, std::string const& text)
+    auto queueAnnouncement = [this](uint32 mapID, std::string const& text, int32 cellX = -1, int32 cellY = -1)
     {
         ROWOWNpcAnnouncement announcement;
         announcement.MapID = mapID;
+        announcement.CellX = cellX;
+        announcement.CellY = cellY;
         announcement.Text = text;
         std::lock_guard<std::mutex> lock(NpcStateMutex);
         PendingNpcAnnouncements.push_back(announcement);
     };
     engine->RegisterCommand("announce", [this, queueAnnouncement](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
     {
-        // announce "<text>",<flag>{,...}: the flag's target bits (bc_all 0, bc_map 1, bc_area 2, bc_self 3); the color isn't kept
+        // announce "<text>",<flag>{,...}: a flag of bc_all alone (bc_blue and bc_woe are looks) is a broadcast.  Any other names a source, bc_npc the NPC
+        // and otherwise the attached player, and with no source nothing goes out: to everyone, its map (bc_map), around it (bc_area), or itself alone
+        // (bc_self, which an NPC doesn't hear).  The color isn't kept
         std::string text = GetTextArgument(arguments, 0);
-        int64 target = GetArgument(arguments, 1, 0) & 0x0F;
-        if (target == 3)
+        int64 flag = GetArgument(arguments, 1, 0);
+        int64 target = flag & ANNOUNCE_TARGET_MASK;
+        bool isNpcSource = (flag & ANNOUNCE_SOURCE_NPC) != 0;
+        if (target == 0 && isNpcSource == false)
         {
-            if (context.AttachedPlayer != nullptr)
-                ChatHandler(context.AttachedPlayer->GetSession()).SendSysMessage(text);
+            queueAnnouncement(0, text);
             return ROWOWScriptValue::FromNumber(0);
         }
-        uint32 mapID = 0;
-        if (target == 1 || target == 2)
-            mapID = context.AttachedPlayer != nullptr ? context.AttachedPlayer->GetMapId() : (context.Npc != nullptr ? context.Npc->MapID : 0);
-        if (target == 0 || mapID != 0)
-            queueAnnouncement(mapID, text);
+        Player* sourcePlayer = isNpcSource == false ? context.AttachedPlayer : nullptr;
+        ROWOWNpc const* sourceNpc = isNpcSource == true ? context.Npc : nullptr;
+        if (sourcePlayer == nullptr && sourceNpc == nullptr)
+            return ROWOWScriptValue::FromNumber(0);
+        uint32 mapID = sourceNpc != nullptr ? sourceNpc->MapID : sourcePlayer->GetMapId();
+        int32 x = sourceNpc != nullptr ? sourceNpc->X : 0;
+        int32 y = sourceNpc != nullptr ? sourceNpc->Y : 0;
+        if (sourcePlayer != nullptr)
+            GetUnitCell(sourcePlayer, x, y);
+        switch (target)
+        {
+            case ANNOUNCE_TARGET_MAP:
+                if (mapID != 0)
+                    queueAnnouncement(mapID, text);
+                break;
+            case ANNOUNCE_TARGET_AREA:
+                if (mapID != 0)
+                    queueAnnouncement(mapID, text, x, y);
+                break;
+            case ANNOUNCE_TARGET_SELF:
+                if (sourcePlayer != nullptr)
+                    ChatHandler(sourcePlayer->GetSession()).SendSysMessage(text);
+                break;
+            default:
+                queueAnnouncement(0, text);
+                break;
+        }
         return ROWOWScriptValue::FromNumber(0);
     });
     engine->RegisterCommand("mapannounce", [this, queueAnnouncement](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const& arguments)
@@ -1322,10 +1357,12 @@ void ROWOWMod::RegisterNpcScriptCommands()
     });
     engine->RegisterCommand("getpartymember", [](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
     {
-        // getpartymember <party id>{,<type>{,<array>}}: $@partymembercount, and $@partymembername$[] (0), $@partymembercid[] (1) or
-        // $@partymemberaid[] (2) of the attached player's group
-        Player* player = context.AttachedPlayer;
-        Group* group = player != nullptr ? player->GetGroup() : nullptr;
+        // getpartymember <party id>{,<type>{,<array>}}: $@partymembercount, and the array named, or else $@partymembername$[] (0), $@partymembercid[] (1)
+        // or $@partymemberaid[] (2), of that group: the attached player's, or another one's from the world update, as the group store is the world thread's
+        uint32 partyID = uint32(GetArgument(arguments, 0, 0));
+        Group* group = context.AttachedPlayer != nullptr ? context.AttachedPlayer->GetGroup() : nullptr;
+        if (group == nullptr || group->GetGUID().GetCounter() != partyID)
+            group = IsInNpcWorldUpdate == true ? sGroupMgr->GetGroupByGUID(partyID) : nullptr;
         int64 type = GetArgument(arguments, 1, 0);
         std::vector<ROWOWScriptValue> values;
         if (group != nullptr)
@@ -1343,13 +1380,18 @@ void ROWOWMod::RegisterNpcScriptCommands()
                 }
             }
         }
+        if (arguments.size() > 2 && arguments[2].IsReference == true)
+            for (size_t index = 0; index < values.size(); index++)
+                ROWOWSCRIPT->SetVariable(context, arguments[2].Text, uint32(arguments[2].Number + int64(index)), values[index]);
         std::string arrayName = type == 0 ? "$@partymembername$" : (type == 1 ? "$@partymembercid" : "$@partymemberaid");
         std::lock_guard<std::mutex> lock(ROWOWSCRIPT->VariableMutex);
         ROWOWSCRIPT->GlobalTempVariables.Set("$@partymembercount", 0, ROWOWScriptValue::FromNumber(int64(values.size())));
-        for (size_t index = 0; index < values.size(); index++)
-            ROWOWSCRIPT->GlobalTempVariables.Set(arrayName, uint32(index), values[index]);
-        return ROWOWScriptValue::FromNumber(0);
+        if (arguments.size() <= 2)
+            for (size_t index = 0; index < values.size(); index++)
+                ROWOWSCRIPT->GlobalTempVariables.Set(arrayName, uint32(index), values[index]);
+        return ROWOWScriptValue::FromNumber(int64(values.size()));
     });
+    engine->SetReferenceArguments("getpartymember", 4);
     engine->RegisterCommand("getguildname", [](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const& arguments)
     {
         // getguildname(<guild id>): "null" for none
@@ -2483,6 +2525,7 @@ void ROWOWMod::RegisterNpcScriptCommands()
         mapWarp.DestX = int32(GetArgument(arguments, 1, 0));
         mapWarp.DestY = int32(GetArgument(arguments, 2, 0));
         mapWarp.GroupGUID = group->GetGUID();
+        mapWarp.RequesterGUID = player->GetGUID();
         if (mapWarp.MapID != 0)
             queueMapWarp(mapWarp);
         return ROWOWScriptValue::FromNumber(0);

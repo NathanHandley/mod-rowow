@@ -98,6 +98,9 @@ bool ROWOWMod::VendingOpenVending(Player* player, std::string const& title, std:
     {
         if (item.CartSlot >= ROWOW_MAX_CART) // invalid position
             continue;
+        // One line per cart slot: rAthena finds a line by its cart index, so a slot never sells on two
+        if (std::any_of(vending.begin(), vending.end(), [&item](ROWOWVendingItem const& listed) { return listed.CartSlot == item.CartSlot; }) == true)
+            continue;
         ROWOWCartItem const& cartItem = identity->CartItems[item.CartSlot];
         auto roItemIter = ItemsByItemTemplateID.find(cartItem.ItemTemplateID);
         uint32 stateEnchantment = cartItem.Enchantments[PERM_ENCHANTMENT_SLOT];
@@ -126,6 +129,7 @@ bool ROWOWMod::VendingOpenVending(Player* player, std::string const& title, std:
         return false;
     }
     identity->IsVending = true;
+    identity->VendingID = ++VendingNextID; // vending_getuid: a shop reopened is another shop
     identity->VendingItems = vending;
     identity->VendingTitle = title.substr(0, 79); // MESSAGE_SIZE
     // A vendor sits by its shop (the client's vending state)
@@ -153,22 +157,22 @@ void ROWOWMod::VendingCloseVending(Player* player)
 
 void ROWOWMod::VendingVendingListReq(Player* player, Player* vendor)
 {
-    // vending_vendinglistreq: the shop's items for the buyer's shop window ("B\t<vendor>\t<title>", "S\t<index>:<template>:<amount>:<price>:
-    // <enchantment>:..|...", "E"), or an empty list when it's no shop
+    // vending_vendinglistreq: the shop's items for the buyer's shop window ("B<tab><vendor><tab><shop id><tab><title>", "S<tab><index>:<template>:<amount>:
+    // <price>:<enchantment>:..|...", "E"), or an empty list when it's no shop
     ROWOWIdentity* vendorIdentity = vendor != nullptr ? vendor->CustomData.Get<ROWOWIdentity>("ROWOWIdentity") : nullptr;
     if (vendorIdentity == nullptr || vendorIdentity->IsVending == false || vendor == player || vendor->GetMap() != player->GetMap())
     {
-        SendAddonMessage(player, fmt::format("ROWOWVENDLIST\tB\t{}\t", vendor != nullptr ? vendor->GetGUID().GetCounter() : 0));
+        SendAddonMessage(player, fmt::format("ROWOWVENDLIST\tB\t{}\t0\t", vendor != nullptr ? vendor->GetGUID().GetCounter() : 0));
         SendAddonMessage(player, "ROWOWVENDLIST\tE");
         return;
     }
     if (DistanceBL(player, vendor) > BattleConfig.AreaSize)
     {
-        SendAddonMessage(player, fmt::format("ROWOWVENDLIST\tB\t{}\t", vendor->GetGUID().GetCounter()));
+        SendAddonMessage(player, fmt::format("ROWOWVENDLIST\tB\t{}\t0\t", vendor->GetGUID().GetCounter()));
         SendAddonMessage(player, "ROWOWVENDLIST\tE");
         return;
     }
-    SendAddonMessage(player, fmt::format("ROWOWVENDLIST\tB\t{}\t{}", vendor->GetGUID().GetCounter(), vendorIdentity->VendingTitle));
+    SendAddonMessage(player, fmt::format("ROWOWVENDLIST\tB\t{}\t{}\t{}", vendor->GetGUID().GetCounter(), vendorIdentity->VendingID, vendorIdentity->VendingTitle));
     std::string chunk;
     for (size_t index = 0; index < vendorIdentity->VendingItems.size(); index++)
     {
@@ -189,18 +193,26 @@ void ROWOWMod::VendingVendingListReq(Player* player, Player* vendor)
     SendAddonMessage(player, "ROWOWVENDLIST\tE");
 }
 
-void ROWOWMod::VendingPurchaseReq(Player* player, Player* vendor, std::vector<std::pair<uint16, uint32>> const& purchases)
+void ROWOWMod::VendingPurchaseReq(Player* player, Player* vendor, uint32 vendingID, std::vector<std::pair<uint16, uint32>> const& purchases)
 {
-    // vending_purchasereq: the buyer pays (the vendor gets it less the tax), and each item goes from the vendor's cart into the buyer's bags
+    // vending_purchasereq: all of a purchase is checked first, each item goes from the vendor's cart into the buyer's bags, then the buyer pays (the
+    // vendor gets it less the tax)
     ROWOWIdentity* vendorIdentity = vendor != nullptr ? vendor->CustomData.Get<ROWOWIdentity>("ROWOWIdentity") : nullptr;
     if (vendorIdentity == nullptr || vendorIdentity->IsVending == false || vendor == player)
         return; // invalid shop
+    if (vendorIdentity->VendingID != vendingID) // shop has changed
+    {
+        ChatHandler(player->GetSession()).SendNotification("The store information was incorrect."); // clif_buyvending PURCHASEMC_STORE_INCORRECT
+        VendingVendingListReq(player, vendor);
+        return;
+    }
     if (vendor->GetMap() != player->GetMap() || DistanceBL(player, vendor) > BattleConfig.AreaSize)
         return; // shop too far away
     int32 count = int32(purchases.size());
     if (count < 1 || count > ROWOW_MAX_VENDING || count > int32(vendorIdentity->VendingItems.size()))
         return; // invalid amount of purchased items
     std::vector<ROWOWVendingItem> vending = vendorIdentity->VendingItems; // copy vending list
+    std::vector<ROWOWStoreItem> storeItems;
     double z = 0.; // zeny counter
     for (std::pair<uint16, uint32> const& purchase : purchases)
     {
@@ -228,22 +240,23 @@ void ROWOWMod::VendingPurchaseReq(Player* player, Player* vendor, std::vector<st
             return;
         }
         vendingItem.Amount -= amount;
-        if (CanStoreROItem(player, cartItem.ItemTemplateID, amount, cartItem.CreatorGUID) == false)
-        {
-            ChatHandler(player->GetSession()).SendNotification("Your bags are full."); // Buyer has no space in his inventory
-            return;
-        }
+        storeItems.push_back(ROWOWStoreItem{ cartItem.ItemTemplateID, amount, cartItem.CreatorGUID });
     }
-    player->ModifyMoney(-int32(z));
-    z = VendingCalcTax(z);
-    vendor->ModifyMoney(int32(std::min<double>(z, double(MAX_ZENY) - double(vendor->GetMoney()))));
+    if (CanStoreROItems(player, storeItems) == false)
+    {
+        ChatHandler(player->GetSession()).SendNotification("Your bags are full."); // Buyer has no space in his inventory
+        return;
+    }
 
+    z = 0.;
     for (std::pair<uint16, uint32> const& purchase : purchases)
     {
         uint32 amount = purchase.second;
         ROWOWVendingItem& vendingItem = vendorIdentity->VendingItems[purchase.first];
         ROWOWCartItem cartItem = vendorIdentity->CartItems[vendingItem.CartSlot];
-        StoreROItem(player, cartItem.ItemTemplateID, amount, &cartItem.Enchantments, cartItem.CreatorGUID);
+        if (StoreROItem(player, cartItem.ItemTemplateID, amount, &cartItem.Enchantments, cartItem.CreatorGUID) == nullptr)
+            continue; // Never, with the room checked: nothing moves or is paid for it
+        z += double(vendingItem.Value) * double(amount);
         vendingItem.Amount -= amount;
         double itemZeny = VendingCalcTax(double(vendingItem.Value) * double(amount));
         PCCartDelItem(vendor, *vendorIdentity, vendingItem.CartSlot, int32(amount));
@@ -252,6 +265,9 @@ void ROWOWMod::VendingPurchaseReq(Player* player, Player* vendor, std::vector<st
         ChatHandler(vendor->GetSession()).PSendSysMessage("{} bought {} x {} for {} zeny.", player->GetName(), itemTemplate != nullptr ? itemTemplate->Name1 : "an item",
             amount, int64(itemZeny));
     }
+    player->ModifyMoney(-int32(z));
+    z = VendingCalcTax(z);
+    vendor->ModifyMoney(int32(std::min<double>(z, double(MAX_ZENY) - double(vendor->GetMoney()))));
 
     // The sold-out items leave the shop
     vendorIdentity->VendingItems.erase(std::remove_if(vendorIdentity->VendingItems.begin(), vendorIdentity->VendingItems.end(),

@@ -20,6 +20,7 @@
 
 #include "Chat.h"
 #include "GameTime.h"
+#include "Group.h"
 #include "Item.h"
 #include "Log.h"
 #include "ObjectMgr.h"
@@ -236,7 +237,7 @@ void ROWOWMod::LoadItemScriptData()
         }
     }
 
-    // The map flags the item and skill rules read (monster_noteleport: Intimidate's warp), by any of the maps' RO names
+    // The map flags (monster_noteleport: Intimidate's warp), by any of the maps' RO names
     if (ROWOWDataTable const* mapFlagTable = GetDataTable(ROWOW_DATA_TABLE_MAP_FLAG))
     {
         int32 mapColumnIndex = mapFlagTable->GetColumnIndex("Map");
@@ -245,8 +246,6 @@ void ROWOWMod::LoadItemScriptData()
         for (size_t rowIndex = 0; rowIndex < mapFlagTable->Rows.size(); rowIndex++)
         {
             std::string const& flag = mapFlagTable->GetCell(rowIndex, flagColumnIndex);
-            if (flag != "noteleport" && flag != "noreturn" && flag != "nobranch" && flag != "monster_noteleport" && flag != "nomobloot" && flag != "nomvploot")
-                continue;
             uint32 mapID = GetMapIDByMapName(mapFlagTable->GetCell(rowIndex, mapColumnIndex));
             if (mapID == 0)
                 continue;
@@ -611,6 +610,11 @@ void ROWOWMod::LoadItemScriptData()
         switch (GetArgumentNumber(arguments, 0, 0))
         {
             case 0: return ROWOWScriptValue::FromNumber(int64(context.AttachedPlayer->GetGUID().GetCounter()));
+            case 1:
+            {
+                Group* group = context.AttachedPlayer->GetGroup();
+                return ROWOWScriptValue::FromNumber(group != nullptr ? int64(group->GetGUID().GetCounter()) : 0);
+            }
             case 2: return ROWOWScriptValue::FromNumber(int64(context.AttachedPlayer->GetGuildId()));
             case 3: return ROWOWScriptValue::FromNumber(int64(context.AttachedPlayer->GetSession()->GetAccountId()));
             default: return ROWOWScriptValue::FromNumber(0);
@@ -778,7 +782,7 @@ bool ROWOWMod::PCEquipItem(Player* player, Item* item, int32 reqPos)
     // pc_equipitem
     ROWOWIdentity* identity = GetIdentity(player);
     ROWOWItem const* roItem = GetROItem(item);
-    if (identity->IsInForm == false || roItem == nullptr)
+    if (identity->IsInForm == false || roItem == nullptr || PCCantAct(player) == true) // clif_parse_EquipItem's pc_cant_act2
         return false;
     int32 pos = PCEquipPoint(player, *identity, *roItem);
     uint8 result = PCIsEquip(player, *identity, item);
@@ -1106,6 +1110,28 @@ bool ROWOWMod::PCIsUseItem(Player* player, Item const* item, bool isReporting)
         return false;
     }
     return true;
+}
+
+bool ROWOWMod::ItemDBIsRestricted(Item const* item, bool ROWOWItem::* restriction) const
+{
+    // itemdb_isrestricted: the item's own Trade flag, or a card's in it.  (rAthena's GM override and TradePartner have nothing to act on: no row sets Override, and
+    // its default of 100 is past every group level, and no row sets TradePartner)
+    ROWOWItem const* roItem = GetROItem(item);
+    if (roItem == nullptr)
+        return false;
+    if (roItem->*restriction == true)
+        return true;
+    int32 starCrumbs = 0, forgeElement = 0;
+    if (roItem->Slots == 0 || GetItemForge(item, starCrumbs, forgeElement) == true) // itemdb_isspecial
+        return false;
+    for (uint8 slot = 0; slot < roItem->Slots; slot++)
+    {
+        auto cardTemplateIDIter = ItemTemplateIDsByItemID.find(GetItemCard(item, slot));
+        ROWOWItem const* card = cardTemplateIDIter != ItemTemplateIDsByItemID.end() ? GetROItemByItemTemplateID(cardTemplateIDIter->second) : nullptr;
+        if (card != nullptr && card->*restriction == true)
+            return true;
+    }
+    return false;
 }
 
 void ROWOWMod::WarpPlayerToCell(Player* player, std::string const& mapName, int32 x, int32 y)

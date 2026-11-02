@@ -124,7 +124,10 @@ public:
         uint16 skillLevel = 0;
         if (ROWOW->IsEnabled == false || caster == nullptr || spell->getState() != SPELL_STATE_PREPARING || ROWOW->GetSkillOfSpell(spell->GetSpellInfo()->Id, skillID, skillLevel) == false)
             return;
-        ROWOW->UnitSkillCastCancel(caster, 0);
+        // A new cast replacing this one has already set the unit's skill: only the cast that's going ends here
+        ROWOWSkillUnitData const* ud = caster->CustomData.Get<ROWOWSkillUnitData>("ROWOWSkillUnitData");
+        if (ud != nullptr && ud->SkillID == skillID)
+            ROWOW->UnitSkillCastReset(caster);
     }
 };
 

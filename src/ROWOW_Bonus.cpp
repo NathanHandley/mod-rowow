@@ -1316,10 +1316,10 @@ void ROWOWMod::SetItemCard(Player* player, Item* item, uint8 slot, uint32 cardIt
 
 bool ROWOWMod::PCInsertCard(Player* player, Item* card, Item* equipment)
 {
-    // pc_insert_card
+    // pc_insert_card, not in a trade (clif_parse_InsertCard)
     ROWOWItem const* roEquipment = GetROItem(equipment);
     ROWOWItem const* roCard = GetROItem(card);
-    if (roEquipment == nullptr || roCard == nullptr)
+    if (roEquipment == nullptr || roCard == nullptr || PCCantAct(player) == true)
         return false;
     if (roEquipment->Type != ROWOW_ITEM_TYPE_WEAPON && roEquipment->Type != ROWOW_ITEM_TYPE_ARMOR)
         return false; // only weapons and armor are allowed

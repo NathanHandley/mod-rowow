@@ -667,8 +667,15 @@ void ROWOWMod::UpdateFollowers(Player* sd, uint32 diff)
 {
     ROWOWIdentity* identity = GetIdentity(sd);
     uint64 tick = GetTick();
-    auto update = [this, sd, tick](ROWOWFollower& fd, bool isOut)
+    auto update = [this, sd, tick, identity](ROWOWFollower& fd, bool isOut)
     {
+        // This holds the follower: a delete from anything it calls waits until it's let go (below)
+        struct FollowerHold
+        {
+            ROWOWIdentity* Identity;
+            explicit FollowerHold(ROWOWIdentity* identity) : Identity(identity) { Identity->IsFollowerHeld = true; }
+            ~FollowerHold() { Identity->IsFollowerHeld = false; }
+        } followerHold(identity);
         Creature* md = GetFollowerCreature(sd, fd);
         if (md == nullptr)
         {
@@ -710,12 +717,30 @@ void ROWOWMod::UpdateFollowers(Player* sd, uint32 diff)
         // The hunger may have cost it its life
         if (identity->Homunculus != nullptr)
             update(*identity->Homunculus, HomIsActive(identity->Homunculus.get()));
+        FollowerDeletePending(sd, *identity);
     }
     if (ROWOWMercData* md = identity->Mercenary.get())
     {
         MercenaryUpdate(sd, *md, diff);
         if (identity->Mercenary != nullptr)
             update(*identity->Mercenary, true);
+        FollowerDeletePending(sd, *identity);
+    }
+}
+
+void ROWOWMod::FollowerDeletePending(Player* sd, ROWOWIdentity& identity)
+{
+    // The deletes that came while UpdateFollowers held a follower
+    if (identity.IsHomunculusDeletePending == true)
+    {
+        identity.IsHomunculusDeletePending = false;
+        HomDelete(sd);
+    }
+    if (identity.MercenaryDeleteReply >= 0)
+    {
+        int32 reply = identity.MercenaryDeleteReply;
+        identity.MercenaryDeleteReply = -1;
+        MercenaryDelete(sd, reply);
     }
 }
 
@@ -1118,7 +1143,7 @@ void ROWOWMod::FollowerNaturalHeal(Player* /*sd*/, ROWOWFollower& fd, Creature* 
 
 bool ROWOWMod::FollowerSkillIsNotOk(Player* sd, ROWOWFollower& fd, uint16 skillID)
 {
-    // skill_isNotOk_hom and skill_isNotOk_mercenary: its own block, and a homunculus's intimacy rules.  (Then the map's rules of skill_isNotOk, as its master's)
+    // skill_isNotOk_hom and skill_isNotOk_mercenary: its own block, a homunculus's intimacy rules, and the map's rules of skill_isNotOk, as its master's
     uint64 tick = GetTick();
     auto blockIter = fd.SkillBlocks.find(skillID);
     if (blockIter != fd.SkillBlocks.end() && blockIter->second > tick)
@@ -1126,6 +1151,8 @@ bool ROWOWMod::FollowerSkillIsNotOk(Player* sd, ROWOWFollower& fd, uint16 skillI
         ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_SKILLINTERVAL);
         return true;
     }
+    if (SkillIsNotOk(sd, skillID) == true)
+        return true;
     if (fd.FollowerType != ROWOW_BL_HOM)
         return false;
     ROWOWHomunData const& hd = static_cast<ROWOWHomunData const&>(fd);
@@ -1288,7 +1315,12 @@ bool ROWOWMod::FollowerSkillCheckCondition(Unit* bl, uint16 skillID, uint16 skil
     if ((type & 1) == 0)
         return true;
 
-    // Check item existences, then consume them
+    // Check item existences, then consume them, not out of a trade
+    if (skill->RequiredItems.empty() == false && PCCantAct(sd) == true)
+    {
+        ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_LEVEL);
+        return false;
+    }
     std::vector<std::pair<Item*, uint32>> items;
     for (ROWOWSkillItemRequirement const& requirement : skill->RequiredItems)
     {

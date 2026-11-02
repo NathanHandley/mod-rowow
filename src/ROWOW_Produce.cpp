@@ -715,7 +715,7 @@ void ROWOWMod::ClifParseProduceMix(Player* player, uint32 nameID, uint32 slot1, 
     ROWOWIdentity* identity = GetIdentity(player);
     if (identity->MenuSkillID != MenuSkillItemProduce && identity->MenuSkillID != ROWOW_SKILL_AM_PHARMACY)
         return;
-    if (nameID != 0)
+    if (nameID != 0 && PCCantAct(player) == false) // Make it fail to avoid shop exploits where you sell something different than you see.
     {
         int32 produceIndex = SkillCanProduceMix(player, nameID, identity->MenuSkillValue, 1);
         if (produceIndex != 0)
@@ -766,6 +766,11 @@ void ROWOWMod::SkillRepairWeapon(Player* sd, ObjectGuid::LowType itemGUID)
     identity->MenuSkillID = 0; // clif_menuskill_clear
     identity->MenuSkillTargetGUID.Clear();
     identity->MenuSkillValue2 = 0;
+    if (PCCantAct(sd) == true) // Make it fail to avoid shop exploits where you sell something different than you see.
+    {
+        ClifSkillFail(sd, ROWOW_SKILL_BS_REPAIRWEAPON, ROWOW_USESKILL_FAIL_LEVEL);
+        return;
+    }
     Player* targetSD = ObjectAccessor::GetPlayer(*sd, targetGUID);
     if (targetSD == nullptr || itemGUID == 0) // Failed.... / No item selected ('Cancel' clicked)
         return;
@@ -843,6 +848,11 @@ void ROWOWMod::SkillWeaponRefine(Player* sd, ObjectGuid::LowType itemGUID)
     int32 skillLevel = identity->MenuSkillValue;
     identity->MenuSkillID = 0; // clif_menuskill_clear
     identity->MenuSkillValue = 0;
+    if (PCCantAct(sd) == true) // Make it fail to avoid shop exploits where you sell something different than you see.
+    {
+        ClifSkillFail(sd, ROWOW_SKILL_WS_WEAPONREFINE, ROWOW_USESKILL_FAIL_LEVEL);
+        return;
+    }
     Item* item = itemGUID != 0 ? sd->GetItemByGuid(ObjectGuid::Create<HighGuid::Item>(itemGUID)) : nullptr;
     ROWOWItem const* ditem = GetROItem(item);
     if (ditem == nullptr || ditem->IsWeapon == false)

@@ -565,10 +565,13 @@ struct ROWOWItem
     int32 WeaponLevel = 0;
     int32 Weight = 0; // In tenths
     int32 Buy = 0; // The NPC shops' price (zeny)
-    bool IsNoTrade = false; // item_db's Trade restrictions the cart, the shops and the storage read (itemdb_cantrade, itemdb_cancartstore, itemdb_canstore)
+    bool IsNoTrade = false; // item_db's Trade restrictions read (itemdb_cantrade, itemdb_cansell, itemdb_cancartstore, itemdb_canstore, itemdb_canguildstore, itemdb_canmail)
     bool IsBuyingStore = false; // flag.buyingstore: a buying store may ask for it
+    bool IsNoSell = false;
     bool IsNoCart = false;
     bool IsNoStorage = false;
+    bool IsNoGuildStorage = false;
+    bool IsNoMail = false;
     std::vector<std::string> HatEffectNames; // The hat effects (HAT_EF_*, in upper case) it shows while worn (only the post-renewal looks have them)
 };
 
@@ -1424,6 +1427,14 @@ struct ROWOWVendingItem
     uint32 Value = 0; // Zeny each
 };
 
+// An item that's to go into a player's bags (CanStoreROItems): what, how many, and its maker, 0 for none
+struct ROWOWStoreItem
+{
+    uint32 ItemTemplateID = 0;
+    uint32 Amount = 0;
+    ObjectGuid::LowType CreatorGUID = 0;
+};
+
 // e_addskill_type, skill's flag
 #define ROWOW_ADDSKILL_PERMANENT                    0
 #define ROWOW_ADDSKILL_TEMP                         1
@@ -1906,6 +1917,7 @@ struct ROWOWIdentity : public DataMap::Base
     bool IsVending = false; // state.vending: its shop is open
     std::unique_ptr<ROWOWBuyingStore> BuyingStore; // state.buyingstore: its buying store is open
     uint8 BuyingStoreSlots = 0; // buyingstore.slots: the setup window is open, for that many items
+    uint32 VendingID = 0; // vender_id: a shop's own, which a purchase names
     std::string VendingTitle; // message
     std::vector<ROWOWVendingItem> VendingItems; // vending (vend_num items)
     uint8 VendSkillLevel = 0; // vend_skill_lv
@@ -1928,7 +1940,10 @@ struct ROWOWIdentity : public DataMap::Base
     uint8 SuperNoviceCallFlag = 0; // state.snovice_call_flag: how far a Super Novice is in the Guardian Angel prayer (its lines said)
     uint16 SpiritSkillID = 0; // The spirit linking it (its SC_SPIRIT's val2), which pc_calc_skilltree reads for the spirit skills
     bool IsSuperNoviceDeadFlag = false; // state.snovice_dead_flag: its angel saved it from death, until its next base level
-    bool IsSellingToShop = false; // A sell packet is being handled: its money gets Overcharge
+    bool IsNoSaveLoginPending = false; // Logged in on a nosave map: the save point is next (CheckNoSaveArrival)
+    bool IsFollowerHeld = false; // UpdateFollowers holds a follower: a delete waits for it (FollowerDeletePending)
+    bool IsHomunculusDeletePending = false; // HomDelete, waiting
+    int32 MercenaryDeleteReply = -1; // MercenaryDelete's reply, waiting, -1 for none
     uint32 Option = 0; // status.option: the options kept with the identity (a Knight's or Crusader's Peco, ROWOW_OPTION_RIDING), saved with it
     std::unique_ptr<ROWOWPetData> Pet; // pd and status.pet_id: the pet that's out (mod_rowow_pet, with IsIncubate 0), null for none
     std::unique_ptr<ROWOWHomunData> Homunculus; // hd and status.hom_id: the character's homunculus (mod_rowow_homunculus), whether or not it's out, null for none
@@ -2044,7 +2059,12 @@ public:
     std::unordered_map<std::string, uint32> ItemIDsByAegisName; // Every converted RO item, by its lowercase AegisName
     std::unordered_map<std::string, ROWOWItemGroup> ItemGroupsByName; // By the uppercase group name (IG_ without the prefix)
     std::mutex ItemGroupSharedPoolMutex; // The shared pools' given counts are shared by every map thread
-    std::unordered_map<std::string, std::unordered_set<uint32>> MapIDsByMapFlag; // The RO maps with each map flag the item rules read
+    std::unordered_map<std::string, std::unordered_set<uint32>> MapIDsByMapFlag; // The RO maps with each map flag
+    bool HasMapFlag(uint32 mapID, std::string const& mapFlag) const // map_getmapflag
+    {
+        auto mapIDsIter = MapIDsByMapFlag.find(mapFlag);
+        return mapIDsIter != MapIDsByMapFlag.end() && mapIDsIter->second.find(mapID) != mapIDsIter->second.end();
+    }
     std::unordered_map<uint32, uint32> CardItemIDsByEnchantmentID;
     std::vector<ROWOWItemCombo> ItemCombos;
     std::unordered_map<uint32, std::vector<size_t>> ItemComboIndexesByItemID;
@@ -2146,10 +2166,12 @@ public:
     // The middle of an RO cell of an RO map, on the ground.  False when the map has no cell grid or no ground there
     bool GetCellPosition(uint32 mapID, int32 cellX, int32 cellY, ROWOWPosition& positionOut) const;
     void CheckArrivalFloor(Player* player); // After an arrival on an RO map: down on the floor if it's in the air above it
+    void CheckNoSaveArrival(Player* player); // After a login on a nosave map: to the save point
 
     // The player's identity, loaded on first use (a row of defaults until the identity exists)
     ROWOWIdentity* GetIdentity(Player* player);
-    void SaveIdentity(Player* player, CharacterDatabaseTransaction trans);
+    void SaveIdentity(Player* player, CharacterDatabaseTransaction trans, bool isInventorySaved);
+    void DeleteIdentityRows(ObjectGuid::LowType guid, CharacterDatabaseTransaction trans);
 
     // Turning into the form and back, on arriving in and leaving the RO world (and at login).  These change the character's values,
     // spells and action bars, which works before the character is added to the map, so the client is first sent the character already
@@ -2177,6 +2199,7 @@ public:
     uint32 StatusCalcMaxSPPC(ROWOWIdentity const& identity, ROWOWStatus const& status, ROWOWStatusChange const* sc) const; // status_calc_maxsp_pc
     void StatusCalcRegen(Unit const* unit, ROWOWStatus& status) const; // status_calc_regen, for a player (its regen skills when the unit is given)
     ROWOWItem const* GetROItem(Item const* item) const;
+    bool ItemDBIsRestricted(Item const* item, bool ROWOWItem::* restriction) const; // itemdb_isrestricted: the item's Trade flag, or an inserted card's
     ROWOWItem const* GetROItemByItemTemplateID(uint32 itemTemplateID) const;
 
     // Status points (pc.cpp): what raising a stat costs, the most it can go to, and raising it
@@ -2403,6 +2426,7 @@ public:
     void LoadIdentityFollowers(Player* player, ROWOWIdentity& identity);
     void SaveIdentityFollowers(Player* player, ROWOWIdentity& identity, CharacterDatabaseTransaction trans);
     void UpdateFollowers(Player* sd, uint32 diff); // Its AI, regen, hunger and contract, from its master's update
+    void FollowerDeletePending(Player* sd, ROWOWIdentity& identity);
     void FollowerArrive(Player* sd); // Its master arrived on a map
     void FollowerLeaveMap(Player* sd, bool isChangeMap); // unit_remove_map: its master leaves the map or the game
     void FollowerMasterWarp(Player* sd, float x, float y, float z, float orientation); // pc_setpos on the same map
@@ -2505,6 +2529,8 @@ public:
     SpellCastResult SkillCastEndCheck(Unit* src, Unit* target, WorldLocation const* dest, uint16 skillID, uint16 skillLevel);
     void SkillCastEnd(Unit* src, Unit* target, WorldLocation const* dest, uint16 skillID, uint16 skillLevel);
     void UnitSkillCastCancel(Unit* bl, int32 type); // unit_skillcastcancel
+    void UnitSkillCastReset(Unit* bl); // Its end: a cast stopped, the unit may act
+    bool SkillIsNotOk(Player* sd, uint16 skillID); // skill_isNotOk: the map's rules
     void UpdateSkillCastMove(Player* player); // A walk during a cast stops it, but with Free Cast (unit_walktoxy's check), from the player's update
     void SendSkillDelayToClient(Unit* unit, uint16 skillID) const; // The after-cast delay and the skill's cooldown, on the action bars
 
@@ -2577,6 +2603,7 @@ public:
     void BuyingStoreOpen(Player* player, Player* buyer); // buyingstore_open
     void BuyingStoreTrade(Player* player, Player* buyer, uint32 buyerID, std::vector<std::pair<uint32, uint32>> const& sales); // buyingstore_trade (item template, amount)
     uint32 BuyingStoreNextID = 0; // buyingstore_nextid.  Chat commands only (the world update)
+    uint32 VendingNextID = 0; // vending_nextid.  Chat commands only
     // Fame (ROWOW_Fame.cpp).  FameLists under FameMutex
     int32 GetFameType(uint16 jobID) const; // A job's ranking (class_ & MAPID_SECONDMASK), -1 for none
     void LoadFameLists(ObjectGuid::LowType skippedGUID = 0); // chrif_buildfamelist
@@ -2589,7 +2616,7 @@ public:
     std::array<std::vector<ROWOWFameEntry>, ROWOW_FAME_COUNT> FameLists;
     mutable std::mutex FameMutex;
     void VendingVendingListReq(Player* player, Player* vendor); // vending_vendinglistreq (ROWOWVENDLIST)
-    void VendingPurchaseReq(Player* player, Player* vendor, std::vector<std::pair<uint16, uint32>> const& purchases); // vending_purchasereq (index, amount)
+    void VendingPurchaseReq(Player* player, Player* vendor, uint32 vendingID, std::vector<std::pair<uint16, uint32>> const& purchases); // vending_purchasereq (index, amount)
 
     // Warp Portal memo points and the warp point menu (ROWOW_Warp.cpp): pc_memo, clif_skill_warppoint (ROWOWWARP) and skill_castend_map
     bool PCMemo(Player* player, int32 pos); // pc_memo
@@ -2815,6 +2842,7 @@ public:
     bool PCAddItem(Player* player, uint32 itemTemplateID, uint32 amount, bool isIdentified, Item** itemOut = nullptr); // pc_additem: all of it into the bags, or false
     bool PCCantAct(Player* sd) const; // pc_cant_act
     bool CanStoreROItem(Player* player, uint32 itemTemplateID, uint32 amount, ObjectGuid::LowType creatorGUID) const; // pc_checkadditem, its maker's stacks apart
+    bool CanStoreROItems(Player* player, std::vector<ROWOWStoreItem> const& items) const; // ... over a whole purchase, pc_inventoryblank's count
     Item* StoreROItem(Player* player, uint32 itemTemplateID, uint32 amount, std::array<uint32, ROWOW_ITEM_ENCHANTMENT_SLOT_COUNT> const* enchantments,
         ObjectGuid::LowType creatorGUID); // pc_additem of an item with its enchantments and maker
     bool PCTakeItem(Player* sd, ObjectGuid const& guid, bool isGreed); // pc_takeitem

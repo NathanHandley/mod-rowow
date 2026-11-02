@@ -50,13 +50,13 @@ void ROWOWMod::StorageStorageOpen(Player* player)
 InventoryResult ROWOWMod::StorageCanAddItem(Player* player, Item const* item, uint8 world)
 {
     // The Ragnarok tab takes what storage_additem does: an RO item (a companion pet's carrier isn't one) that RO's storage takes (itemdb_canstore).
-    // On every tab, worn equipment stays out: it sits in the bags with its place in the identity, in the form or not, until it's taken off
+    // A Kafra reaches the Character and Account tabs too, so itemdb_canstore holds on them, and on every tab worn equipment stays out: it sits in the
+    // bags with its place in the identity, in the form or not, until it's taken off
     if (IsROItemTemplate(item->GetEntry()) == false)
         return world == WORLD_BANK_RAGNAROK ? EQUIP_ERR_WORLD_BANK_ITEM_NOT_ALLOWED : EQUIP_ERR_OK;
     if (GetIdentityEquipPosition(*GetIdentity(player), item->GetGUID().GetCounter()) != 0)
         return EQUIP_ERR_WORLD_BANK_ITEM_WORN;
-    ROWOWItem const* roItem = GetROItem(item);
-    if (world == WORLD_BANK_RAGNAROK && (roItem == nullptr || roItem->IsNoStorage == true))
+    if (GetROItem(item) == nullptr || ItemDBIsRestricted(item, &ROWOWItem::IsNoStorage) == true)
         return EQUIP_ERR_ACCOUNT_BANK_ITEM_NOT_ALLOWED;
     return EQUIP_ERR_OK;
 }
@@ -79,12 +79,15 @@ int32 ROWOWMod::StorageGuildStorageOpen(Player* player)
 
 void ROWOWMod::StorageClose(Player* player)
 {
-    // storage_storageclose and storage_guild_storageclose: leaving the map ends both (pc_setpos closes them in rAthena).  The client's guild
-    // bank window may stay up, but the guild bank no longer takes the player as its banker.  (The bank does until another banker is used, as
-    // with AzerothCore's bank command)
+    // storage_storageclose and storage_guild_storageclose: leaving the map ends both (pc_setpos closes them in rAthena).  The client's windows
+    // may stay up, but neither bank takes the player as its banker any more.  A banker of AzerothCore's bank command is left alone: only a
+    // Kafra's ends here
     if (player == nullptr || player->GetSession() == nullptr)
         return;
-    GetIdentity(player)->StorageFlag = 0;
+    ROWOWIdentity* identity = GetIdentity(player);
+    if (identity->StorageFlag != 0)
+        player->GetSession()->ClearPlayerBanker();
+    identity->StorageFlag = 0;
     player->GetSession()->SendShowGuildBank(ObjectGuid::Empty);
     std::lock_guard<std::mutex> lock(NpcStateMutex);
     PendingGuildStorageOpens.erase(player->GetGUID());
@@ -129,7 +132,7 @@ public:
 class ROWOW_StoragePlayerScript : public PlayerScript
 {
 public:
-    ROWOW_StoragePlayerScript() : PlayerScript("ROWOW_StoragePlayerScript", { PLAYERHOOK_ON_MAP_CHANGED, PLAYERHOOK_CAN_BANK_ITEM }) {}
+    ROWOW_StoragePlayerScript() : PlayerScript("ROWOW_StoragePlayerScript", { PLAYERHOOK_ON_MAP_CHANGED, PLAYERHOOK_CAN_BANK_ITEM, PLAYERHOOK_CAN_GUILD_BANK_ITEM }) {}
 
     void OnPlayerMapChanged(Player* player) override
     {
@@ -147,6 +150,20 @@ public:
         InventoryResult storageResult = ROWOW->StorageCanAddItem(player, item, world);
         if (world == WORLD_BANK_RAGNAROK || storageResult != EQUIP_ERR_OK)
             result = storageResult;
+    }
+
+    void OnPlayerCanGuildBankItem(Player* player, Item const* item, InventoryResult& result) override
+    {
+        // storage_guild_additem's itemdb_canguildstore, and worn equipment stays out.  The world thread: the guild bank's packets
+        if (ROWOW->IsEnabled == false || ROWOW->IsROItemTemplate(item->GetEntry()) == false)
+            return;
+        if (ROWOW->GetIdentityEquipPosition(*ROWOW->GetIdentity(player), item->GetGUID().GetCounter()) != 0)
+            result = EQUIP_ERR_WORLD_BANK_ITEM_WORN;
+        else if (ROWOW->ItemDBIsRestricted(item, &ROWOWItem::IsNoGuildStorage) == true)
+        {
+            ChatHandler(player->GetSession()).SendSysMessage("This item cannot be stored in the guild's storage."); // msg_txt 264
+            result = EQUIP_ERR_ITEMS_CANT_BE_SWAPPED;
+        }
     }
 };
 

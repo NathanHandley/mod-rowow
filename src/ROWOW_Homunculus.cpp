@@ -290,6 +290,11 @@ void ROWOWMod::HomDeadOwn(Player* sd, ROWOWHomunData& hd)
 
 void ROWOWMod::HomDelete(Player* sd)
 {
+    if (GetIdentity(sd)->IsFollowerHeld == true)
+    {
+        GetIdentity(sd)->IsHomunculusDeletePending = true; // Its update's end (FollowerDeletePending)
+        return;
+    }
     // hom_delete and unit_free: it's gone for good, its row with it, and the next Call Homunculus makes a new one
     ROWOWIdentity* identity = GetIdentity(sd);
     if (identity->Homunculus == nullptr)
@@ -535,8 +540,9 @@ void ROWOWMod::HomHungry(Player* sd, ROWOWHomunData& hd, uint32 diff)
 
 bool ROWOWMod::HomFood(Player* sd, ROWOWHomunData& hd)
 {
-    // hom_food: its food from the bags, what it does to its intimacy going by its hunger.  False when it fed.  (rAthena's return reads the other way)
-    if (hd.Vaporize != ROWOW_HOM_ST_ACTIVE)
+    // hom_food: its food from the bags, not out of a trade, what it does to its intimacy going by its hunger.  False when it fed.  (rAthena's return reads
+    // the other way)
+    if (hd.Vaporize != ROWOW_HOM_ST_ACTIVE || PCCantAct(sd) == true)
         return true;
     Item* food = PCSearchInventory(sd, hd.DB->FoodID);
     if (food == nullptr)

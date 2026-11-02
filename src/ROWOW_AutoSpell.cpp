@@ -43,9 +43,11 @@ namespace
             (matched & (ROWOW_BF_SKILL | ROWOW_BF_NORMAL)) != 0;
     }
 
-    // skill_isNotOk, the part an autospell meets: the skill's cooldown
+    // skill_isNotOk, the part an autospell meets: the map's rules and the skill's cooldown
     bool IsSkillNotOk(Unit* unit, uint16 skillID)
     {
+        if (Player* sd = unit->ToPlayer(); sd != nullptr && ROWOW->SkillIsNotOk(sd, skillID) == true)
+            return true;
         ROWOWSkillUnitData const* ud = ROWOW->GetSkillUnitData(unit);
         auto cooldownIter = ud->CooldownEndTimesBySkillID.find(skillID);
         return cooldownIter != ud->CooldownEndTimesBySkillID.end() && cooldownIter->second > ROWOWMod::GetTick();

@@ -410,32 +410,28 @@ uint32 ROWOWMod::GetMapIDByMapName(std::string const& mapName) const
 
 bool ROWOWMod::GetCellPosition(uint32 mapID, int32 cellX, int32 cellY, ROWOWPosition& positionOut) const
 {
+    // The ground height from the server's own cells, the GAT's: this can run on any map's thread for any map, so it touches no Map.  The arrival puts the
+    // player down on the floor if it's left in the air (CheckArrivalFloor)
     ROWOWMapGrid const* mapGrid = GetMapGrid(mapID);
-    if (mapGrid == nullptr)
-        return false;
-
-    // The ground height (the map may not be the player's).  An RO map's ground is its models: their highest floor, which is where the client
-    // lands on the cell from above.  The terrain under them isn't the ground (the converted terrain is up to 70 yards above an indoor map's
-    // floor, and falling from it kills), so it's only the answer when the models' collision isn't loaded (a map no one is on): then
-    // the arrival puts the player down on the floor (CheckArrivalFloor)
-    Map* map = sMapMgr->CreateBaseMap(mapID);
-    if (map == nullptr)
-        return false;
-    float x = mapGrid->GetCellCenterWorldX(cellY);
-    float y = mapGrid->GetCellCenterWorldY(cellX);
-    float z = map->GetMapCollisionData().GetStaticTree().getHeight(x, y, MAX_HEIGHT, MAX_FALL_DISTANCE);
-    if (z <= INVALID_HEIGHT)
-        z = map->GetHeight(x, y, MAX_HEIGHT);
-    z = std::max(z, map->GetWaterLevel(x, y));
-    if (z <= INVALID_HEIGHT)
+    if (mapGrid == nullptr || mapGrid->IsCellOnMap(cellX, cellY) == false)
         return false;
     positionOut.IsSet = true;
     positionOut.MapID = mapID;
-    positionOut.X = x;
-    positionOut.Y = y;
-    positionOut.Z = z + 0.5f; // A little above, so arriving there never starts under the ground
+    positionOut.X = mapGrid->GetCellCenterWorldX(cellY);
+    positionOut.Y = mapGrid->GetCellCenterWorldY(cellX);
+    positionOut.Z = mapGrid->GetCellGroundZ(cellX, cellY) + 0.5f; // A little above, so arriving there never starts under the ground
     positionOut.O = 0;
     return true;
+}
+
+void ROWOWMod::CheckNoSaveArrival(Player* player)
+{
+    // pc_makesavestatus: a nosave map keeps no last position, so a login there comes back at the save point.  In the player's update, once it's on the map
+    ROWOWIdentity* identity = GetIdentity(player);
+    if (identity->IsNoSaveLoginPending == false || player->IsBeingTeleported() == true || player->IsInWorld() == false)
+        return;
+    identity->IsNoSaveLoginPending = false;
+    TeleportToSavePoint(player);
 }
 
 void ROWOWMod::CheckArrivalFloor(Player* player)
@@ -470,7 +466,11 @@ ROWOWIdentity* ROWOWMod::GetIdentity(Player* player)
         "`hp`, `sp`, `zeny`, `save_map`, `save_x`, `save_y`, `save_z`, `save_o`, `last_map`, `last_x`, `last_y`, `last_z`, `last_o`, `return_map`, `return_x`, `return_y`, "
         "`return_z`, `return_o`, `hair_style`, `hair_color`, `in_form`, `option`, `fame` FROM `mod_rowow_identity` WHERE `guid` = {}", guid);
     if (!result)
+    {
+        // A new identity shares its account's variables: a # variable set before its first save must not rewrite them from an empty set
+        LoadIdentityScriptVariables(player, *identity);
         return identity;
+    }
     Field* fields = result->Fetch();
     identity->Exists = true;
     identity->JobID = fields[0].Get<uint16>();
@@ -545,7 +545,24 @@ ROWOWIdentity* ROWOWMod::GetIdentity(Player* player)
     return identity;
 }
 
-void ROWOWMod::SaveIdentity(Player* player, CharacterDatabaseTransaction trans)
+void ROWOWMod::DeleteIdentityRows(ObjectGuid::LowType guid, CharacterDatabaseTransaction trans)
+{
+    // What makes the identity, in tables of the character (its pet's row is the egg's: see OnPlayerDeleteFromDB)
+    trans->Append("DELETE FROM `mod_rowow_identity` WHERE `guid` = {}", guid);
+    trans->Append("DELETE FROM `mod_rowow_identity_action` WHERE `guid` = {}", guid);
+    trans->Append("DELETE FROM `mod_rowow_identity_equipment` WHERE `guid` = {}", guid);
+    trans->Append("DELETE FROM `mod_rowow_identity_skill` WHERE `guid` = {}", guid);
+    trans->Append("DELETE FROM `mod_rowow_identity_variable` WHERE `guid` = {}", guid);
+    trans->Append("DELETE FROM `mod_rowow_identity_status` WHERE `guid` = {}", guid);
+    trans->Append("DELETE FROM `mod_rowow_identity_cart` WHERE `guid` = {}", guid);
+    trans->Append("DELETE FROM `mod_rowow_identity_memo` WHERE `guid` = {}", guid);
+    trans->Append("DELETE FROM `mod_rowow_identity_quest` WHERE `guid` = {}", guid);
+    trans->Append("DELETE FROM `mod_rowow_homunculus` WHERE `CharacterGUID` = {}", guid);
+    trans->Append("DELETE FROM `mod_rowow_mercenary` WHERE `CharacterGUID` = {}", guid);
+    trans->Append("DELETE FROM `mod_rowow_mercenary_owner` WHERE `CharacterGUID` = {}", guid);
+}
+
+void ROWOWMod::SaveIdentity(Player* player, CharacterDatabaseTransaction trans, bool isInventorySaved)
 {
     ROWOWIdentity* identity = player->CustomData.Get<ROWOWIdentity>("ROWOWIdentity");
     if (identity == nullptr || identity->Exists == false)
@@ -600,7 +617,8 @@ void ROWOWMod::SaveIdentity(Player* player, CharacterDatabaseTransaction trans)
     }
     SaveIdentityScriptVariables(player, *identity, trans);
     SaveIdentityStatusChanges(player, *identity, trans);
-    SaveIdentityCart(player, *identity, trans);
+    if (isInventorySaved == true) // The cart holds what left the bags: its rows go with theirs
+        SaveIdentityCart(player, *identity, trans);
     SaveIdentityMemo(player, *identity, trans);
     SaveIdentityQuests(player, *identity, trans);
     SaveIdentityPet(player, *identity, trans);
@@ -979,6 +997,7 @@ void ROWOWMod::LeaveROForm(Player* player)
     PetLeaveMap(player);
     FollowerLeaveMap(player, true);
     PartyRemoveMember(player);
+    ForgetNpcTouches(player); // The OnTouch_ NPC it stands on is free for the next player
     identity->Zeny = player->GetMoney();
     if (player->IsAlive() == true)
     {
@@ -1057,11 +1076,19 @@ bool ROWOWMod::GetWorldTravelDestination(Player* player, ROWOWPosition& destinat
         return true;
     }
 
-    // Into it: where the identity last left it, or the start point for a new one
+    // Into it: where the identity last left it (its save point from a nosave map, as pc_makesavestatus), or the start point for a new one
     if (identity->Exists == true && identity->LastPosition.IsSet == true)
     {
-        destinationOut = identity->LastPosition;
-        return true;
+        if (HasMapFlag(identity->LastPosition.MapID, "nosave") == false)
+        {
+            destinationOut = identity->LastPosition;
+            return true;
+        }
+        if (identity->SavePoint.IsSet == true)
+        {
+            destinationOut = identity->SavePoint;
+            return true;
+        }
     }
     return GetCellPosition(StartMapID, StartCellX, StartCellY, destinationOut);
 }

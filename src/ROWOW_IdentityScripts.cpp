@@ -96,6 +96,7 @@ public:
         ROWOW->UpdateStatusChanges(player);
         if (ROWOW->IsEnabled == false || ROWOW->IsInROForm(player) == false)
             return;
+        ROWOW->CheckNoSaveArrival(player);
         ROWOW->CheckArrivalFloor(player);
         ROWOW->UpdateSkillUnitMove(player);
         ROWOW->UpdateSkillCastMove(player);
@@ -149,7 +150,52 @@ public:
 
         // The pet loads after the character is placed on the map, so it's put away again here
         if (ROWOW->IsInROForm(player) == true)
+        {
             player->UnsummonPetTemporaryIfAny();
+            ROWOW->GetIdentity(player)->IsNoSaveLoginPending = ROWOW->HasMapFlag(player->GetMapId(), "nosave");
+        }
+    }
+
+    void OnPlayerDeleteFromDB(CharacterDatabaseTransaction trans, uint32 guid) override
+    {
+        // The character's RO rows go with it, or a character given its GUID would inherit them.  A pet's row is its egg's, which may outlive the character
+        // (in account storage, with another character, in a mail or the guild bank): it goes only with no such egg.  Fame's lists had the character's name
+        if (ROWOW->IsEnabled == false)
+            return;
+        ROWOW->DeleteIdentityRows(guid, trans);
+        trans->Append("DELETE `pet` FROM `mod_rowow_pet` `pet` WHERE `pet`.`OwnerGUID` = {} AND NOT EXISTS (SELECT 1 FROM `item_instance` `egg` WHERE (`egg`.`owner_guid` <> {} OR "
+            "`egg`.`guid` IN (SELECT `item` FROM `account_bank_item`)) AND SUBSTRING_INDEX(SUBSTRING_INDEX(`egg`.`enchantments`, ' ', {}), ' ', -1) COLLATE utf8mb4_bin = CAST(`pet`.`PetID` + {} AS CHAR) COLLATE utf8mb4_bin)",
+            guid, guid, uint32(ROWOW_ITEM_PET_ENCHANTMENT_SLOT) * 3 + 1, ROWOW_ITEM_PET_ENCHANTMENT_START);
+        ROWOW->LoadFameLists(guid);
+    }
+
+    bool OnPlayerCanInitTrade(Player* player, Player* target) override
+    {
+        // clif_parse_TradeRequest's pc_cant_act and trade_traderequest: neither side busy with a shop, a room or an NPC, whose script could use up what
+        // the trade offers.  World thread, with the maps idle
+        if (ROWOW->IsEnabled == false || ROWOW->IsInROForm(player) == false)
+            return true;
+        auto isBusy = [](Player* trader)
+        {
+            return ROWOW->PCCantAct(trader) == true || ROWOW->GetIdentity(trader)->NpcRun != nullptr;
+        };
+        if (isBusy(player) == false && isBusy(target) == false)
+            return true;
+        ChatHandler(player->GetSession()).SendNotification("You can't trade right now.");
+        return false;
+    }
+
+    void OnPlayerSellItemMoney(Player* player, uint32& money) override
+    {
+        // Overcharge raises what an RO shop pays for an item (pc_modifysellvalue)
+        if (ROWOW->IsEnabled == true && ROWOW->IsInROForm(player) == true)
+            money = uint32(ROWOW->PCModifySellValue(player, int32(money)));
+    }
+
+    bool OnPlayerCanBuybackItem(Player* /*player*/, Item* item) override
+    {
+        // RO has no buyback: in the form the packet is refused, and out of it an RO item sold for zeny would come back for gold, which never crosses
+        return ROWOW->IsEnabled == false || ROWOW->IsROItemTemplate(item->GetEntry()) == false;
     }
 
     bool OnPlayerBeforeTeleport(Player* player, uint32 mapid, float x, float y, float z, float orientation, uint32 /*options*/, Unit* /*target*/) override
@@ -210,7 +256,7 @@ public:
             for (uint8 powerIndex = 0; powerIndex < MAX_POWERS; powerIndex++)
                 values.Powers[powerIndex] = identity->WoWPowers[powerIndex];
         }
-        ROWOW->SaveIdentity(player, trans);
+        ROWOW->SaveIdentity(player, trans, values.IsInventorySaved);
     }
 
     bool OnPlayerCanLoseDurability(Player* player) override
@@ -271,16 +317,7 @@ public:
             discount = discount * float(ROWOW->PCModifyBuyValue(player, 10000)) / 10000.0f;
     }
 
-    void OnPlayerMoneyChanged(Player* player, int32& amount) override
-    {
-        // Overcharge raises what an RO shop pays for an item (pc_modifysellvalue), the money of the sale the sell packet started
-        ROWOWIdentity* identity = player->CustomData.Get<ROWOWIdentity>("ROWOWIdentity");
-        if (identity == nullptr || identity->IsSellingToShop == false)
-            return;
-        identity->IsSellingToShop = false;
-        if (amount > 0)
-            amount = ROWOW->PCModifySellValue(player, amount);
-    }
+
 
     bool OnPlayerCanCastItemUseSpell(Player* player, Item* item, SpellCastTargets const& /*targets*/, uint8 /*cast_count*/, uint32 /*glyphIndex*/) override
     {
@@ -342,17 +379,14 @@ public:
             }
             case CMSG_SELL_ITEM:
             {
-                // RO shops only buy RO items, and Overcharge raises what they pay (pc_modifysellvalue, on the money the sale gives)
+                // RO shops only buy RO items
                 WorldPacket packetCopy(packet);
                 ObjectGuid vendorGUID;
                 ObjectGuid itemGUID;
                 packetCopy >> vendorGUID >> itemGUID;
                 Item* item = player->GetItemByGuid(itemGUID);
                 if (item == nullptr || ROWOW->IsROItemTemplate(item->GetEntry()) == true)
-                {
-                    ROWOW->GetIdentity(player)->IsSellingToShop = item != nullptr;
                     return true;
-                }
                 player->SendSellError(SELL_ERR_CANT_SELL_ITEM, nullptr, itemGUID, 0);
                 return false;
             }
@@ -1807,9 +1841,9 @@ public:
         return true;
     }
 
-    static bool HandleROVendBuyCommand(ChatHandler* handler, uint32 vendorGUID, std::string purchases)
+    static bool HandleROVendBuyCommand(ChatHandler* handler, uint32 vendorGUID, uint32 vendingID, std::string purchases)
     {
-        // The shop window's "Buy" (clif_parse_PurchaseReq2): "<index>:<amount>,..."
+        // The shop window's "Buy" (clif_parse_PurchaseReq2): the shop id its list came with, and "<index>:<amount>,..."
         Player* player = GetFormPlayer(handler);
         if (player == nullptr)
             return false;
@@ -1822,7 +1856,7 @@ public:
                 return false;
             purchaseList.emplace_back(uint16(strtoul(std::string(fields[0]).c_str(), nullptr, 10)), uint32(strtoul(std::string(fields[1]).c_str(), nullptr, 10)));
         }
-        ROWOW->VendingPurchaseReq(player, vendor, purchaseList);
+        ROWOW->VendingPurchaseReq(player, vendor, vendingID, purchaseList);
         return true;
     }
 
@@ -2551,7 +2585,8 @@ public:
         Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
         if (player == nullptr || ROWOW->IsInROForm(player) == false)
             return false;
-        ROWOW->SkillIdentify(player, ROWOWMod::GetItemByClientPosition(player, bag, slot));
+        if (ROWOW->PCCantAct(player) == false) // A Magnifier is used up by this
+            ROWOW->SkillIdentify(player, ROWOWMod::GetItemByClientPosition(player, bag, slot));
         return true;
     }
 
@@ -2607,6 +2642,7 @@ public:
             player->GetName(), job != nullptr ? job->Name : "?", identity->JobID, identity->BaseLevel, identity->BaseExp, identity->JobLevel, identity->JobExp,
             identity->StatusPoints, identity->SkillPoints, identity->Stats[0], identity->Stats[1], identity->Stats[2], identity->Stats[3], identity->Stats[4],
             identity->Stats[5], identity->IsInForm == true ? player->GetMoney() : identity->Zeny, identity->IsInForm == true ? "in the form" : "not in the form");
+        handler->PSendSysMessage("Bank {}", player->GetSession()->IsPlayerBanker() == true ? "in reach" : "out of reach");
         int32 x = 0, y = 0;
         ROWOW->GetUnitCell(player, x, y);
         auto mapNameIter = ROWOW->MapNamesByMapID.find(player->GetMapId());
@@ -2653,20 +2689,8 @@ public:
             return false;
         bool wasInForm = ROWOW->IsInROForm(player);
         ROWOW->LeaveROForm(player);
-        uint32 guid = player->GetGUID().GetCounter();
         CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
-        trans->Append("DELETE FROM `mod_rowow_identity` WHERE `guid` = {}", guid);
-        trans->Append("DELETE FROM `mod_rowow_identity_action` WHERE `guid` = {}", guid);
-        trans->Append("DELETE FROM `mod_rowow_identity_equipment` WHERE `guid` = {}", guid);
-        trans->Append("DELETE FROM `mod_rowow_identity_skill` WHERE `guid` = {}", guid);
-        trans->Append("DELETE FROM `mod_rowow_identity_variable` WHERE `guid` = {}", guid);
-        trans->Append("DELETE FROM `mod_rowow_identity_status` WHERE `guid` = {}", guid);
-        trans->Append("DELETE FROM `mod_rowow_identity_cart` WHERE `guid` = {}", guid);
-        trans->Append("DELETE FROM `mod_rowow_identity_memo` WHERE `guid` = {}", guid);
-        trans->Append("DELETE FROM `mod_rowow_identity_quest` WHERE `guid` = {}", guid);
-        trans->Append("DELETE FROM `mod_rowow_homunculus` WHERE `CharacterGUID` = {}", guid);
-        trans->Append("DELETE FROM `mod_rowow_mercenary` WHERE `CharacterGUID` = {}", guid);
-        trans->Append("DELETE FROM `mod_rowow_mercenary_owner` WHERE `CharacterGUID` = {}", guid);
+        ROWOW->DeleteIdentityRows(player->GetGUID().GetCounter(), trans);
         CharacterDatabase.DirectCommitTransaction(trans); // Before the new identity's save, which is queued
         player->CustomData.Erase("ROWOWIdentity");
         if (wasInForm == true)

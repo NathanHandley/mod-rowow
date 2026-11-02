@@ -54,12 +54,6 @@ namespace
                 mapName = mapIDByName.first;
         return mapName;
     }
-
-    bool HasMapFlag(uint32 mapID, char const* mapFlag)
-    {
-        auto mapIDsIter = ROWOW->MapIDsByMapFlag.find(mapFlag);
-        return mapIDsIter != ROWOW->MapIDsByMapFlag.end() && mapIDsIter->second.find(mapID) != mapIDsIter->second.end();
-    }
 }
 
 bool ROWOWMod::PCMemo(Player* player, int32 pos)

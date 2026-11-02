@@ -203,6 +203,11 @@ void ROWOWMod::MercenaryDelete(Player* sd, int32 reply)
     ROWOWMercData* md = identity->Mercenary.get();
     if (md == nullptr)
         return;
+    if (identity->IsFollowerHeld == true)
+    {
+        identity->MercenaryDeleteReply = reply; // Its update's end (FollowerDeletePending)
+        return;
+    }
     if (md->IsDevotion == true)
     {
         md->IsDevotion = false;

@@ -858,7 +858,10 @@ void ROWOWMod::PetMenu(Player* sd, int32 menuNum)
 
 void ROWOWMod::PetFood(Player* sd, ROWOWPetData& pd)
 {
-    // pet_food: it takes its food from the bags.  More when it's hungry than when it's only peckish, and overfeeding it costs its master's standing
+    // pet_food: it takes its food from the bags, not out of a trade.  More when it's hungry than when it's only peckish, and overfeeding it costs its
+    // master's standing
+    if (PCCantAct(sd) == true)
+        return;
     Item* food = PCSearchInventory(sd, pd.DB->FoodID);
     if (food == nullptr)
     {
@@ -919,6 +922,8 @@ bool ROWOWMod::PetEquipItem(Player* sd, Item* item)
     // pet_equipitem: using the accessory (clif_parse_EquipItem) puts it on the pet it's for
     ROWOWPetData* pd = GetPet(sd);
     ROWOWItem const* roItem = GetROItem(item);
+    if (PCCantAct(sd) == true)
+        return false;
     if (pd == nullptr || roItem == nullptr || pd->DB->AcceID == 0 || roItem->ItemID != pd->DB->AcceID || pd->Pet.EquipID != 0)
     {
         SendPetMessage(sd, "You can't put this on your pet.");

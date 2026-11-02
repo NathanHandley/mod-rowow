@@ -198,7 +198,8 @@ public:
         if (npc == nullptr || npc->Script == nullptr || npc->IsShop == true)
             return false;
         CloseGossipMenuFor(player);
-        ROWOW->StartNpcRun(player, npc);
+        if (ROWOW->PCCantAct(player) == false) // clif_parse_NpcClicked's pc_cant_act2: a script could use up what the trade offers
+            ROWOW->StartNpcRun(player, npc);
         return true;
     }
 };

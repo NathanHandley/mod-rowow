@@ -776,7 +776,13 @@ SpellCastResult ROWOWMod::UnitSkillUse(Unit* src, Unit* target, WorldLocation co
         else if (PCCheckSkill(sd, skillID) < skillLevel)
             return SPELL_FAILED_NOT_KNOWN;
 
-        // skill_isNotOk: the skill's cooldown (blockskill)
+        // clif_parse_UseSkillToId's pc_cant_act: a trade holds the items a skill uses up
+        if (PCCantAct(sd) == true)
+            return SPELL_FAILED_DONT_REPORT;
+
+        // skill_isNotOk: the map's rules, and the skill's cooldown (blockskill)
+        if (SkillIsNotOk(sd, skillID) == true)
+            return SPELL_FAILED_DONT_REPORT;
         auto cooldownIter = ud->CooldownEndTimesBySkillID.find(skillID);
         if (cooldownIter != ud->CooldownEndTimesBySkillID.end() && cooldownIter->second > tick)
         {
@@ -1311,11 +1317,21 @@ void ROWOWMod::UnitSkillCastCancel(Unit* bl, int32 type)
         if (GetDeferredBonus(bl, "bNoCastCancel2") != 0 || GetDeferredBonus(bl, "bNoCastCancel") != 0)
             return;
     }
+    UnitSkillCastReset(bl);
+    bl->InterruptSpell(CURRENT_GENERIC_SPELL, false, false);
+}
+
+void ROWOWMod::UnitSkillCastReset(Unit* bl)
+{
+    // unit_skillcastcancel's end, for a cast that stopped however it stopped.  A spell cancelled by Esc or by losing its target has left the unit's spell
+    // slot before the core's hook runs, so nothing here reads it
+    ROWOWSkillUnitData* ud = bl->CustomData.Get<ROWOWSkillUnitData>("ROWOWSkillUnitData");
+    if (ud == nullptr || ud->SkillID == 0)
+        return;
     ud->CanActTime = GetTick();
     ud->SkillID = 0;
     ud->SkillLevel = 0;
     ud->IsSkillTimer = false;
-    bl->InterruptSpell(CURRENT_GENERIC_SPELL, false, false);
     FollowerClearSkill(bl);
     if (bl->IsCreature() == true && GetROMobID(bl->ToCreature()) != 0)
     {
@@ -1325,6 +1341,42 @@ void ROWOWMod::UnitSkillCastCancel(Unit* bl, int32 type)
     }
     if (bl->IsPlayer() == true && PCCheckSkill(bl, ROWOW_SKILL_SA_FREECAST) > 0)
         StatusCalcBL(bl, std::bitset<ROWOW_SCB_MAX>().set(ROWOW_SCB_SPEED).set(ROWOW_SCB_ASPD)); // restore original walk speed
+}
+
+bool ROWOWMod::SkillIsNotOk(Player* sd, uint16 skillID)
+{
+    // skill_isNotOk, the map's rules: noskill, but for an item's skill, nowarp for Warp Portal and nomemo for the wedding calls.  (noteleport is Teleport's
+    // own, and the shops' flags are skill_check_condition_castbegin's.  GM rights don't skip it here)
+    ROWOWSkillUnitData const* ud = GetSkillUnitData(sd);
+    if (skillID == ROWOW_SKILL_AL_TELEPORT && ud->SkillItemID == skillID && ud->SkillItemLevel > 2)
+        return false; // Teleport lv 3 bypasses this check.[Inkfish]
+    uint32 mapID = sd->GetMapId();
+    if (HasMapFlag(mapID, "noskill") == true && skillID != ROWOW_SKILL_ALL_EQSWITCH && ud->SkillItemID == 0)
+        return true; // Item skills bypass noskill
+    if (ud->SkillItemID == skillID)
+        return false;
+    switch (skillID)
+    {
+        case ROWOW_SKILL_AL_WARP:
+            if (HasMapFlag(mapID, "nowarp") == true)
+            {
+                ChatHandler(sd->GetSession()).SendNotification("You can't teleport in this area."); // clif_skill_teleportmessage NOTIFY_MAPINFO_CANT_TP
+                return true;
+            }
+            break;
+        case ROWOW_SKILL_WE_CALLPARTNER:
+        case ROWOW_SKILL_WE_CALLPARENT:
+        case ROWOW_SKILL_WE_CALLBABY:
+            if (HasMapFlag(mapID, "nomemo") == true)
+            {
+                ChatHandler(sd->GetSession()).SendNotification("Saved point cannot be memorized."); // clif_skill_teleportmessage NOTIFY_MAPINFO_CANT_MEMO
+                return true;
+            }
+            break;
+        default:
+            break;
+    }
+    return false;
 }
 
 void ROWOWMod::UpdateSkillCastMove(Player* player)
@@ -2003,8 +2055,8 @@ bool ROWOWMod::SkillCheckConditionCastEnd(Player* sd, uint16 skillID, uint16 ski
 {
     // skill_check_condition_castend: HP, weapon, ammo, items and Sight Rasher's status, checked when the cast ends, what B.S. Sacramenti's
     // partners give, and how many plants or Marine Spheres an Alchemist may have out
-    if (PCCanMoveAt(sd) == false)
-        return false; // sd.chatID
+    if (PCCantAct(sd) == true)
+        return false; // sd.chatID, and a trade opened during the cast
     if (GetSkillUnitData(sd)->SkillItemID == skillID)
         return true; // Casting finished (Item skill or Hocus-Pocus)
 

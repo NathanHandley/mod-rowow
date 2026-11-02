@@ -187,6 +187,8 @@ bool ROWOWMod::SkillArrowCreate(Player* player, uint32 nameID)
         return false;
     identity->MenuSkillID = 0;
     identity->MenuSkillValue = 0;
+    if (PCCantAct(player) == true) // Make it fail to avoid shop exploits where you sell something different than you see.
+        return false;
     int32 sourceColumnIndex = arrowTable->GetColumnIndex("Source");
     int32 makeColumnIndex = arrowTable->GetColumnIndex("Make");
     for (size_t rowIndex = 0; rowIndex < arrowTable->Rows.size(); rowIndex++)

@@ -204,6 +204,7 @@ void ROWOWMod::BuyingStoreTrade(Player* player, Player* buyer, uint32 buyerID, s
 
     // buyer lost zeny in the mean time? fix the limit
     store.ZenyLimit = std::min<int64>(store.ZenyLimit, buyer->GetMoney());
+    std::vector<ROWOWStoreItem> storeItems;
     int64 zeny = 0;
     for (size_t index = 0; index < sales.size(); index++)
     {
@@ -228,8 +229,7 @@ void ROWOWMod::BuyingStoreTrade(Player* player, Player* buyer, uint32 buyerID, s
             handler.SendNotification("The store doesn't want that many."); // BUYINGSTORE_TRADE_SELLER_COUNT
             return;
         }
-        if (CanStoreROItem(buyer, itemTemplateID, amount, 0) == false)
-            return failed(); // buyer does not have enough space for this item
+        storeItems.push_back(ROWOWStoreItem{ itemTemplateID, amount, 0 });
         if (int64(amount) * wanted->Price > store.ZenyLimit - zeny)
         {
             handler.SendNotification("The store has run out of zeny."); // BUYINGSTORE_TRADE_SELLER_ZENY
@@ -237,6 +237,8 @@ void ROWOWMod::BuyingStoreTrade(Player* player, Player* buyer, uint32 buyerID, s
         }
         zeny += int64(amount) * wanted->Price;
     }
+    if (CanStoreROItems(buyer, storeItems) == false)
+        return failed(); // buyer does not have enough space for these items
 
     // process item list
     for (std::pair<uint32, uint32> const& sale : sales)
@@ -248,6 +250,8 @@ void ROWOWMod::BuyingStoreTrade(Player* player, Player* buyer, uint32 buyerID, s
         std::string itemName = itemTemplate != nullptr ? itemTemplate->Name1 : std::to_string(itemTemplateID);
 
         // move item
+        if (StoreROItem(buyer, itemTemplateID, sale.second, nullptr, 0) == nullptr)
+            continue; // Never, with the room checked: nothing moves or is paid for it
         uint32 left = sale.second;
         for (Item* item : GetSellableItems(this, player, *identity, itemTemplateID))
         {
@@ -257,7 +261,6 @@ void ROWOWMod::BuyingStoreTrade(Player* player, Player* buyer, uint32 buyerID, s
             if (left == 0)
                 break;
         }
-        StoreROItem(buyer, itemTemplateID, sale.second, nullptr, 0);
         wanted->Amount -= sale.second;
 
         // pay up

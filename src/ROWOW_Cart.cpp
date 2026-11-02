@@ -183,10 +183,16 @@ void ROWOWMod::PCCartDelItem(Player* /*player*/, ROWOWIdentity& identity, int32 
 
 void ROWOWMod::PCPutItemToCart(Player* player, Item* item, int32 amount)
 {
-    // pc_putitemtocart: an RO item from the bags into the cart (a worn one must come off first, and not while a shop is open)
+    // pc_putitemtocart: an RO item from the bags into the cart (a worn one must come off first, and not while a shop is open or in a trade:
+    // clif_parse_PutItemToCart's pc_cant_act2)
     ROWOWIdentity* identity = GetIdentity(player);
-    if (item == nullptr || PCIsCartOn(player) == false || GetROItem(item) == nullptr || amount < 1 || int32(item->GetCount()) < amount || identity->IsVending == true)
+    if (item == nullptr || PCIsCartOn(player) == false || GetROItem(item) == nullptr || amount < 1 || int32(item->GetCount()) < amount || PCCantAct(player) == true)
         return;
+    if (ItemDBIsRestricted(item, &ROWOWItem::IsNoCart) == true)
+    {
+        ChatHandler(player->GetSession()).SendSysMessage("This item cannot be stored.");
+        return;
+    }
     if (GetIdentityEquipPosition(*identity, item->GetGUID().GetCounter()) != 0)
     {
         ChatHandler(player->GetSession()).SendNotification("Take it off before putting it in the cart.");
@@ -212,12 +218,12 @@ void ROWOWMod::PCPutItemToCart(Player* player, Item* item, int32 amount)
 
 bool ROWOWMod::PCGetItemFromCart(Player* player, int32 slot, int32 amount)
 {
-    // pc_getitemfromcart: a cart item back into the bags (with its enchantments and cards), when they have room
+    // pc_getitemfromcart: a cart item back into the bags (with its enchantments and cards), when they have room (clif_parse_GetItemFromCart's pc_cant_act2)
     ROWOWIdentity* identity = GetIdentity(player);
     if (slot < 0 || slot >= ROWOW_MAX_CART)
         return false; // Invalid index check [Skotlex]
     ROWOWCartItem cartItem = identity->CartItems[slot];
-    if (cartItem.ItemTemplateID == 0 || amount < 1 || int32(cartItem.Count) < amount || identity->IsVending == true)
+    if (cartItem.ItemTemplateID == 0 || amount < 1 || int32(cartItem.Count) < amount || PCCantAct(player) == true)
         return false;
     if (CanStoreROItem(player, cartItem.ItemTemplateID, uint32(amount), cartItem.CreatorGUID) == false)
     {

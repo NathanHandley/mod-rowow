@@ -37,7 +37,7 @@ namespace
 class ROWOW_ItemPlayerScript : public PlayerScript
 {
 public:
-    ROWOW_ItemPlayerScript() : PlayerScript("ROWOW_ItemPlayerScript", { PLAYERHOOK_ON_UPDATE, PLAYERHOOK_CAN_SELL_ITEM, PLAYERHOOK_CAN_SET_TRADE_ITEM }) {}
+    ROWOW_ItemPlayerScript() : PlayerScript("ROWOW_ItemPlayerScript", { PLAYERHOOK_ON_UPDATE, PLAYERHOOK_CAN_SELL_ITEM, PLAYERHOOK_CAN_SET_TRADE_ITEM, PLAYERHOOK_CAN_SEND_MAIL }) {}
 
     void OnPlayerUpdate(Player* player, uint32 p_time) override
     {
@@ -53,7 +53,7 @@ public:
 
     bool OnPlayerCanSellItem(Player* player, Item* item, Creature* /*creature*/) override
     {
-        // RO items are sold for zeny in the RO world only, and never while worn
+        // RO items are sold for zeny in the RO world only, never while worn, and not at all with NoSell (pc_can_sell_item)
         if (ROWOW->IsEnabled == false || item == nullptr || ROWOW->IsROItemTemplate(item->GetEntry()) == false)
             return true;
         ROWOWIdentity* identity = ROWOW->GetIdentity(player);
@@ -62,16 +62,31 @@ public:
             ChatHandler(player->GetSession()).SendSysMessage("Ragnarok Online items can only be sold in the Ragnarok Online world.");
             return false;
         }
-        return ROWOW->GetIdentityEquipPosition(*identity, item->GetGUID().GetCounter()) == 0;
+        return ROWOW->GetIdentityEquipPosition(*identity, item->GetGUID().GetCounter()) == 0 && ROWOW->ItemDBIsRestricted(item, &ROWOWItem::IsNoSell) == false;
     }
 
     bool OnPlayerCanSetTradeItem(Player* player, Item* tradedItem, uint8 /*tradeSlot*/) override
     {
+        // trade_tradeadditem's itemdb_cantrade, and a worn item comes off first
         if (ROWOW->IsEnabled == false || tradedItem == nullptr || ROWOW->IsROItemTemplate(tradedItem->GetEntry()) == false)
             return true;
+        if (ROWOW->ItemDBIsRestricted(tradedItem, &ROWOWItem::IsNoTrade) == true)
+        {
+            ChatHandler(player->GetSession()).SendSysMessage("This item cannot be traded."); // msg_txt 260
+            return false;
+        }
         if (ROWOW->GetIdentityEquipPosition(*ROWOW->GetIdentity(player), tradedItem->GetGUID().GetCounter()) == 0)
             return true;
         ChatHandler(player->GetSession()).SendSysMessage("Take it off before trading it.");
+        return false;
+    }
+
+    bool OnPlayerCanSendMail(Player* player, ObjectGuid /*receiverGuid*/, ObjectGuid /*mailbox*/, std::string& /*subject*/, std::string& /*body*/, uint32 /*money*/, uint32 /*COD*/, Item* item) override
+    {
+        // mail_setitem's itemdb_canmail.  (In the form every mail is refused; this is a character's mail with an RO item in its bags)
+        if (ROWOW->IsEnabled == false || item == nullptr || ROWOW->ItemDBIsRestricted(item, &ROWOWItem::IsNoMail) == false)
+            return true;
+        ChatHandler(player->GetSession()).SendSysMessage("This item cannot be mailed.");
         return false;
     }
 };

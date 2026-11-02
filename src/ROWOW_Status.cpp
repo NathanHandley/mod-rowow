@@ -656,10 +656,16 @@ void ROWOWMod::LoadStatusData()
             {
                 if (tradeField.first == "NoTrade")
                     item.IsNoTrade = tradeField.second == "true";
+                else if (tradeField.first == "NoSell")
+                    item.IsNoSell = tradeField.second == "true";
                 else if (tradeField.first == "NoCart")
                     item.IsNoCart = tradeField.second == "true";
                 else if (tradeField.first == "NoStorage")
                     item.IsNoStorage = tradeField.second == "true";
+                else if (tradeField.first == "NoGuildStorage")
+                    item.IsNoGuildStorage = tradeField.second == "true";
+                else if (tradeField.first == "NoMail")
+                    item.IsNoMail = tradeField.second == "true";
             }
             item.HatEffectNames = ROWOWDataTable::ParseTextList(itemTable->GetCell(rowIndex, hatEffectsColumnIndex));
             for (std::string& hatEffectName : item.HatEffectNames) // The converter's mod_rowow_hat_effect goes by the upper case name

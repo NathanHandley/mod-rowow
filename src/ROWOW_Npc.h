@@ -109,10 +109,13 @@ struct ROWOWPendingScriptMob
     std::string Event;
 };
 
-// An announcement a script made (announce, mapannounce), sent by the world update: to everyone, or to the players of a map
+// An announcement a script made (announce, mapannounce), sent by the world update: to every player in the RO form, the players of a map, or those
+// around a cell of it
 struct ROWOWNpcAnnouncement
 {
-    uint32 MapID = 0; // 0 for everyone
+    uint32 MapID = 0; // 0 for everyone in the RO form
+    int32 CellX = -1; // bc_area: its source's cell, -1 for the whole map
+    int32 CellY = -1;
     std::string Text;
 };
 
@@ -146,6 +149,7 @@ struct ROWOWNpcMapWarp
     int32 DestX2 = -1;
     int32 DestY2 = -1;
     ObjectGuid GroupGUID; // warpparty: only its members
+    ObjectGuid RequesterGUID; // warpparty: the attached player, whom a map flag doesn't hold back from a real map's warp
 };
 
 // MAX_CHAT_USERS: the most a waiting room holds

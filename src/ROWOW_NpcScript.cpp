@@ -32,6 +32,7 @@
 #include "Timer.h"
 #include "WorldPacket.h"
 #include "WorldSession.h"
+#include "WorldSessionMgr.h"
 
 #include "ROWOW.h"
 #include "ROWOW_ScriptConstants.h"
@@ -1313,16 +1314,31 @@ void ROWOWMod::UpdateNpcScripts(uint32 diff)
         RunPlayerNpcEvent(player, GetNpc(npcEvent.NpcID), npcEvent.InstructionIndex);
     }
 
-    // Announcements, to everyone or a map's players
+    // Announcements, to the players in the RO form: no WoW or EverQuest character hears RO's scripts.  The world thread: it owns the sessions, and
+    // the maps aren't updating
     for (ROWOWNpcAnnouncement const& announcement : announcements)
     {
         if (announcement.MapID == 0)
         {
-            ChatHandler(nullptr).SendWorldText(announcement.Text);
+            for (auto const& sessionByID : sWorldSessionMgr->GetAllSessions())
+            {
+                Player* player = sessionByID.second->GetPlayer();
+                if (player != nullptr && player->IsInWorld() == true && IsInROForm(player) == true)
+                    ChatHandler(sessionByID.second).SendSysMessage(announcement.Text);
+            }
             continue;
         }
         if (Map* map = sMapMgr->FindBaseNonInstanceMap(announcement.MapID))
-            map->DoForAllPlayers([&announcement](Player* player) { ChatHandler(player->GetSession()).SendSysMessage(announcement.Text); });
+        {
+            map->DoForAllPlayers([this, &announcement](Player* player)
+            {
+                int32 x = 0, y = 0;
+                GetUnitCell(player, x, y);
+                if (IsInROForm(player) == true && (announcement.CellX < 0 ||
+                    (std::abs(x - announcement.CellX) <= BattleConfig.AreaSize && std::abs(y - announcement.CellY) <= BattleConfig.AreaSize)))
+                    ChatHandler(player->GetSession()).SendSysMessage(announcement.Text);
+            });
+        }
     }
 
     // killmonster: the script monsters go without a death (and without their events, as rAthena's killmonster)
@@ -1353,8 +1369,22 @@ void ROWOWMod::UpdateNpcScripts(uint32 diff)
             if (mapWarp.X1 >= 0 && (x < std::min(mapWarp.X1, mapWarp.X2) || x > std::max(mapWarp.X1, mapWarp.X2) || y < std::min(mapWarp.Y1, mapWarp.Y2) ||
                 y > std::max(mapWarp.Y1, mapWarp.Y2)))
                 return;
-            if (mapWarp.GroupGUID.IsEmpty() == false && (player->GetGroup() == nullptr || player->GetGroup()->GetGUID() != mapWarp.GroupGUID))
-                return;
+            if (mapWarp.GroupGUID.IsEmpty() == false)
+            {
+                if (player->GetGroup() == nullptr || player->GetGroup()->GetGUID() != mapWarp.GroupGUID)
+                    return;
+                // buildin_warpparty's map flags: nowarp holds back a random warp, noreturn a warp to the save point, and either one a warp to a real
+                // map, but for the player who asked
+                bool isHeldBack = false;
+                if (mapWarp.DestMapName == "Random")
+                    isHeldBack = HasMapFlag(mapWarp.MapID, "nowarp");
+                else if (mapWarp.DestMapName == "SavePoint" || mapWarp.DestMapName == "SavePointAll")
+                    isHeldBack = HasMapFlag(mapWarp.MapID, "noreturn");
+                else
+                    isHeldBack = player->GetGUID() != mapWarp.RequesterGUID && (HasMapFlag(mapWarp.MapID, "nowarp") == true || HasMapFlag(mapWarp.MapID, "noreturn") == true);
+                if (isHeldBack == true)
+                    return;
+            }
             warpedPlayers.push_back(player);
         });
         for (Player* player : warpedPlayers)

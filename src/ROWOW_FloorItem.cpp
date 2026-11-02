@@ -52,6 +52,7 @@ namespace
     constexpr int32 PICKUP_RANGE = 2; // pc_takeitem's distance, in cells
     constexpr int32 SUBCELL_STEPS = 16; // subx and suby are in 16ths of a cell
     constexpr char const* GET_ITEM_FAILED_TEXT = "You cannot get the item."; // msgstringtable's line for ZC_ITEM_PICKUP_ACK's failures
+    constexpr uint32 MaxBagSlotCount = (INVENTORY_SLOT_ITEM_END - INVENTORY_SLOT_ITEM_START) + (INVENTORY_SLOT_BAG_END - INVENTORY_SLOT_BAG_START) * MAX_BAG_SIZE;
 
     // check_distance, with no CIRCULAR_AREA
     bool CheckDistance(int32 dx, int32 dy, int32 distance)
@@ -667,49 +668,91 @@ bool ROWOWMod::PCAddItem(Player* player, uint32 itemTemplateID, uint32 amount, b
     return true;
 }
 
+bool ROWOWMod::CanStoreROItems(Player* player, std::vector<ROWOWStoreItem> const& items) const
+{
+    // pc_checkadditem and pc_inventoryblank over a whole purchase: room in the bags for all of it at once, each stack-sized piece among the stacks of its
+    // maker.  The core's trade check (CanStoreItems) counts what each piece takes from the next, on throwaway items that never enter a map.  No bags hold
+    // more stacks than MaxBagSlotCount, however they're filled, which bounds the throwaways
+    std::vector<Item*> pieces;
+    bool canStore = true;
+    for (ROWOWStoreItem const& storeItem : items)
+    {
+        ItemTemplate const* itemTemplate = sObjectMgr->GetItemTemplate(storeItem.ItemTemplateID);
+        if (itemTemplate == nullptr || storeItem.Amount == 0)
+        {
+            canStore = false;
+            break;
+        }
+        uint32 stackSize = itemTemplate->GetMaxStackSize();
+        if ((storeItem.Amount + stackSize - 1) / stackSize + pieces.size() > MaxBagSlotCount)
+        {
+            canStore = false;
+            break;
+        }
+        for (uint32 left = storeItem.Amount; left > 0;)
+        {
+            uint32 count = std::min(left, stackSize);
+            Item* piece = Item::CreateItem(storeItem.ItemTemplateID, count, player);
+            if (piece == nullptr)
+            {
+                canStore = false;
+                break;
+            }
+            if (storeItem.CreatorGUID != 0)
+                piece->SetGuidValue(ITEM_FIELD_CREATOR, ObjectGuid::Create<HighGuid::Player>(storeItem.CreatorGUID));
+            pieces.push_back(piece);
+            left -= count;
+        }
+    }
+    if (canStore == true)
+        canStore = player->CanStoreItems(pieces.data(), int32(pieces.size()), nullptr) == EQUIP_ERR_OK;
+    for (Item* piece : pieces)
+        delete piece;
+    return canStore;
+}
+
 bool ROWOWMod::CanStoreROItem(Player* player, uint32 itemTemplateID, uint32 amount, ObjectGuid::LowType creatorGUID) const
 {
-    // Room in the bags, among the stacks of its maker
-    if (creatorGUID == 0)
-    {
-        ItemPosCountVec destination;
-        return player->CanStoreNewItem(NULL_BAG, NULL_SLOT, destination, itemTemplateID, amount) == EQUIP_ERR_OK;
-    }
-    Item* item = Item::CreateItem(itemTemplateID, amount, player);
-    if (item == nullptr)
-        return false;
-    item->SetGuidValue(ITEM_FIELD_CREATOR, ObjectGuid::Create<HighGuid::Player>(creatorGUID));
-    ItemPosCountVec destination;
-    bool canStore = player->CanStoreItem(NULL_BAG, NULL_SLOT, destination, item, false) == EQUIP_ERR_OK;
-    delete item;
-    return canStore;
+    return CanStoreROItems(player, { ROWOWStoreItem{ itemTemplateID, amount, creatorGUID } });
 }
 
 Item* ROWOWMod::StoreROItem(Player* player, uint32 itemTemplateID, uint32 amount, std::array<uint32, ROWOW_ITEM_ENCHANTMENT_SLOT_COUNT> const* enchantments, ObjectGuid::LowType creatorGUID)
 {
     // An item into the bags with what makes it that item (a cart's or a shop's, a made one): its enchantments and its maker, whose stacks are
-    // its own (CanBeMergedPartlyWith).  Null when there's no room
-    Item* item = Item::CreateItem(itemTemplateID, amount, player);
-    if (item == nullptr)
+    // its own (CanBeMergedPartlyWith).  A cart slot holds more than one stack, so it goes in stack by stack, all of it or none: null, with nothing
+    // stored, when there's no room.  Otherwise the last stack it went into
+    ItemTemplate const* itemTemplate = sObjectMgr->GetItemTemplate(itemTemplateID);
+    if (itemTemplate == nullptr || CanStoreROItem(player, itemTemplateID, amount, creatorGUID) == false)
         return nullptr;
-    if (creatorGUID != 0)
-        item->SetGuidValue(ITEM_FIELD_CREATOR, ObjectGuid::Create<HighGuid::Player>(creatorGUID));
-    ItemPosCountVec destination;
-    if (player->CanStoreItem(NULL_BAG, NULL_SLOT, destination, item, false) != EQUIP_ERR_OK)
+    Item* storedItem = nullptr;
+    for (uint32 left = amount; left > 0;)
     {
-        delete item;
-        return nullptr;
+        uint32 count = std::min(left, itemTemplate->GetMaxStackSize());
+        left -= count;
+        Item* item = Item::CreateItem(itemTemplateID, count, player);
+        if (item == nullptr)
+            return storedItem;
+        if (creatorGUID != 0)
+            item->SetGuidValue(ITEM_FIELD_CREATOR, ObjectGuid::Create<HighGuid::Player>(creatorGUID));
+        ItemPosCountVec destination;
+        if (player->CanStoreItem(NULL_BAG, NULL_SLOT, destination, item, false) != EQUIP_ERR_OK)
+        {
+            LOG_ERROR("module.ROWOW", "ROWOWMod::StoreROItem had room for {} x {} and then none for {} of them, for {}", amount, itemTemplateID, count, player->GetName());
+            delete item;
+            return storedItem;
+        }
+        item = player->StoreItem(destination, item, true);
+        if (item == nullptr)
+            return storedItem;
+        if (enchantments != nullptr)
+            for (uint8 enchantmentSlot = 0; enchantmentSlot < MAX_ENCHANTMENT_SLOT; enchantmentSlot++)
+                if ((*enchantments)[enchantmentSlot] != 0)
+                    item->SetEnchantment(EnchantmentSlot(enchantmentSlot), (*enchantments)[enchantmentSlot], 0, 0);
+        item->SetState(ITEM_CHANGED, player);
+        player->SendNewItem(item, count, true, false);
+        storedItem = item;
     }
-    item = player->StoreItem(destination, item, true);
-    if (item == nullptr)
-        return nullptr;
-    if (enchantments != nullptr)
-        for (uint8 enchantmentSlot = 0; enchantmentSlot < MAX_ENCHANTMENT_SLOT; enchantmentSlot++)
-            if ((*enchantments)[enchantmentSlot] != 0)
-                item->SetEnchantment(EnchantmentSlot(enchantmentSlot), (*enchantments)[enchantmentSlot], 0, 0);
-    item->SetState(ITEM_CHANGED, player);
-    player->SendNewItem(item, amount, true, false);
-    return item;
+    return storedItem;
 }
 
 bool ROWOWMod::PCCantAct(Player* sd) const
