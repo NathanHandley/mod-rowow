@@ -453,6 +453,26 @@ void ROWOWMod::CheckArrivalFloor(Player* player)
         player->NearTeleportTo(player->GetPositionX(), player->GetPositionY(), floorZ + 0.5f, player->GetOrientation());
 }
 
+void ROWOWMod::UpdateLoginDeath(Player* player, uint32 diff)
+{
+    // pc_authok with 0 HP: an identity that logged out dead is dead again where it lay, with RO's restart window.  It dies a moment after
+    // the login (the player's own thread), so the client already has the form and shows RO's window, not WoW's release.  Nothing of a
+    // death runs again: no penalty, no events, it only lies dead
+    ROWOWIdentity* identity = GetIdentity(player);
+    if (identity->LoginDeathTimer == 0 || player->IsBeingTeleported() == true)
+        return;
+    if (identity->LoginDeathTimer > diff)
+    {
+        identity->LoginDeathTimer -= diff;
+        return;
+    }
+    identity->LoginDeathTimer = 0;
+    if (player->IsAlive() == false)
+        return;
+    player->SetHealth(0);
+    player->KillPlayer();
+}
+
 ROWOWIdentity* ROWOWMod::GetIdentity(Player* player)
 {
     ROWOWIdentity* identity = player->CustomData.GetDefault<ROWOWIdentity>("ROWOWIdentity");
@@ -572,7 +592,10 @@ void ROWOWMod::SaveIdentity(Player* player, CharacterDatabaseTransaction trans, 
     if (identity->IsInForm == true)
     {
         identity->Zeny = player->GetMoney();
-        if (player->IsAlive() == true)
+        // Dead, or about to die again after its login: it logs in dead (the SP a respawn keeps stays as it was)
+        if (player->IsAlive() == false)
+            identity->HP = 0;
+        else if (identity->LoginDeathTimer == 0)
         {
             identity->HP = player->GetHealth();
             identity->SP = player->GetPower(POWER_MANA);
@@ -760,6 +783,10 @@ void ROWOWMod::EnterROForm(Player* player)
     {
         player->SetHealth(identity->HP == 0 ? player->GetMaxHealth() : std::min(identity->HP, player->GetMaxHealth()));
         player->SetPower(POWER_MANA, (isNewIdentity == true || identity->SP > player->GetMaxPower(POWER_MANA)) ? player->GetMaxPower(POWER_MANA) : identity->SP);
+
+        // An identity saved dead (0 HP) logs in dead where it lay, as rAthena keeps its 0 HP: once in the world (UpdateLoginDeath)
+        if (isNewIdentity == false && identity->HP == 0)
+            identity->LoginDeathTimer = ROWOW_LOGIN_DEATH_TIME_IN_MS;
     }
     identity->RegenHPTimer = 0;
     identity->RegenSPTimer = 0;
@@ -807,6 +834,9 @@ void ROWOWMod::CompleteROFormChange(Player* player)
                 player->RemoveAurasDueToSpell(spellID);
                 identity->SuspendedPassiveSpellIDs.push_back(spellID);
             }
+            // Taking off a stance or form puts the class's own power back (Player::InitDataForForm: a Warrior's Battle Stance gave rage,
+            // which the Basic Info window and the unit frame showed as SP), so the form's SP is the power again
+            player->setPowerType(POWER_MANA);
             if (player->IsAlive() == true)
             {
                 player->SetHealth(std::min(formHealth, player->GetMaxHealth()));

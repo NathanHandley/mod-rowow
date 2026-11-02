@@ -16,6 +16,7 @@
 
 #include "Creature.h"
 #include "CreatureAI.h"
+#include "GameTime.h"
 #include "Map.h"
 #include "ObjectAccessor.h"
 #include "Player.h"
@@ -137,6 +138,15 @@ void ROWOWMod::MobSpawnReset(Creature* md)
     // Spread out the monsters' thinking, so a grid that loads doesn't have them all think in the same update
     mob->ThinkTimer = uint32(urand(0, uint32(MIN_MOBTHINKTIME)));
     mob->LazyTimer = uint32(urand(0, uint32(MIN_MOBTHINKTIME * 10)));
+
+    // A spawn line's own name (mob_parse_dataset), shown as a script monster's is: the creature's name and the pet name query (SpawnScriptMob)
+    ROWOWCreatureSpawn const* spawn = GetCreatureSpawn(md);
+    if (spawn != nullptr && spawn->Line != nullptr && spawn->Line->Name.empty() == false && spawn->Line->Name != md->GetName())
+    {
+        md->SetName(spawn->Line->Name);
+        md->SetUInt32Value(UNIT_FIELD_PETNUMBER, 0x80000000 | (md->GetGUID().GetCounter() & 0x7FFFFFFF));
+        md->SetUInt32Value(UNIT_FIELD_PET_NAME_TIMESTAMP, uint32(GameTime::GetGameTime().count()));
+    }
 }
 
 void ROWOWMod::MobAddSpotted(ROWOWMobData* mob, ObjectGuid const& guid) const
@@ -1093,6 +1103,9 @@ void ROWOWMod::LoadMobSpawnData()
     int32 delayColumnIndex = spawnTable->GetColumnIndex("RespawnDelayMs");
     int32 varianceColumnIndex = spawnTable->GetColumnIndex("RespawnVarianceMs");
     int32 isBossColumnIndex = spawnTable->GetColumnIndex("IsBoss");
+    int32 nameColumnIndex = spawnTable->GetColumnIndex("DisplayName");
+    int32 mobIDColumnIndex = spawnTable->GetColumnIndex("MobId");
+    ROWOWDataTable const* mobTable = GetDataTable(ROWOW_DATA_TABLE_MOB);
     MobSpawnLines.reserve(spawnTable->Rows.size());
     for (size_t rowIndex = 0; rowIndex < spawnTable->Rows.size(); rowIndex++)
     {
@@ -1102,6 +1115,18 @@ void ROWOWMod::LoadMobSpawnData()
         line.XS = std::max<int32>(0, int32(spawnTable->GetInt(rowIndex, xSpanColumnIndex, 0)));
         line.YS = std::max<int32>(0, int32(spawnTable->GetInt(rowIndex, ySpanColumnIndex, 0)));
         line.IsBoss = spawnTable->GetInt(rowIndex, isBossColumnIndex, 0) != 0;
+
+        // mob_parse_dataset: "--en--" is mob_db's name and "--ja--" its JapaneseName, anything else the line's own name, which the
+        // client is shown.  Only a name that differs from mob_db's (the creature template's) needs showing
+        int64 mobRowIndex = GetMobRowIndex(uint32(spawnTable->GetInt(rowIndex, mobIDColumnIndex, 0)));
+        if (nameColumnIndex >= 0 && mobTable != nullptr && mobRowIndex >= 0)
+        {
+            std::string name = spawnTable->GetCell(rowIndex, nameColumnIndex);
+            if (name == "--ja--")
+                name = mobTable->GetCell(size_t(mobRowIndex), mobTable->GetColumnIndex("JapaneseName"));
+            if (name != "--en--" && name.empty() == false && name != mobTable->GetCell(size_t(mobRowIndex), mobTable->GetColumnIndex("Name")))
+                line.Name = name;
+        }
 
         // A line with no delay is 5 seconds, as is a delay under mob_respawn_time
         int64 delay = spawnTable->GetInt(rowIndex, delayColumnIndex, 0);

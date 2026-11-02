@@ -98,6 +98,7 @@ public:
             return;
         ROWOW->CheckNoSaveArrival(player);
         ROWOW->CheckArrivalFloor(player);
+        ROWOW->UpdateLoginDeath(player, p_time);
         ROWOW->UpdateSkillUnitMove(player);
         ROWOW->UpdateSkillCastMove(player);
         ROWOW->UpdateInvincibleTimer(player);
@@ -135,6 +136,26 @@ public:
     {
         // The form has RO's natural regen instead (UpdateNaturalRegen)
         return ROWOW->IsInROForm(player) == false;
+    }
+
+    bool OnPlayerCanUseClassAbilities(Player* player) override
+    {
+        // The form is an RO job, not the character's class: mod-everquest's class auras stay off it (they came back every 2 s)
+        return ROWOW->IsInROForm(player) == false;
+    }
+
+    bool OnPlayerCanAutoRelease(Player* player) override
+    {
+        // An RO death has no spirit: it lies dead until "Return to save point", past the release timer and through a logout (pc_dead)
+        return ROWOW->IsInROForm(player) == false;
+    }
+
+    void OnPlayerJustDied(Player* player) override
+    {
+        // RO's restart window has no countdown: with the release timer shown, the client's death window would close by itself
+        if (ROWOW->IsEnabled == false || ROWOW->IsInROForm(player) == false)
+            return;
+        player->ApplyModFlag(PLAYER_FIELD_BYTES, PLAYER_FIELD_BYTE_RELEASE_TIMER, false);
     }
 
     void OnPlayerLogin(Player* player) override

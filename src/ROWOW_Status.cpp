@@ -1363,7 +1363,6 @@ bool ROWOWMod::PCCheckBaseLevelUp(Player* player)
     PCLevelUpAngel(player);
     CastLevelUpEffect(player, ROWOW_SPELL_BASE_LEVEL_UP);
     PetOwnerLevelUp(player);
-    ChatHandler(player->GetSession()).PSendSysMessage("Base level up! You are now base level {}.", identity->BaseLevel);
     return true;
 }
 
@@ -1395,7 +1394,6 @@ bool ROWOWMod::PCCheckJobLevelUp(Player* player)
 
     RefreshROForm(player);
     CastLevelUpEffect(player, ROWOW_SPELL_JOB_LEVEL_UP);
-    ChatHandler(player->GetSession()).PSendSysMessage("Job level up! You are now job level {}.", identity->JobLevel);
     return true;
 }
 

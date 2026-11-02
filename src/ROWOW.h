@@ -1400,6 +1400,7 @@ struct ROWOWMobSpawnLine
     uint32 Delay1 = 5000;
     uint32 Delay2 = 0;
     bool IsBoss = false; // state.boss: a boss_monster line
+    std::string Name; // The line's own name when it isn't mob_db's (npc_parse_mob: the job tests' "Orange Mushroom"), shown by MobSpawnReset
 };
 
 // A monster of a spawn line and its center (mob_data's spawn, centerX and centerY), from mod_rowow_creature_spawn.  -1 is anywhere on the map
@@ -1697,6 +1698,7 @@ struct ROWOWPetOwner : public DataMap::Base
 #define ROWOW_MAX_MER_DISTANCE                      15      // MAX_MER_DISTANCE
 #define ROWOW_MIN_DELAY_SLAVE                       200     // MIN_DELAY_SLAVE: the delay of what a client commands
 #define ROWOW_FOLLOWER_CORPSE_TIME_IN_MS            2000    // How long its dying frames show before it's taken off the map
+#define ROWOW_LOGIN_DEATH_TIME_IN_MS                3000    // After a login, how long before an identity that logged out dead dies again: the client has the form by then
 #define ROWOW_EMOTION_DELIGHT                       2       // emotion_type
 #define ROWOW_EMOTION_SWEAT                         4
 #define ROWOW_EMOTION_FRET                          6
@@ -1993,6 +1995,7 @@ struct ROWOWIdentity : public DataMap::Base
     bool IsFormDeparturePending = false;
     bool IsNewIdentityPending = false; // The first entry, whose start items are given once in the world
     bool IsArrivalFloorCheckPending = false; // Arrived on an RO map: the next update checks it isn't left in the air (CheckArrivalFloor)
+    uint32 LoginDeathTimer = 0; // Logged in after logging out dead: dies again where it lies when this runs out (UpdateLoginDeath)
 
     // While in the form: the character's own values, put back on leaving and saved in place of the form's
     bool IsInForm = false;
@@ -2183,6 +2186,7 @@ public:
     // The middle of an RO cell of an RO map, on the ground.  False when the map has no cell grid or no ground there
     bool GetCellPosition(uint32 mapID, int32 cellX, int32 cellY, ROWOWPosition& positionOut) const;
     void CheckArrivalFloor(Player* player); // After an arrival on an RO map: down on the floor if it's in the air above it
+    void UpdateLoginDeath(Player* player, uint32 diff); // An identity that logged out dead is dead again after its login (pc_authok's 0 HP)
     void CheckNoSaveArrival(Player* player); // After a login on a nosave map: to the save point
 
     // The player's identity, loaded on first use (a row of defaults until the identity exists)
