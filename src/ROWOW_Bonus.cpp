@@ -49,7 +49,8 @@ namespace
         BONUS_FLEE2_RATE, BONUS_DEF_RATE, BONUS_DEF2_RATE, BONUS_MDEF_RATE, BONUS_MDEF2_RATE, BONUS_CRIT_ATK_RATE, BONUS_LONG_ATK_RATE,
         BONUS_SHORT_ATK_RATE, BONUS_NO_SIZEFIX, BONUS_CASTRATE, BONUS_SPLASH_RANGE, BONUS_SPLASH_ADD_RANGE,
         BONUS2_ADD_ELE, BONUS2_ADD_RACE, BONUS2_ADD_CLASS, BONUS2_ADD_SIZE, BONUS2_SUB_ELE, BONUS2_SUB_RACE, BONUS2_SUB_CLASS, BONUS2_SUB_SIZE,
-        BONUS2_ADD_DAMAGE_CLASS, BONUS2_ADD_DEF_MONSTER, BONUS2_WEAPON_ATK, BONUS2_WEAPON_DAMAGE_RATE, BONUS2_CRITICAL_ADDRACE,
+        BONUS2_ADD_RACE2, BONUS2_SUB_RACE2, BONUS2_HP_DRAIN_RATE, BONUS2_SP_DRAIN_RATE, BONUS_HP_DRAIN_VALUE, BONUS_SP_DRAIN_VALUE,
+        BONUS2_HP_DRAIN_VALUE_RACE, BONUS2_SP_DRAIN_VALUE_RACE, BONUS2_ADD_DAMAGE_CLASS, BONUS2_ADD_DEF_MONSTER, BONUS2_WEAPON_ATK, BONUS2_WEAPON_DAMAGE_RATE, BONUS2_CRITICAL_ADDRACE,
         BONUS2_IGNORE_DEF_RACE_RATE, BONUS2_IGNORE_DEF_CLASS_RATE, BONUS2_EXP_ADDRACE, BONUS2_EXP_ADDCLASS, BONUS_CRITICAL_RANGEATK,
         BONUS_ADD_EFF, BONUS_ADD_EFF2, BONUS_ADD_EFF_WHEN_HIT, BONUS_ADD_EFF_ON_SKILL, BONUS2_RES_EFF, BONUS_AUTO_SPELL, BONUS_AUTO_SPELL_WHEN_HIT,
         BONUS_AUTO_SPELL_ON_SKILL, BONUS_NOT_PRE_RENEWAL, BONUS_DEFERRED,
@@ -95,7 +96,7 @@ namespace
         { "bAddMDefMonster", BONUS_DEFERRED }, { "bMagicDamageReturn", BONUS_DEFERRED }, { "bNoMagicDamage", BONUS_DEFERRED }, { "bMatk", BONUS_DEFERRED },
         { "bMagicHPGainValue", BONUS_DEFERRED }, { "bMagicSPGainValue", BONUS_DEFERRED },
         // Monster race groups (race2, R10)
-        { "bAddRace2", BONUS_DEFERRED }, { "bSubRace2", BONUS_DEFERRED },
+        { "bAddRace2", BONUS2_ADD_RACE2 }, { "bSubRace2", BONUS2_SUB_RACE2 },
         // Statuses: their chances on hit and when hit, resistances, and (R6.5) the like
         { "bAddEff", BONUS_ADD_EFF }, { "bAddEff2", BONUS_ADD_EFF2 }, { "bAddEffWhenHit", BONUS_ADD_EFF_WHEN_HIT }, { "bAddEffOnSkill", BONUS_ADD_EFF_ON_SKILL },
         { "bResEff", BONUS2_RES_EFF }, { "bComaRace", BONUS_DEFERRED }, { "bComaClass", BONUS_DEFERRED }, { "bWeaponComaRace", BONUS_DEFERRED },
@@ -106,8 +107,9 @@ namespace
         { "bUnstripableArmor", BONUS_DEFERRED }, { "bUnstripableHelm", BONUS_DEFERRED }, { "bUnstripableShield", BONUS_DEFERRED },
         { "bShortWeaponDamageReturn", BONUS_DEFERRED }, { "bLongWeaponDamageReturn", BONUS_DEFERRED }, { "bClassChange", BONUS_DEFERRED },
         // HP and SP drain, gain, loss and regen on hits, kills and over time
-        { "bHPDrainRate", BONUS_DEFERRED }, { "bSPDrainRate", BONUS_DEFERRED }, { "bHPDrainValue", BONUS_DEFERRED }, { "bSPDrainValue", BONUS_DEFERRED },
-        { "bHPDrainValueRace", BONUS_DEFERRED }, { "bSPDrainValueRace", BONUS_DEFERRED }, { "bSPGainRace", BONUS_DEFERRED }, { "bHPGainValue", BONUS_DEFERRED },
+        { "bHPDrainRate", BONUS2_HP_DRAIN_RATE }, { "bSPDrainRate", BONUS2_SP_DRAIN_RATE }, { "bHPDrainValue", BONUS_HP_DRAIN_VALUE },
+        { "bSPDrainValue", BONUS_SP_DRAIN_VALUE }, { "bHPDrainValueRace", BONUS2_HP_DRAIN_VALUE_RACE }, { "bSPDrainValueRace", BONUS2_SP_DRAIN_VALUE_RACE },
+        { "bSPGainRace", BONUS_DEFERRED }, { "bHPGainValue", BONUS_DEFERRED },
         { "bSPGainValue", BONUS_DEFERRED }, { "bSPVanishRate", BONUS_DEFERRED }, { "bHPVanishRate", BONUS_DEFERRED }, { "bHPLossRate", BONUS_DEFERRED },
         { "bSPLossRate", BONUS_DEFERRED }, { "bHPRegenRate", BONUS_DEFERRED }, { "bSPRegenRate", BONUS_DEFERRED }, { "bNoRegen", BONUS_DEFERRED },
         { "bRestartFullRecover", BONUS_DEFERRED }, { "bAddItemHealRate", BONUS_DEFERRED }, { "bAddItemGroupHealRate", BONUS_DEFERRED },
@@ -1044,6 +1046,32 @@ void ROWOWMod::PCBonus(ROWOWScriptContext& context, std::string const& type, std
         case BONUS2_SUB_RACE: if (isArrow == false && IsBonusIndexValid(type2, ROWOW_RACE_MAX) == true) bonus.SubRace[type2] += int32(val); break;
         case BONUS2_SUB_CLASS: if (isArrow == false && IsBonusIndexValid(type2, ROWOW_CLASS_MAX) == true) bonus.SubClass[type2] += int32(val); break;
         case BONUS2_SUB_SIZE: if (isArrow == false && IsBonusIndexValid(type2, ROWOW_SIZE_MAX) == true) bonus.SubSize[type2] += int32(val); break;
+        // bAddRace2 goes to the right hand from a weapon, shield or armor and to the left one from the ammo (pc_bonus2's SP_ADDRACE2 as written)
+        case BONUS2_ADD_RACE2: if (IsBonusIndexValid(type2, ROWOW_RACE2_MAX) == true) (isArrow == false ? bonus.RightWeapon : bonus.LeftWeapon).AddRace2[type2] += int32(val); break;
+        case BONUS2_SUB_RACE2: if (isArrow == false && IsBonusIndexValid(type2, ROWOW_RACE2_MAX) == true) bonus.SubRace2[type2] += int32(val); break;
+        // The drain bonuses (battle_drain) belong to the right hand from anything but a left-hand weapon, a shield or the ammo, and to the left
+        // hand from a left-hand weapon
+        case BONUS2_HP_DRAIN_RATE:
+        case BONUS2_SP_DRAIN_RATE:
+        case BONUS_HP_DRAIN_VALUE:
+        case BONUS_SP_DRAIN_VALUE:
+        case BONUS2_HP_DRAIN_VALUE_RACE:
+        case BONUS2_SP_DRAIN_VALUE_RACE:
+        {
+            if (lrFlag != ROWOW_LR_FLAG_NONE && lrFlag != ROWOW_LR_FLAG_WEAPON)
+                break;
+            ROWOWWeaponBonus& handBonus = lrFlag == ROWOW_LR_FLAG_WEAPON ? bonus.LeftWeapon : bonus.RightWeapon;
+            switch (typeIter->second)
+            {
+                case BONUS2_HP_DRAIN_RATE: handBonus.HPDrainRate += int32(type2); handBonus.HPDrainPer += int32(val); break;
+                case BONUS2_SP_DRAIN_RATE: handBonus.SPDrainRate += int32(type2); handBonus.SPDrainPer += int32(val); break;
+                case BONUS_HP_DRAIN_VALUE: handBonus.HPDrainClass[ROWOW_CLASS_NORMAL] += int32(val); handBonus.HPDrainClass[ROWOW_CLASS_BOSS] += int32(val); break;
+                case BONUS_SP_DRAIN_VALUE: handBonus.SPDrainClass[ROWOW_CLASS_NORMAL] += int32(val); handBonus.SPDrainClass[ROWOW_CLASS_BOSS] += int32(val); break;
+                case BONUS2_HP_DRAIN_VALUE_RACE: if (IsBonusIndexValid(type2, ROWOW_RACE_MAX) == true) handBonus.HPDrainRace[type2] += int32(val); break;
+                default: if (IsBonusIndexValid(type2, ROWOW_RACE_MAX) == true) handBonus.SPDrainRace[type2] += int32(val); break;
+            }
+            break;
+        }
         case BONUS2_ADD_DAMAGE_CLASS:
         {
             // pc_bonus_itembonus: the same monster's rates add up
@@ -1442,6 +1470,16 @@ void ROWOWMod::RunItemScript(Player* player, ROWOWScript const* script, Item con
     ROWOWSCRIPT->Run(*script, context, true);
 }
 
+// The target's reduction against the attacker's race groups (indexed_bonus.subrace2 over status_get_race2 of the source)
+static int32 SubRace2Fix(ROWOWBonus const& bonus, ROWOWStatus const* sstatus)
+{
+    int32 raceFix = 0;
+    for (uint8 race2 = 1; race2 < ROWOW_RACE2_MAX; race2++)
+        if ((sstatus->Race2Mask & (1u << race2)) != 0)
+            raceFix += bonus.SubRace2[race2];
+    return raceFix;
+}
+
 int64 ROWOWMod::BattleCalcCardFix(int32 attackType, Unit* src, Unit* target, std::bitset<ROWOW_NK_MAX> nk, uint16 skillID, int32 rhEle, int32 lhEle, int64 damage,
     int32 left, int32 flag) const
 {
@@ -1491,6 +1529,7 @@ int64 ROWOWMod::BattleCalcCardFix(int32 attackType, Unit* src, Unit* target, std
                 if (nk[ROWOW_NK_IGNOREELEMENT] == false) // Affected by Element modifier bonuses
                     cardfix = cardfix * (100 - bonus.SubEle[rhEle] - bonus.SubEle[ROWOW_ELEMENT_ALL]) / 100;
                 cardfix = cardfix * (100 - bonus.SubSize[sstatus->Size] - bonus.SubSize[ROWOW_SIZE_ALL]) / 100;
+                cardfix = cardfix * (100 - SubRace2Fix(bonus, sstatus)) / 100;
                 cardfix = cardfix * (100 - bonus.SubRace[sstatus->Race] - bonus.SubRace[ROWOW_RACE_ALL]) / 100;
                 cardfix = cardfix * (100 - bonus.SubClass[sstatus->Class] - bonus.SubClass[ROWOW_CLASS_ALL]) / 100;
                 int32 addMagicDefense = GetDeferredBonus2(target, "bAddMDefMonster", sourceMobID);
@@ -1528,16 +1567,24 @@ int64 ROWOWMod::BattleCalcCardFix(int32 attackType, Unit* src, Unit* target, std
                     }
                     cardfix = cardfix * (100 + bonus.RightWeapon.AddSize[tstatus->Size] + bonus.ArrowAddSize[tstatus->Size] + bonus.RightWeapon.AddSize[ROWOW_SIZE_ALL]
                         + bonus.ArrowAddSize[ROWOW_SIZE_ALL]) / 100;
+                    int32 raceFix = 0;
+                    for (uint8 race2 = 1; race2 < ROWOW_RACE2_MAX; race2++)
+                        if ((tstatus->Race2Mask & (1u << race2)) != 0)
+                            raceFix += bonus.RightWeapon.AddRace2[race2];
+                    cardfix = cardfix * (100 + raceFix) / 100;
                     cardfix = cardfix * (100 + bonus.RightWeapon.AddClass[tstatus->Class] + bonus.ArrowAddClass[tstatus->Class] + bonus.RightWeapon.AddClass[ROWOW_CLASS_ALL]
                         + bonus.ArrowAddClass[ROWOW_CLASS_ALL]) / 100;
                 }
-                else
+                else if (BattleConfig.LeftCardfixToRight == false)
                 {
-                    // Melee attack: each hand's bonuses on their own (left_cardfix_to_right is off)
+                    // Melee attack: calculates each right & left hand weapon bonuses separatedly
                     cardfix = cardfix * (100 + bonus.RightWeapon.AddRace[tstatus->Race] + bonus.RightWeapon.AddRace[ROWOW_RACE_ALL]) / 100;
                     if (nk[ROWOW_NK_IGNOREELEMENT] == false)
                         cardfix = cardfix * (100 + bonus.RightWeapon.AddEle[tstatus->DefElement] + bonus.RightWeapon.AddEle[ROWOW_ELEMENT_ALL]) / 100;
                     cardfix = cardfix * (100 + bonus.RightWeapon.AddSize[tstatus->Size] + bonus.RightWeapon.AddSize[ROWOW_SIZE_ALL]) / 100;
+                    for (uint8 race2 = 1; race2 < ROWOW_RACE2_MAX; race2++)
+                        if ((tstatus->Race2Mask & (1u << race2)) != 0)
+                            cardfix = cardfix * (100 + bonus.RightWeapon.AddRace2[race2]) / 100;
                     cardfix = cardfix * (100 + bonus.RightWeapon.AddClass[tstatus->Class] + bonus.RightWeapon.AddClass[ROWOW_CLASS_ALL]) / 100;
                     if ((left & 1) != 0)
                     {
@@ -1546,8 +1593,31 @@ int64 ROWOWMod::BattleCalcCardFix(int32 attackType, Unit* src, Unit* target, std
                         if (nk[ROWOW_NK_IGNOREELEMENT] == false)
                             cardfixLeft = cardfixLeft * (100 + bonus.LeftWeapon.AddEle[tstatus->DefElement] + bonus.LeftWeapon.AddEle[ROWOW_ELEMENT_ALL]) / 100;
                         cardfixLeft = cardfixLeft * (100 + bonus.LeftWeapon.AddSize[tstatus->Size] + bonus.LeftWeapon.AddSize[ROWOW_SIZE_ALL]) / 100;
+                        for (uint8 race2 = 1; race2 < ROWOW_RACE2_MAX; race2++)
+                            if ((tstatus->Race2Mask & (1u << race2)) != 0)
+                                cardfixLeft = cardfixLeft * (100 + bonus.LeftWeapon.AddRace2[race2]) / 100;
                         cardfixLeft = cardfixLeft * (100 + bonus.LeftWeapon.AddClass[tstatus->Class] + bonus.LeftWeapon.AddClass[ROWOW_CLASS_ALL]) / 100;
                     }
+                }
+                else
+                {
+                    // Melee attack: calculates right & left hand weapon as unity (left_cardfix_to_right, conf/battle/player.conf's yes): the left hand
+                    // gets no card bonus of its own
+                    int32 eleFix = bonus.RightWeapon.AddEle[tstatus->DefElement] + bonus.LeftWeapon.AddEle[tstatus->DefElement] + bonus.RightWeapon.AddEle[ROWOW_ELEMENT_ALL]
+                        + bonus.LeftWeapon.AddEle[ROWOW_ELEMENT_ALL];
+                    cardfix = cardfix * (100 + eleFix) / 100;
+                    cardfix = cardfix * (100 + bonus.RightWeapon.AddRace[tstatus->Race] + bonus.LeftWeapon.AddRace[tstatus->Race] + bonus.RightWeapon.AddRace[ROWOW_RACE_ALL]
+                        + bonus.LeftWeapon.AddRace[ROWOW_RACE_ALL]) / 100;
+                    cardfix = cardfix * (100 + bonus.RightWeapon.AddSize[tstatus->Size] + bonus.LeftWeapon.AddSize[tstatus->Size] + bonus.RightWeapon.AddSize[ROWOW_SIZE_ALL]
+                        + bonus.LeftWeapon.AddSize[ROWOW_SIZE_ALL]) / 100;
+                    for (uint8 race2 = 1; race2 < ROWOW_RACE2_MAX; race2++)
+                        if ((tstatus->Race2Mask & (1u << race2)) != 0)
+                            cardfix = cardfix * (100 + bonus.RightWeapon.AddRace2[race2] + bonus.LeftWeapon.AddRace2[race2]) / 100;
+                    cardfix = cardfix * (100 + bonus.RightWeapon.AddClass[tstatus->Class] + bonus.LeftWeapon.AddClass[tstatus->Class] + bonus.RightWeapon.AddClass[ROWOW_CLASS_ALL]
+                        + bonus.LeftWeapon.AddClass[ROWOW_CLASS_ALL]) / 100;
+                }
+                if (IsSkillUsingArrow(src, skillID) == false)
+                {
                     // Adv. Katar Mastery functions similar to a +%ATK card on official [helvetica]
                     int32 skill = PCCheckSkill(src, ROWOW_SKILL_ASC_KATAR);
                     if (sstatus->WeaponType == ROWOW_WEAPON_TYPE_KATAR && skill > 0)
@@ -1590,6 +1660,7 @@ int64 ROWOWMod::BattleCalcCardFix(int32 attackType, Unit* src, Unit* target, std
                         cardfix = cardfix * (100 - bonus.SubEle[lhEle] - bonus.SubEle[ROWOW_ELEMENT_ALL]) / 100;
                 }
                 cardfix = cardfix * (100 - bonus.SubSize[sstatus->Size] - bonus.SubSize[ROWOW_SIZE_ALL]) / 100;
+                cardfix = cardfix * (100 - SubRace2Fix(bonus, sstatus)) / 100;
                 cardfix = cardfix * (100 - bonus.SubRace[sstatus->Race] - bonus.SubRace[ROWOW_RACE_ALL]) / 100;
                 cardfix = cardfix * (100 - bonus.SubClass[sstatus->Class] - bonus.SubClass[ROWOW_CLASS_ALL]) / 100;
                 for (auto const& addDef : bonus.AddDefMonster)
@@ -1618,6 +1689,7 @@ int64 ROWOWMod::BattleCalcCardFix(int32 attackType, Unit* src, Unit* target, std
                     cardfix = cardfix * (100 - bonus.SubEle[rhEle] - bonus.SubEle[ROWOW_ELEMENT_ALL]) / 100;
                 cardfix = cardfix * (100 - bonus.SubRace[sstatus->Race] - bonus.SubRace[ROWOW_RACE_ALL]) / 100;
                 cardfix = cardfix * (100 - bonus.SubSize[sstatus->Size] - bonus.SubSize[ROWOW_SIZE_ALL]) / 100;
+                cardfix = cardfix * (100 - SubRace2Fix(bonus, sstatus)) / 100;
                 cardfix = cardfix * (100 - bonus.SubClass[sstatus->Class] - bonus.SubClass[ROWOW_CLASS_ALL]) / 100;
                 cardfix = cardfix * (100 - bonus.MiscDefRate) / 100;
                 if ((flag & ROWOW_BF_SHORT) != 0)

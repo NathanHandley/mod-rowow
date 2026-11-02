@@ -32,16 +32,20 @@ using namespace std;
 
 namespace
 {
+    // Whether a deferred bonus is of a type (any case) and has a value
+    bool IsDeferredBonusType(ROWOWDeferredBonus const& deferred, char const* type)
+    {
+        if (deferred.Values.empty() == true || deferred.Type.size() != strlen(type))
+            return false;
+        return std::equal(deferred.Type.begin(), deferred.Type.end(), type, [](char a, char b) { return tolower((unsigned char)a) == tolower((unsigned char)b); });
+    }
+
     int32 GetDeferredBonusSum(ROWOWBonus const& bonus, char const* type)
     {
         int32 total = 0;
         for (ROWOWDeferredBonus const& deferred : bonus.Deferred)
-        {
-            if (deferred.Values.empty() == true || deferred.Type.size() != strlen(type))
-                continue;
-            if (std::equal(deferred.Type.begin(), deferred.Type.end(), type, [](char a, char b) { return tolower((unsigned char)a) == tolower((unsigned char)b); }) == true)
+            if (IsDeferredBonusType(deferred, type) == true)
                 total += int32(deferred.Values.back());
-        }
         return total;
     }
 
@@ -532,20 +536,30 @@ namespace
     // status_calc_speed: the walk speed (ms per cell), from the statuses that slow and speed it, riding a Peco, and casting with Free Cast
     int32 StatusCalcSpeed(Unit const* bl, ROWOWStatusChange const* sc, ROWOWBonus const& bonus, int32 speed)
     {
-        // A player riding a Peco is hastened with no statuses too: its statuses are then none rather than missing
+        // A player riding a Peco, or with gear that hastens or slows, is hastened with no statuses too: its statuses are then none rather than
+        // missing (a player's sc is never null in rAthena)
         static ROWOWStatusChange const NoStatusChange;
         bool isPlayer = bl->IsPlayer();
         bool isRiding = isPlayer == true && ROWOW->PCIsRiding(bl) == true;
         ROWOWSkillUnitData const* ud = isPlayer == true ? bl->CustomData.Get<ROWOWSkillUnitData>("ROWOWSkillUnitData") : nullptr;
         int32 freeCast = (ud != nullptr && ud->IsSkillTimer == true) ? ROWOW->PCCheckSkill(bl, ROWOW_SKILL_SA_FREECAST) : 0;
         int32 speedRate = 100;
+        // bonus.speed_rate + bonus.speed_add_rate: bSpeedRate is the best one only (speed_rate = min(speed_rate, -val)), bSpeedAddRate stacks
+        // (speed_add_rate -= val), so a speedup is negative
+        int32 itemSpeedRate = 0;
+        if (isPlayer == true)
+        {
+            for (ROWOWDeferredBonus const& deferred : bonus.Deferred)
+                if (deferred.LRFlag != ROWOW_LR_FLAG_ARROW && IsDeferredBonusType(deferred, "bSpeedRate") == true)
+                    itemSpeedRate = std::min(itemSpeedRate, -int32(deferred.Values.back()));
+            itemSpeedRate -= GetDeferredBonusSum(bonus, "bSpeedAddRate");
+        }
         if (sc == nullptr)
         {
-            if (isRiding == false && freeCast == 0)
+            if (isRiding == false && freeCast == 0 && itemSpeedRate == 0)
                 return std::clamp(speed, ROWOW_MIN_WALK_SPEED, ROWOW_MAX_WALK_SPEED);
             sc = &NoStatusChange;
         }
-        int32 itemSpeedRate = isPlayer == true ? GetDeferredBonusSum(bonus, "bSpeedRate") + GetDeferredBonusSum(bonus, "bSpeedAddRate") : 0;
 
         // A Sage casting with Free Cast walks at its own rate, in place of every haste and slowness
         if (freeCast > 0)

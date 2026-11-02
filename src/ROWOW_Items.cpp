@@ -266,6 +266,8 @@ void ROWOWMod::LoadItemScriptData()
     static char const* const RaceNames[] = { "Formless", "Undead", "Brute", "Plant", "Insect", "Fish", "Demon", "DemiHuman", "Angel", "Dragon", "Player_Human", "Player_Doram" };
     for (int64 race = 0; race < int64(std::size(RaceNames)); race++)
         ROWOWSCRIPT->RegisterConstant(std::string("RC_") + RaceNames[race], race);
+    for (int64 race2 = 1; race2 < ROWOW_RACE2_MAX; race2++)
+        ROWOWSCRIPT->RegisterConstant(std::string("RC2_") + Race2Names[race2], race2);
     for (auto const& jobByID : JobsByID)
         ROWOWSCRIPT->RegisterConstant("Job_" + jobByID.second.Name, jobByID.first);
 

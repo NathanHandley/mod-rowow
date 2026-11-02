@@ -188,7 +188,9 @@ void ROWOWMod::LoadStatusData()
                 valueOut = ParseBattleConfigValue(valueIter->second);
         };
         int32 multiLevelUp = BattleConfig.MultiLevelUp == true ? 1 : 0;
+        int32 leftCardfixToRight = BattleConfig.LeftCardfixToRight == true ? 1 : 0;
         int32 maxAspd = 190;
+        readValue("left_cardfix_to_right", leftCardfixToRight);
         readValue("base_exp_rate", BattleConfig.BaseExpRate);
         readValue("job_exp_rate", BattleConfig.JobExpRate);
         readValue("multi_level_up", multiLevelUp);
@@ -456,6 +458,7 @@ void ROWOWMod::LoadStatusData()
         readValue("backstab_bow_penalty", BattleConfig.BackstabBowPenalty);
         readValue("switch_remove_edp", BattleConfig.SwitchRemoveEdp);
         BattleConfig.MultiLevelUp = multiLevelUp != 0;
+        BattleConfig.LeftCardfixToRight = leftCardfixToRight != 0;
         BattleConfig.MaxAspdAmotion = (2000 - maxAspd * 10) * 2; // As battle.cpp converts it after loading
     }
     else
@@ -925,7 +928,8 @@ void ROWOWMod::CalculateIdentityStatus(Player* player, ROWOWIdentity& identity) 
     if ((skill = PCCheckSkill(identity, ROWOW_SKILL_SA_DRAGONOLOGY)) > 0)
     {
         bonus.RightWeapon.AddRace[ROWOW_RACE_DRAGON] += skill * 4;
-        bonus.LeftWeapon.AddRace[ROWOW_RACE_DRAGON] += skill * 4; // left_cardfix_to_right is off
+        if (BattleConfig.LeftCardfixToRight == false)
+            bonus.LeftWeapon.AddRace[ROWOW_RACE_DRAGON] += skill * 4;
         bonus.SubRace[ROWOW_RACE_DRAGON] += skill * 4;
         bonus.Deferred.push_back({ "bMagicAddRace", { ROWOW_RACE_DRAGON, skill * 2 } }); // magic_addrace, for magic (R6)
     }

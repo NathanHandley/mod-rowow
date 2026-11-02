@@ -383,6 +383,10 @@ struct ROWOWDataTable
 #define ROWOW_CLASS_GUARDIAN                        2
 #define ROWOW_CLASS_BATTLEFIELD                     3
 #define ROWOW_CLASS_EVENT                           4
+// The race groups (rAthena's e_race2, mob_db's RaceGroups) up to the last pre-renewal monsters use; RC2_NONE is 0
+#define ROWOW_RACE2_MAX                             14
+inline constexpr char const* Race2Names[ROWOW_RACE2_MAX] = { "None", "Goblin", "Kobold", "Orc", "Golem", "Guardian", "Ninja", "Gvg", "Battlefield",
+    "Treasure", "Biolab", "Manuk", "Splendide", "Scaraba" };
 
 // The "all" entries of the bonus tables, and the tables' sizes (RC_ALL/RC_MAX, ELE_ALL/ELE_MAX, SZ_ALL/SZ_MAX, CLASS_ALL/CLASS_MAX)
 #define ROWOW_RACE_ALL                              12
@@ -699,6 +703,7 @@ struct ROWOWBattleConfig
     int32 SkillMinDamage = 0;
     int32 ArrowDecrement = 1;
     int32 AmmoCheckWeapon = 1;
+    bool LeftCardfixToRight = false; // left_cardfix_to_right: a left-hand weapon's card bonuses count for the right hand, not its own (the conf's yes)
     int32 MonsterHPRate = 100;
     int32 MvpHPRate = 100;
     int32 MonsterDamageDelayRate = 100;
@@ -935,6 +940,15 @@ struct ROWOWWeaponBonus
     int32 AddEle[ROWOW_ELEMENT_MAX] = { };
     int32 AddSize[ROWOW_SIZE_MAX] = { };
     int32 AddClass[ROWOW_CLASS_MAX] = { };
+    int32 AddRace2[ROWOW_RACE2_MAX] = { }; // addrace2: percent more damage to a race group
+    int32 HPDrainRate = 0; // hp_drain_rate (bHPDrainRate): the chance in tenths of a percent (over 1000 always) ...
+    int32 HPDrainPer = 0; // ... and the percent of the damage the attacker heals
+    int32 SPDrainRate = 0; // sp_drain_rate (bSPDrainRate), the same for SP
+    int32 SPDrainPer = 0;
+    int32 HPDrainClass[ROWOW_CLASS_MAX] = { }; // hp_drain_class: HP per hit on a monster class (bHPDrainValue gives normal and boss)
+    int32 SPDrainClass[ROWOW_CLASS_MAX] = { }; // sp_drain_class (bSPDrainValue): negative takes SP away
+    int32 HPDrainRace[ROWOW_RACE_MAX] = { }; // hp_drain_race (bHPDrainValueRace)
+    int32 SPDrainRace[ROWOW_RACE_MAX] = { }; // sp_drain_race (bSPDrainValueRace)
     uint32 IgnoreDefEle = 0; // Bit masks (of elements, races, classes) whose DEF it ignores
     uint32 IgnoreDefRace = 0;
     uint32 IgnoreDefClass = 0;
@@ -970,6 +984,7 @@ struct ROWOWBonus
     int32 SubRace[ROWOW_RACE_MAX] = { };
     int32 SubSize[ROWOW_SIZE_MAX] = { };
     int32 SubClass[ROWOW_CLASS_MAX] = { };
+    int32 SubRace2[ROWOW_RACE2_MAX] = { }; // subrace2: percent less damage from a race group
     int32 CriticalAddRace[ROWOW_RACE_MAX] = { }; // In tenths
     int32 IgnoreDefByRace[ROWOW_RACE_MAX] = { }; // Percent of the target's DEF ignored
     int32 IgnoreDefByClass[ROWOW_CLASS_MAX] = { };
@@ -1061,6 +1076,7 @@ struct ROWOWStatus
     int32 ArrowElement = ROWOW_ELEMENT_NEUTRAL; // bonus.arrow_ele, the ammo's element on a weapon that isn't a bow or gun (neutral for none)
     uint8 AmmoType = ROWOW_AMMO_TYPE_NONE; // The worn ammo's type
     uint8 Race = ROWOW_RACE_PLAYER_HUMAN;
+    uint32 Race2Mask = 0; // A monster's race groups as bits (1 << RC2_*: mob_db RaceGroups, status_get_race2); none for a player
     uint8 Size = ROWOW_SIZE_MEDIUM;
     uint8 DefElement = ROWOW_ELEMENT_NEUTRAL; // def_ele
     uint8 ElementLevel = 1; // ele_lv
@@ -3259,6 +3275,7 @@ private:
     bool BattleStatusBlockDamage(Unit* src, Unit* target, ROWOWStatusChange* sc, ROWOWDamage& d, int64& damage, uint16 skillID, uint16 skillLevel); // battle_status_block_damage
     void BattleCalcWeaponFinalAtkModifiers(ROWOWDamage& wd, Unit* src, Unit* target, uint16 skillID, uint16 skillLevel); // battle_calc_weapon_final_atk_modifiers
     int64 BattleCalcReturnDamage(Unit* tbl, Unit* src, int64 damage, int32 flag, uint16 skillID, bool isStatusReflect) const; // battle_calc_return_damage
+    void BattleDrain(Player* sd, Unit* tbl, int64 rdamage, int64 ldamage, int32 race, int32 class_); // battle_drain
     void BattleDoReflect(int32 attackType, ROWOWDamage& wd, Unit* src, Unit* target, uint16 skillID, uint16 skillLevel); // battle_do_reflect
     int32 BattleGetAtkPercent(Unit const* bl, uint16 skillID, ROWOWStatusChange const& sc) const; // battle_get_atkpercent
     void BattleAttackSCBonus(ROWOWDamage& wd, Unit* src, Unit* target, uint16 skillID, uint16 skillLevel) const; // battle_attack_sc_bonus

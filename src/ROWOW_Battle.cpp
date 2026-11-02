@@ -184,6 +184,7 @@ void ROWOWMod::LoadBattleData()
     int32 attackRangeColumnIndex = mobTable->GetColumnIndex("AttackRange");
     int32 sizeColumnIndex = mobTable->GetColumnIndex("Size");
     int32 raceColumnIndex = mobTable->GetColumnIndex("Race");
+    int32 raceGroupsColumnIndex = mobTable->GetColumnIndex("RaceGroups");
     int32 elementColumnIndex = mobTable->GetColumnIndex("Element");
     int32 elementLevelColumnIndex = mobTable->GetColumnIndex("ElementLevel");
     int32 attackDelayColumnIndex = mobTable->GetColumnIndex("AttackDelay");
@@ -214,6 +215,18 @@ void ROWOWMod::LoadBattleData()
         status.Range3 = int32(mobTable->GetInt(rowIndex, mobTable->GetColumnIndex("ChaseRange"), 0));
         status.Size = uint8(std::max(0, GetNameIndex(SizeNames, ROWOW_SIZE_COUNT, mobTable->GetCell(rowIndex, sizeColumnIndex))));
         status.Race = uint8(std::max(0, GetNameIndex(RaceNames, std::size(RaceNames), mobTable->GetCell(rowIndex, raceColumnIndex))));
+        // RaceGroups: "Orc=true", a list joined by commas
+        std::string const raceGroups = mobTable->GetCell(rowIndex, raceGroupsColumnIndex);
+        for (size_t start = 0; start < raceGroups.size();)
+        {
+            size_t end = raceGroups.find(',', start);
+            std::string const entry = raceGroups.substr(start, end == std::string::npos ? std::string::npos : end - start);
+            size_t equals = entry.find('=');
+            int32 race2 = GetNameIndex(Race2Names, ROWOW_RACE2_MAX, entry.substr(0, equals));
+            if (race2 > 0 && (equals == std::string::npos || entry.substr(equals + 1) != "false"))
+                status.Race2Mask |= 1u << race2;
+            start = end == std::string::npos ? raceGroups.size() : end + 1;
+        }
         status.DefElement = uint8(std::max(0, GetElementByName(mobTable->GetCell(rowIndex, elementColumnIndex))));
         status.ElementLevel = uint8(std::clamp<int64>(mobTable->GetInt(rowIndex, elementLevelColumnIndex, 1), 1, ROWOW_ELEMENT_LEVEL_MAX));
         status.Class = uint8(std::max(0, GetNameIndex(ClassNames, std::size(ClassNames), mobTable->GetCell(rowIndex, classColumnIndex))));
@@ -656,6 +669,10 @@ uint8 ROWOWMod::BattleWeaponAttack(Unit* src, Unit* target, ROWOWDamage& wdOut)
     // Consume arrow
     if (ammoItem != nullptr)
         BattleConsumeAmmo(sd, 0, 0);
+
+    // The drain bonuses on the hit (battle_drain, with the swing's damage as calculated: a Devotion that takes it doesn't change it)
+    if (int64 damage = wdOut.Damage + wdOut.Damage2; sd != nullptr && (wdOut.Flag & ROWOW_BF_WEAPON) != 0 && src != target && damage > 0)
+        BattleDrain(sd, target, wdOut.Damage, BattleConfig.LeftCardfixToRight == true ? wdOut.Damage : wdOut.Damage2, tstatus->Race, tstatus->Class);
 
     // Devotion: while the link holds, the devoted target's Crusader takes the hit and the target none (battle_delay_damage's part: as
     // ATK_BLOCK, which keeps it from stopping a cast or triggering autospells).  A broken link ends the status
@@ -1784,16 +1801,30 @@ bool ROWOWMod::AttackIgnoresDef(ROWOWDamage& wd, Unit* src, Unit const* target, 
     if (ROWOWStatusChange const* sc = GetStatusChange(static_cast<Unit const*>(src)); sc != nullptr && sc->HasSCE(ROWOW_SC_FUSION) == true)
         return true;
 
-    // Ignore Defense?  (Each hand's own bonuses: left_cardfix_to_right is off)
+    // Ignore Defense?
     ROWOWStatus const* sstatus = GetROStatus(src);
     ROWOWStatus const* tstatus = GetROStatus(target);
     if (src->IsPlayer() == true && skillID != ROWOW_SKILL_CR_GRANDCROSS && skillID != ROWOW_SKILL_NPC_GRANDDARKNESS)
     {
-        ROWOWWeaponBonus const& weaponBonus = isRightHand == true ? sstatus->Bonus.RightWeapon : sstatus->Bonus.LeftWeapon;
-        if ((weaponBonus.IgnoreDefEle & (1 << tstatus->DefElement)) != 0 || (weaponBonus.IgnoreDefEle & (1 << ROWOW_ELEMENT_ALL)) != 0
-            || (weaponBonus.IgnoreDefRace & (1 << tstatus->Race)) != 0 || (weaponBonus.IgnoreDefRace & (1 << ROWOW_RACE_ALL)) != 0
-            || (weaponBonus.IgnoreDefClass & (1 << tstatus->Class)) != 0 || (weaponBonus.IgnoreDefClass & (1 << ROWOW_CLASS_ALL)) != 0)
+        auto ignoresDef = [tstatus](ROWOWWeaponBonus const& weaponBonus)
+        {
+            return (weaponBonus.IgnoreDefEle & (1 << tstatus->DefElement)) != 0 || (weaponBonus.IgnoreDefEle & (1 << ROWOW_ELEMENT_ALL)) != 0
+                || (weaponBonus.IgnoreDefRace & (1 << tstatus->Race)) != 0 || (weaponBonus.IgnoreDefRace & (1 << ROWOW_RACE_ALL)) != 0
+                || (weaponBonus.IgnoreDefClass & (1 << tstatus->Class)) != 0 || (weaponBonus.IgnoreDefClass & (1 << ROWOW_CLASS_ALL)) != 0;
+        };
+        if (ignoresDef(sstatus->Bonus.RightWeapon) == true && isRightHand == true)
             return true;
+        if (ignoresDef(sstatus->Bonus.LeftWeapon) == true)
+        {
+            // Move effect to right hand. [Skotlex]
+            if (BattleConfig.LeftCardfixToRight == true && IsAttackRightHanded(src, skillID) == true)
+            {
+                if (isRightHand == true)
+                    return true;
+            }
+            else if (isRightHand == false)
+                return true;
+        }
     }
     return BattleSkillGetDamageProperties(skillID, wd.MiscFlag)[ROWOW_NK_IGNOREDEFENSE] == true;
 }
@@ -1808,12 +1839,26 @@ int32 ROWOWMod::IsAttackPiercing(ROWOWDamage& wd, Unit* src, Unit const* target,
         return 0;
     ROWOWStatus const* sstatus = GetROStatus(src);
     ROWOWStatus const* tstatus = GetROStatus(target);
-    ROWOWWeaponBonus const& weaponBonus = isRightHand == true ? sstatus->Bonus.RightWeapon : sstatus->Bonus.LeftWeapon;
     // Elemental/Racial adjustments
-    if ((weaponBonus.DefRatioAtkEle & (1 << tstatus->DefElement)) != 0 || (weaponBonus.DefRatioAtkEle & (1 << ROWOW_ELEMENT_ALL)) != 0
-        || (weaponBonus.DefRatioAtkRace & (1 << tstatus->Race)) != 0 || (weaponBonus.DefRatioAtkRace & (1 << ROWOW_RACE_ALL)) != 0
-        || (weaponBonus.DefRatioAtkClass & (1 << tstatus->Class)) != 0 || (weaponBonus.DefRatioAtkClass & (1 << ROWOW_CLASS_ALL)) != 0)
+    auto isDefRatio = [tstatus](ROWOWWeaponBonus const& weaponBonus)
+    {
+        return (weaponBonus.DefRatioAtkEle & (1 << tstatus->DefElement)) != 0 || (weaponBonus.DefRatioAtkEle & (1 << ROWOW_ELEMENT_ALL)) != 0
+            || (weaponBonus.DefRatioAtkRace & (1 << tstatus->Race)) != 0 || (weaponBonus.DefRatioAtkRace & (1 << ROWOW_RACE_ALL)) != 0
+            || (weaponBonus.DefRatioAtkClass & (1 << tstatus->Class)) != 0 || (weaponBonus.DefRatioAtkClass & (1 << ROWOW_CLASS_ALL)) != 0;
+    };
+    if (isDefRatio(sstatus->Bonus.RightWeapon) == true && isRightHand == true)
         return 1;
+    if (isDefRatio(sstatus->Bonus.LeftWeapon) == true)
+    {
+        // Pass effect onto right hand if configured so. [Skotlex]
+        if (BattleConfig.LeftCardfixToRight == true && IsAttackRightHanded(src, skillID) == true)
+        {
+            if (isRightHand == true)
+                return 1;
+        }
+        else if (isRightHand == false)
+            return 1;
+    }
     return 0;
 }
 
@@ -3044,6 +3089,58 @@ void ROWOWMod::BattleCalcWeaponFinalAtkModifiers(ROWOWDamage& wd, Unit* src, Uni
         ROWOWDamage md = BattleCalcMiscAttack(src, target, skillID, skillLevel, wd.MiscFlag);
         wd.Damage += md.Damage;
     }
+}
+
+void ROWOWMod::BattleDrain(Player* sd, Unit* /*tbl*/, int64 rdamage, int64 ldamage, int32 race, int32 class_)
+{
+    // battle_drain: the attacker's HP and SP from its hands' drain bonuses on a hit it dealt (each hand's damage, rdamage twice with
+    // left_cardfix_to_right): the class and race values always, the rates by chance.  Healed quietly (show_hp_sp_drain: no)
+    if (race < 0 || race >= ROWOW_RACE_MAX || class_ < 0 || class_ >= ROWOW_CLASS_MAX)
+        return;
+    ROWOWStatus const* sstatus = GetROStatus(sd);
+    if (sstatus == nullptr)
+        return;
+    // battle_calc_drain: per percent of the damage at rate tenths of a percent (always over 1000), at least 1 either way
+    auto calcDrain = [](int64 damage, int32 rate, int32 per)
+    {
+        int64 diff = 0;
+        if (per != 0 && (rate > 1000 || int32(urand(0, 999)) < rate))
+        {
+            diff = (damage * per) / 100;
+            if (diff == 0)
+                diff = per > 0 ? 1 : -1;
+        }
+        return int32(std::clamp<int64>(diff, INT_MIN, INT_MAX));
+    };
+    int32 thp = 0; // HP gained
+    int32 tsp = 0; // SP gained
+    for (int32 i = 0; i < 4; i++)
+    {
+        // First two iterations: Right hand
+        ROWOWWeaponBonus const& wd = i < 2 ? sstatus->Bonus.RightWeapon : sstatus->Bonus.LeftWeapon;
+        int64 damage = i < 2 ? rdamage : ldamage;
+        if (damage <= 0)
+            continue;
+        if (i == 1 || i == 3)
+        {
+            thp += wd.HPDrainClass[class_] + wd.HPDrainClass[ROWOW_CLASS_ALL] + calcDrain(damage, wd.HPDrainRate, wd.HPDrainPer);
+            tsp += wd.SPDrainClass[class_] + wd.SPDrainClass[ROWOW_CLASS_ALL] + calcDrain(damage, wd.SPDrainRate, wd.SPDrainPer);
+        }
+        else
+        {
+            thp += wd.HPDrainRace[race] + wd.HPDrainRace[ROWOW_RACE_ALL];
+            tsp += wd.SPDrainRace[race] + wd.SPDrainRace[ROWOW_RACE_ALL];
+        }
+    }
+    if (thp == 0 && tsp == 0)
+        return;
+    // status_heal with flag 1 (shown only with show_hp_sp_drain): a negative part is taken (status_damage), as Zipper Bear's SP per hit
+    if (thp > 0 && sd->IsAlive() == true)
+        sd->ModifyHealth(int32(std::min<int64>(thp, int64(sd->GetMaxHealth() - sd->GetHealth()))));
+    if (tsp > 0)
+        StatusHeal(sd, 0, tsp, 1, sd, 0);
+    if (thp < 0 || tsp < 0)
+        StatusZap(sd, uint32(std::max(0, -thp)), uint32(std::max(0, -tsp)));
 }
 
 int64 ROWOWMod::BattleCalcReturnDamage(Unit* tbl, Unit* src, int64 damage, int32 flag, uint16 skillID, bool isStatusReflect) const

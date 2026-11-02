@@ -792,6 +792,7 @@ public:
             { "song",     HandleROSongCommand,   SEC_GAMEMASTER, Console::No },
             { "scend",    HandleROStatusChangeEndCommand, SEC_GAMEMASTER, Console::No },
             { "scrate",   HandleROStatusChangeRateCommand, SEC_GAMEMASTER, Console::No },
+            { "sclist",   HandleROStatusChangeListCommand, SEC_GAMEMASTER, Console::No },
             { "striprate", HandleROStripRateCommand, SEC_GAMEMASTER, Console::No },
             { "identity", identityCommandTable },
             { "npc",      npcCommandTable },
@@ -2802,10 +2803,12 @@ public:
         return true;
     }
 
-    static bool HandleROEquipCommand(ChatHandler* handler, uint32 itemID, Optional<uint32> amount)
+    static bool HandleROEquipCommand(ChatHandler* handler, uint32 itemID, Optional<uint32> amount, Optional<uint32> refine, Optional<uint32> card1,
+        Optional<uint32> card2, Optional<uint32> card3, Optional<uint32> card4, Optional<uint32> position)
     {
         // For testing until the RO equipment window (R4): gives an RO item (item_db Id) and wears it in its RO equipment positions, taking
-        // off whatever is worn there.  Ammo comes as a stack (100 unless told)
+        // off whatever is worn there.  Ammo comes as a stack (100 unless told, 0 is the default).  The rest is the oracle's @oracleequip
+        // (R12 matrix): the refine, four cards by item_db Id, and the equipment positions to wear it in (32 a left-hand weapon)
         Player* player = handler->getSelectedPlayerOrSelf();
         if (player == nullptr || ROWOW->GetIdentity(player)->Exists == false)
         {
@@ -2820,7 +2823,12 @@ public:
             return false;
         }
         ROWOWItem const& roItem = itemIter->second;
-        uint32 count = amount.value_or(roItem.IsAmmo == true ? 100 : 1);
+        uint32 count = amount.value_or(0) != 0 ? *amount : (roItem.IsAmmo == true ? 100 : 1);
+        if (refine.value_or(0) > ROWOW_MAX_REFINE)
+        {
+            handler->SendSysMessage("A refine level past 10.");
+            return false;
+        }
         ItemPosCountVec itemDestination;
         if (count == 0 || player->CanStoreNewItem(NULL_BAG, NULL_SLOT, itemDestination, roItem.ItemTemplateID, count) != EQUIP_ERR_OK)
         {
@@ -2831,10 +2839,16 @@ public:
         if (item == nullptr)
             return false;
         player->SendNewItem(item, count, true, false);
+        if (refine.value_or(0) != 0)
+            ROWOWMod::SetItemState(player, item, *refine, false, true);
+        uint32 const cards[ROWOW_MAX_SLOTS] = { card1.value_or(0), card2.value_or(0), card3.value_or(0), card4.value_or(0) };
+        for (uint8 slot = 0; slot < ROWOW_MAX_SLOTS; slot++)
+            if (cards[slot] != 0)
+                ROWOW->SetItemCard(player, item, slot, cards[slot]);
 
         // Both accessory positions take the free one, or the left
         ROWOWIdentity* identity = ROWOW->GetIdentity(player);
-        uint32 equipPosition = roItem.Locations;
+        uint32 equipPosition = position.value_or(0) != 0 ? *position : roItem.Locations;
         if (equipPosition == (ROWOW_EQUIP_POSITION_ACC_L | ROWOW_EQUIP_POSITION_ACC_R))
             equipPosition = ROWOW->GetIdentityEquippedItem(player, ROWOW_EQUIP_POSITION_ACC_L) == nullptr ? ROWOW_EQUIP_POSITION_ACC_L : ROWOW_EQUIP_POSITION_ACC_R;
         for (auto itemGUIDIter = identity->ItemGUIDsByEquipPosition.begin(); itemGUIDIter != identity->ItemGUIDsByEquipPosition.end();)
@@ -2994,6 +3008,10 @@ public:
             pcStatus.MDef2, pcStatus.Hit, pcStatus.Flee, pcStatus.Flee2, pcStatus.Critical, pcStatus.DefElement, pcStatus.ElementLevel);
         print("pc_status_speed amotion={} adelay={} dmotion={} aspd_rate={} speed={} aspd_display={}", pcStatus.AttackMotion, pcStatus.AttackDelay,
             pcStatus.DamageMotion, pcStatus.AspdRate, pcStatus.Speed, (2000 - pcStatus.AttackMotion) / 10);
+        // The natural regen amounts and rates (the oracle's pc_regen: regen_data, its sregen and ssregen)
+        print("pc_regen hp={} sp={} skill_hp={} skill_sp={} sit_hp={} sit_sp={} rate_hp={} rate_sp={} flag={}", pcStatus.RegenHP, pcStatus.RegenSP,
+            pcStatus.SkillRegenHP, pcStatus.SkillRegenSP, pcStatus.SitSkillRegenHP, pcStatus.SitSkillRegenSP, pcStatus.RegenRateHP, pcStatus.RegenRateSP,
+            uint32(pcStatus.RegenFlag));
         ROWOWStatus const& mobStatus = *ROWOW->GetROStatus(creature);
         print("mob {} lv={} str={} agi={} vit={} int={} dex={} luk={} maxhp={} watk={} watk2={} def={} def2={} mdef={} mdef2={} hit={} flee={} flee2={} "
             "cri={} def_ele={} ele_lv={} race={} size={} class={} amotion={} adelay={} dmotion={}", ROWOW->GetROMobID(creature), mobStatus.Level, mobStatus.Stats[0],
@@ -3154,26 +3172,61 @@ public:
         return true;
     }
 
-    static bool HandleROStatusChangeRateCommand(ChatHandler* handler, std::string statusName, int32 rate, int32 duration, Optional<uint32> runs)
+    static bool HandleROStatusChangeListCommand(ChatHandler* handler)
+    {
+        // The statuses on the selected RO combatant (or the player): type, name, values and the time left, for checking what a cast gave
+        // (R12 matrix).  The lines also go to the server log
+        Unit* unit = GetSelectedROCombatant(handler);
+        if (unit == nullptr)
+        {
+            handler->SendSysMessage("Select an RO combatant, in the Ragnarok Online world.");
+            return false;
+        }
+        ROWOWStatusChange const* sc = ROWOW->GetStatusChange(static_cast<Unit const*>(unit));
+        uint64 now = ROWOWMod::GetTick();
+        uint32 count = 0;
+        if (sc != nullptr)
+        {
+            for (auto const& entryByType : sc->EntriesByType)
+            {
+                ROWOWStatusChangeDB const* db = ROWOW->GetStatusChangeDB(entryByType.first);
+                ROWOWStatusChangeEntry const& sce = entryByType.second;
+                std::string line = fmt::format("sclist unit={} type={} name={} v1={} v2={} v3={} v4={} left={}", unit->GetName(), entryByType.first,
+                    db != nullptr ? db->Name : "?", sce.Val1, sce.Val2, sce.Val3, sce.Val4, sce.EndTime > now ? int64(sce.EndTime - now) : (sce.EndTime == 0 ? -1 : 0));
+                handler->SendSysMessage(line);
+                LOG_INFO("module.ROWOW", ".ro sclist: {}", line);
+                count++;
+            }
+        }
+        std::string line = fmt::format("sclist unit={} count={} option={}", unit->GetName(), count, sc != nullptr ? sc->Option : 0);
+        handler->SendSysMessage(line);
+        LOG_INFO("module.ROWOW", ".ro sclist: {}", line);
+        return true;
+    }
+
+    static bool HandleROStatusChangeRateCommand(ChatHandler* handler, std::string statusName, int32 rate, int32 duration, Optional<uint32> runs,
+        Optional<uint32> isOnPlayer)
     {
         // How often a status lands on the selected RO monster from the player (for comparing with the oracle's @oraclescrate): starts it runs
         // times at the rate (1/10000) and duration, through its resistances, ending it after each that landed, and prints the count and the
-        // durations it got
+        // durations it got.  With 1 at the end the monster starts it on the player, through the player's resistances
         Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
-        Unit* unit = handler->getSelectedUnit();
+        Unit* monster = handler->getSelectedUnit();
         int32 type = GetStatusTypeByName(statusName);
-        if (player == nullptr || unit == nullptr || unit == player || ROWOW->IsROCombatant(unit) == false || ROWOW->IsInROForm(player) == false || type < 0)
+        if (player == nullptr || monster == nullptr || monster == player || ROWOW->IsROCombatant(monster) == false || ROWOW->IsInROForm(player) == false || type < 0)
         {
             handler->SendSysMessage(type < 0 ? "No such RO status." : "Select an RO monster, in the Ragnarok Online world.");
             return false;
         }
+        Unit* source = isOnPlayer.value_or(0) != 0 ? monster : static_cast<Unit*>(player);
+        Unit* unit = isOnPlayer.value_or(0) != 0 ? static_cast<Unit*>(player) : monster;
         uint32 runCount = std::clamp<uint32>(runs.value_or(1000), 1, 100000);
         uint32 landed = 0;
         int64 tickMin = std::numeric_limits<int64>::max(), tickMax = 0, tickTotal = 0;
         uint64 now = ROWOW->GetTick();
         for (uint32 run = 0; run < runCount; run++)
         {
-            if (ROWOW->StatusChangeStart(player, unit, type, rate, 1, 0, 0, 0, duration, ROWOW_SCSTART_NONE) == false)
+            if (ROWOW->StatusChangeStart(source, unit, type, rate, 1, 0, 0, 0, duration, ROWOW_SCSTART_NONE) == false)
                 continue;
             landed++;
             if (ROWOWStatusChangeEntry const* sce = ROWOW->GetSCE(unit, type))

@@ -2366,7 +2366,7 @@ int32 ROWOWMod::SkillDelayFix(Unit* bl, uint16 skillID, uint16 skillLevel) const
     }
     if ((delaynodex & ROWOW_SKILL_CAST_IGNOREITEMBONUS) == 0 && bl->IsPlayer() == true)
     {
-        delay += GetDeferredBonus(bl, "bDelayRate"); // bonus bDelayRate
+        delay -= GetDeferredBonus(bl, "bDelayRate"); // bonus bDelayRate (pc_bonus's SP_DELAYRATE keeps it as delayrate -= val: Kiel-D-01's -30 is 30 less)
         time += GetDeferredBonus2(bl, "bSkillDelay", skillID); // bonus2 bSkillDelay
     }
     if (delay != 0)
@@ -2790,7 +2790,9 @@ int64 ROWOWMod::SkillAttack(int32 attackType, Unit* src, Unit* dsrc, Unit* bl, u
     if (damage > 0)
         if (Player* sd = src->ToPlayer())
             SkillOnSkillUsage(sd, bl, skillID, tick);
-    // (battle_drain, the drain bonuses of weapon skills, come with the deferred drain bonuses)
+    // The drain bonuses on a weapon skill's hit (battle_drain)
+    if (Player* sd = src->ToPlayer(); sd != nullptr && src != bl && damage > 0 && (dmg.Flag & ROWOW_BF_WEAPON) != 0)
+        BattleDrain(sd, bl, dmg.Damage, BattleConfig.LeftCardfixToRight == true ? dmg.Damage : dmg.Damage2, tstatus->Race, tstatus->Class);
 
     // Double Casting: a chance of the same bolt again (flag&2 keeps the second from casting a third)
     if ((flag & 2) == 0)
