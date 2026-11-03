@@ -465,6 +465,15 @@ bool ROWOWMod::CalculateMeleeDamage(Unit* attacker, Unit* victim, CalcDamageInfo
     if (StatusCheckSkillUse(attacker, victim, 0, 0) == true)
         BattleWeaponAttack(attacker, victim, wd);
 
+    // A player's bow shoots its arrow to the target with every swing the client shows, hit or miss, as the RO client draws one (missing
+    // until the converter has made the spell)
+    if (wd.DmgLv != ROWOW_ATK_NONE && attacker->IsPlayer() == true)
+    {
+        ROWOWStatus const* sstatus = GetROStatus(attacker);
+        if (sstatus != nullptr && sstatus->WeaponType == ROWOW_WEAPON_TYPE_BOW && sSpellMgr->GetSpellInfo(ROWOW_SPELL_ARROW_ATTACK) != nullptr)
+            attacker->CastSpell(victim, ROWOW_SPELL_ARROW_ATTACK, true);
+    }
+
     // The client shows a perfect dodge as RO's "Lucky" (dodge, which RO combat otherwise never has), a miss as "Miss", and a critical.  A
     // swing that became something else (a skill's hit, Poison React's counter) shows nothing of its own
     switch (wd.DmgLv)

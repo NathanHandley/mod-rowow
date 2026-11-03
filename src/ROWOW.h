@@ -221,6 +221,7 @@ struct ROWOWDataTable
 #define ROWOW_SPELL_USE_ITEM                        200011  // What every usable RO item casts when used, which runs the item's RO script
 #define ROWOW_SPELL_TAME                            200012  // What a taming item casts: the use item spell with a target (RO's capture cursor)
 #define ROWOW_SPELL_FOLLOWER_ORDER                  200013  // A spot on the ground for a homunculus or mercenary (RO's Alt and click)
+#define ROWOW_SPELL_ARROW_ATTACK                    200014  // The arrow flying to the target of a bow attack (a visual-only missile)
 #define ROWOW_SPELL_ID_FIXED_END                    200099  // The fixed RO spells end here (generated ones follow)
 #define ROWOW_SPELL_ID_RO_START                     200000  // RO spells are 200000-248999
 #define ROWOW_SPELL_ID_RO_END                       248999

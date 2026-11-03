@@ -2659,7 +2659,7 @@ public:
         Item* card = ROWOWMod::GetItemByClientPosition(player, cardBag, cardSlot);
         Item* equipment = ROWOWMod::GetItemByClientPosition(player, bag, slot);
         if (card == nullptr || equipment == nullptr || ROWOW->PCInsertCard(player, card, equipment) == false)
-            handler->SendSysMessage("The card can't go into that item.");
+            handler->SendSysMessage("Compounding has failed."); // clif_insert_card's failure (msgstringtable 494)
         return true;
     }
 

@@ -587,6 +587,72 @@ void ROWOWMod::LoadBonusData()
         ChatHandler(context.AttachedPlayer->GetSession()).SendSysMessage(fmt::format("Upgrade failed!! {} was destroyed.", itemName)); // clif_refine failure
         return ROWOWScriptValue::FromNumber(1);
     });
+    // The card remover's commands (npc/custom/card_remover.txt, the Wise Old Woman): the cards in what's worn in an equip index, and taking
+    // them out.  rAthena gives the item back as a new one, so it's no longer worn: it's taken off here, its cards' slots emptied in place
+    auto getEquipIndexCards = [this, getEquipIndexItem](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // The cards (item_db Ids) in the item's slots, last slot first as rAthena takes them; none for a forged weapon (itemdb_isspecial)
+        std::vector<uint32> cardItemIDs;
+        Item* item = getEquipIndexItem(context, arguments);
+        ROWOWItem const* roItem = GetROItem(item);
+        int32 starCrumbs = 0, forgeElement = 0;
+        if (roItem == nullptr || GetItemForge(item, starCrumbs, forgeElement) == true)
+            return cardItemIDs;
+        for (int32 slot = int32(std::min<uint8>(roItem->Slots, ROWOW_MAX_SLOTS)) - 1; slot >= 0; slot--)
+            if (uint32 cardItemID = GetItemCard(item, uint8(slot)))
+                cardItemIDs.push_back(cardItemID);
+        return cardItemIDs;
+    };
+    auto takeOffAndEmptyCardSlots = [this, getEquipIndexItem](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        Item* item = getEquipIndexItem(context, arguments);
+        PCUnequipItem(context.AttachedPlayer, EquipIndexes[arguments[0].GetNumber()].second, 1);
+        for (uint8 slot = 0; slot < ROWOW_MAX_SLOTS; slot++)
+            if (GetItemCard(item, slot) != 0)
+                SetItemCard(context.AttachedPlayer, item, slot, 0);
+    };
+    ROWOWSCRIPT->RegisterCommand("getequipcardcnt", [getEquipIndexCards](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // getequipcardcnt(<equip index>): how many cards are in the worn item
+        return ROWOWScriptValue::FromNumber(int64(getEquipIndexCards(context, arguments).size()));
+    });
+    ROWOWSCRIPT->RegisterCommand("successremovecards", [this, getEquipIndexCards, takeOffAndEmptyCardSlots](ROWOWScriptContext& context,
+        std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // successremovecards <equip index>: the cards come out into the bags, and the item is taken off
+        std::vector<uint32> cardItemIDs = getEquipIndexCards(context, arguments);
+        if (cardItemIDs.empty() == true)
+            return ROWOWScriptValue::FromNumber(0);
+        takeOffAndEmptyCardSlots(context, arguments);
+        for (uint32 cardItemID : cardItemIDs)
+            GiveROItem(context.AttachedPlayer, cardItemID, 1, true);
+        SendItemCardsToClient(context.AttachedPlayer, *context.Identity, true);
+        return ROWOWScriptValue::FromNumber(0);
+    });
+    ROWOWSCRIPT->RegisterCommand("failedremovecards", [this, getEquipIndexItem, getEquipIndexCards, takeOffAndEmptyCardSlots](ROWOWScriptContext& context,
+        std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // failedremovecards <equip index>,<type>: 0 destroys the item and its cards, 1 the cards (the item is kept), 2 the item (the cards come
+        // out into the bags); any other type loses nothing
+        std::vector<uint32> cardItemIDs = getEquipIndexCards(context, arguments);
+        if (cardItemIDs.empty() == true)
+            return ROWOWScriptValue::FromNumber(0);
+        int64 failType = arguments.size() > 1 ? arguments[1].GetNumber() : 3;
+        Item* item = getEquipIndexItem(context, arguments);
+        if (failType == 0 || failType == 2)
+        {
+            PCUnequipItem(context.AttachedPlayer, EquipIndexes[arguments[0].GetNumber()].second, 1);
+            uint32 count = 1;
+            context.AttachedPlayer->DestroyItemCount(item, count, true);
+            if (failType == 2)
+                for (uint32 cardItemID : cardItemIDs)
+                    GiveROItem(context.AttachedPlayer, cardItemID, 1, true);
+        }
+        else if (failType == 1)
+            takeOffAndEmptyCardSlots(context, arguments);
+        SendItemCardsToClient(context.AttachedPlayer, *context.Identity, true);
+        return ROWOWScriptValue::FromNumber(0);
+    });
     ROWOWSCRIPT->RegisterCommand("isequipped", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
     {
         // Whether every item named is worn
@@ -1377,7 +1443,7 @@ bool ROWOWMod::PCInsertCard(Player* player, Item* card, Item* equipment)
     uint32 count = 1;
     player->DestroyItemCount(card, count, true);
     SetItemCard(player, equipment, slot, cardItemID);
-    ChatHandler(player->GetSession()).SendSysMessage("The card was compounded.");
+    ChatHandler(player->GetSession()).SendSysMessage("Compounding has completed successfully."); // clif_insert_card's success (msgstringtable 493)
     SendItemCardsToClient(player, *GetIdentity(player), true);
     return true;
 }
