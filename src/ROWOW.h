@@ -234,6 +234,11 @@ struct ROWOWDataTable
 // The general bags a new identity is given (Nathan 2026-11-02): four of the converter's 24 slot bag, close to RO's 100 inventory entries
 #define ROWOW_START_BAG_COUNT                       4
 
+// Which carried set (the backpack, bag slots and bags) a character with an identity has on it (mod_rowow_identity.carried_set; see UpdateCarriedSet)
+#define ROWOW_CARRIED_SET_NONE                      0       // None set apart yet: an identity from before the sets were, its RO items mixed in
+#define ROWOW_CARRIED_SET_WOW                       1       // The character's own, the form's put away
+#define ROWOW_CARRIED_SET_RO                        2       // The RO form's, the character's own put away
+
 // The items the skills make or use by ID (rAthena's ITEMID_*)
 #define ROWOW_ITEMID_HOLY_WATER                     523
 #define ROWOW_ITEMID_MERCENARY_RED_POTION           12184
@@ -1867,10 +1872,20 @@ struct ROWOWStartItem
     uint32 EquipPosition = 0; // ROWOW_EQUIP_POSITION_*, 0 for none
 };
 
+// An item of the carried set that's put away (mod_rowow_identity_stowed_item), out of the player's slots until the set comes back
+struct ROWOWStowedItem
+{
+    Item* StowedItem = nullptr; // The identity's to delete while it's put away (it isn't in the player's slots or in the world)
+    uint8 Bag = 255; // Where it goes back: INVENTORY_SLOT_BAG_0 (255) for the backpack and bag slots, or the bag slot of its bag
+    uint8 Slot = 0;
+};
+
 // A player's RO identity (mod_rowow_identity and the tables beside it), kept on the player while logged in.  Only the player's own
 // thread (its session's and map's updates) touches it
 struct ROWOWIdentity : public DataMap::Base
 {
+    ~ROWOWIdentity() override; // Deletes the put away carried set's items
+
     ObjectGuid::LowType CharacterGUID = 0; // status.char_id
     bool IsLoaded = false;
     bool Exists = false; // Made on the first entry into the RO world
@@ -1989,6 +2004,11 @@ struct ROWOWIdentity : public DataMap::Base
 
     bool WasInFormAtLoad = false; // Saved in the form: logged out in the RO world, or the server stopped with the character in it
 
+    uint8 CarriedSet = ROWOW_CARRIED_SET_NONE; // The carried set on the character (ROWOW_CARRIED_SET_*); the other is StowedItems
+    uint8 SavedCarriedSet = ROWOW_CARRIED_SET_NONE; // ... as last saved, which is with the inventory's rows (a save of the money alone keeps it)
+    std::vector<ROWOWStowedItem> StowedItems; // The other carried set, put away
+    bool AreStowedItemsChanged = false; // The sets changed since the last save with the inventory: the next update saves (see OnPlayerUpdate)
+
     ROWOWStatus BaseStatus; // base_status: from the job, stats, gear and skills (status_calc_pc_sub)
     ROWOWStatus Status; // battle_status: the base status with the statuses' changes (status_calc_bl_main); what the RO rules read
     std::vector<ROWOWSavedStatusChange> SavedStatusChanges; // The statuses kept while out of the form (sc_data), and as last saved
@@ -2004,6 +2024,7 @@ struct ROWOWIdentity : public DataMap::Base
     bool IsFormArrivalPending = false;
     bool IsFormDeparturePending = false;
     bool IsNewIdentityPending = false; // The first entry, whose start items are given once in the world
+    bool IsLeavingForReset = false; // .ro identity reset takes the form off, on an RO map too, where CompleteROFormChange would put it back on
     bool IsArrivalFloorCheckPending = false; // Arrived on an RO map: the next update checks it isn't left in the air (CheckArrivalFloor)
     uint32 LoginDeathTimer = 0; // Logged in after logging out dead: dies again where it lies when this runs out (UpdateLoginDeath)
 
@@ -2205,6 +2226,12 @@ public:
     ROWOWIdentity* GetIdentity(Player* player);
     void SaveIdentity(Player* player, CharacterDatabaseTransaction trans, bool isInventorySaved);
     void DeleteIdentityRows(ObjectGuid::LowType guid, CharacterDatabaseTransaction trans);
+
+    // The carried sets (the backpack, the bag slots and the bags' items): the character's own and the form's.  The side the character is on has its set
+    // on it and the other is put away, each item kept as it is (its row and GUID) with its place to go back to (see UpdateCarriedSet)
+    void UpdateCarriedSet(Player* player, ROWOWIdentity& identity); // The set of the side the character is on now onto it, the other put away
+    void LoadIdentityStowedItems(Player* player, ROWOWIdentity& identity) const;
+    void SaveIdentityStowedItems(Player* player, ROWOWIdentity& identity, CharacterDatabaseTransaction trans) const; // Only with the inventory's rows
 
     // Turning into the form and back, on arriving in and leaving the RO world (and at login).  These change the character's values,
     // spells and action bars, which works before the character is added to the map, so the client is first sent the character already

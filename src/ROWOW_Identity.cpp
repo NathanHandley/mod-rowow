@@ -14,6 +14,7 @@
 //  You should have received a copy of the GNU General Public License
 //  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+#include "Bag.h"
 #include "Chat.h"
 #include "DBCStores.h"
 #include "DatabaseEnv.h"
@@ -180,6 +181,148 @@ namespace
         for (uint32 spellID : spellIDsToRemove)
             player->RemoveAurasDueToSpell(spellID);
     }
+
+    bool IsCarriedBagSlot(uint8 bag, uint8 slot)
+    {
+        return bag == INVENTORY_SLOT_BAG_0 && slot >= INVENTORY_SLOT_BAG_START && slot < INVENTORY_SLOT_BAG_END;
+    }
+
+    // Takes the carried set off the character: the bags' items first (so each bag comes off empty), then the bags, then the backpack, each with
+    // the place it had.  The items stay as they are, their rows and GUIDs too (the RO equipment is kept by GUID); only their places change, which the
+    // next save with the inventory writes (SaveIdentityStowedItems)
+    std::vector<ROWOWStowedItem> TakeCarriedSet(Player* player)
+    {
+        std::vector<ROWOWStowedItem> takenItems;
+        auto takeItem = [player, &takenItems](uint8 bag, uint8 slot)
+        {
+            Item* item = player->GetItemByPos(bag, slot);
+            if (item == nullptr)
+                return;
+            player->MoveItemFromInventory(bag, slot, true);
+            if (item->GetState() == ITEM_UNCHANGED)
+                item->FSetState(ITEM_CHANGED); // Its item_instance row is written with the set, as it is now (the refund the move took off)
+            ROWOWStowedItem takenItem;
+            takenItem.StowedItem = item;
+            takenItem.Bag = bag;
+            takenItem.Slot = slot;
+            takenItems.push_back(takenItem);
+        };
+        for (uint8 bagSlot = INVENTORY_SLOT_BAG_START; bagSlot < INVENTORY_SLOT_BAG_END; bagSlot++)
+            if (Bag* bag = player->GetBagByPos(bagSlot))
+                for (uint32 slot = 0; slot < bag->GetBagSize(); slot++)
+                    takeItem(bagSlot, uint8(slot));
+        for (uint8 slot = INVENTORY_SLOT_BAG_START; slot < INVENTORY_SLOT_BAG_END; slot++)
+            takeItem(INVENTORY_SLOT_BAG_0, slot);
+        for (uint8 slot = INVENTORY_SLOT_ITEM_START; slot < INVENTORY_SLOT_ITEM_END; slot++)
+            takeItem(INVENTORY_SLOT_BAG_0, slot);
+        return takenItems;
+    }
+
+    // Puts an item of a carried set in a free place of the carried slots.  Only the place is checked (a bag slot takes a bag, a bag takes what its kind
+    // takes), not what a new item is: the item was there before, and a unique item's twin got while it was put away mustn't keep it out
+    bool PutCarriedItem(Player* player, Item* item, uint8 bag, uint8 slot)
+    {
+        if (player->GetItemByPos(bag, slot) != nullptr)
+            return false;
+        if (bag == INVENTORY_SLOT_BAG_0)
+        {
+            if (IsCarriedBagSlot(bag, slot) == true ? item->ToBag() == nullptr : (slot < INVENTORY_SLOT_ITEM_START || slot >= INVENTORY_SLOT_ITEM_END))
+                return false;
+        }
+        else
+        {
+            Bag* container = (bag >= INVENTORY_SLOT_BAG_START && bag < INVENTORY_SLOT_BAG_END) ? player->GetBagByPos(bag) : nullptr;
+            if (container == nullptr || slot >= container->GetBagSize() || item->IsNotEmptyBag() == true ||
+                ItemCanGoIntoBag(item->GetTemplate(), container->GetTemplate()) == false)
+                return false;
+        }
+        // Player::MoveItemToInventory's, without the epic item achievement: the item comes back to the bags, it isn't new
+        player->ItemAddedQuestCheck(item->GetEntry(), item->GetCount());
+        ItemPosCountVec destination;
+        destination.push_back(ItemPosCount((uint16(bag) << 8) | slot, item->GetCount()));
+        Item* storedItem = player->StoreItem(destination, item, true);
+        storedItem->SetState(ITEM_CHANGED, player);
+        if (storedItem->IsBOPTradable() == true)
+            player->AddTradeableItem(storedItem);
+        return true;
+    }
+
+    // Each in the first free carried slot that takes it, the bags first into the free bag slots when they're to be worn
+    void PutCarriedItemsAnywhere(Player* player, std::vector<Item*> const& items, bool areBagsWorn, std::vector<Item*>& unplacedItemsOut)
+    {
+        std::vector<Item*> remainingItems;
+        for (Item* item : items)
+        {
+            bool isPlaced = false;
+            if (areBagsWorn == true && item->ToBag() != nullptr)
+                for (uint8 slot = INVENTORY_SLOT_BAG_START; slot < INVENTORY_SLOT_BAG_END && isPlaced == false; slot++)
+                    isPlaced = PutCarriedItem(player, item, INVENTORY_SLOT_BAG_0, slot);
+            if (isPlaced == false)
+                remainingItems.push_back(item);
+        }
+        for (Item* item : remainingItems)
+        {
+            bool isPlaced = false;
+            for (uint8 slot = INVENTORY_SLOT_ITEM_START; slot < INVENTORY_SLOT_ITEM_END && isPlaced == false; slot++)
+                isPlaced = PutCarriedItem(player, item, INVENTORY_SLOT_BAG_0, slot);
+            for (uint8 bagSlot = INVENTORY_SLOT_BAG_START; bagSlot < INVENTORY_SLOT_BAG_END && isPlaced == false; bagSlot++)
+                if (Bag* bag = player->GetBagByPos(bagSlot))
+                    for (uint32 slot = 0; slot < bag->GetBagSize() && isPlaced == false; slot++)
+                        isPlaced = PutCarriedItem(player, item, bagSlot, uint8(slot));
+            if (isPlaced == false)
+                unplacedItemsOut.push_back(item);
+        }
+    }
+
+    // Puts a carried set on the character, each item back in its place: the bags first (they hold the rest), then the backpack, then the bags' items.
+    // One whose place is gone goes in any free slot; what has no room at all is returned
+    std::vector<Item*> PutCarriedSet(Player* player, std::vector<ROWOWStowedItem> const& items, bool areBagsWorn)
+    {
+        std::vector<Item*> homelessItems;
+        for (uint8 pass = 0; pass < 3; pass++)
+        {
+            for (ROWOWStowedItem const& stowedItem : items)
+            {
+                uint8 itemPass = IsCarriedBagSlot(stowedItem.Bag, stowedItem.Slot) == true ? 0 : (stowedItem.Bag == INVENTORY_SLOT_BAG_0 ? 1 : 2);
+                if (itemPass != pass)
+                    continue;
+                if (PutCarriedItem(player, stowedItem.StowedItem, stowedItem.Bag, stowedItem.Slot) == false)
+                    homelessItems.push_back(stowedItem.StowedItem);
+            }
+        }
+        std::vector<Item*> unplacedItems;
+        PutCarriedItemsAnywhere(player, homelessItems, areBagsWorn, unplacedItems);
+        return unplacedItems;
+    }
+
+    // What no carried slot has room for goes by mail.  Each mail's transaction also takes its items out of the bags' rows and the put away set's, so
+    // whenever the server stops, each item is in one place: in the mail, or where it was before
+    void MailCarriedItems(Player* player, std::vector<Item*> const& items)
+    {
+        for (size_t firstIndex = 0; firstIndex < items.size(); firstIndex += MAX_MAIL_ITEMS)
+        {
+            CharacterDatabaseTransaction mailTrans = CharacterDatabase.BeginTransaction();
+            MailDraft draft("Ragnarok Online", "Your bags had no room for this when they changed for Ragnarok Online, so it was sent to you here.");
+            for (size_t itemIndex = firstIndex; itemIndex < items.size() && itemIndex < firstIndex + MAX_MAIL_ITEMS; itemIndex++)
+            {
+                Item* item = items[itemIndex];
+                LOG_INFO("module.ROWOW", "Carried set of {}: item {} (entry {}) had no room, sent by mail", player->GetName(), item->GetGUID().GetCounter(), item->GetEntry());
+                Item::DeleteFromInventoryDB(mailTrans, item->GetGUID().GetCounter());
+                mailTrans->Append("DELETE FROM `mod_rowow_identity_stowed_item` WHERE `item_guid` = {}", item->GetGUID().GetCounter());
+                item->SaveToDB(mailTrans);
+                draft.AddItem(item);
+            }
+            draft.SendMailTo(mailTrans, MailReceiver(player), MailSender(MAIL_NORMAL, 0, MAIL_STATIONERY_GM));
+            CharacterDatabase.CommitTransaction(mailTrans);
+        }
+    }
+}
+
+ROWOWIdentity::~ROWOWIdentity()
+{
+    // The put away carried set's items go with the identity (a logout, a reset): the player's slots don't have them
+    for (ROWOWStowedItem const& stowedItem : StowedItems)
+        delete stowedItem.StowedItem;
 }
 
 void ROWOWMod::LoadIdentityData()
@@ -499,7 +642,7 @@ ROWOWIdentity* ROWOWMod::GetIdentity(Player* player)
     uint32 guid = player->GetGUID().GetCounter();
     QueryResult result = CharacterDatabase.Query("SELECT `job`, `base_level`, `base_exp`, `job_level`, `job_exp`, `status_points`, `skill_points`, `str`, `agi`, `vit`, `int`, `dex`, `luk`, "
         "`hp`, `sp`, `zeny`, `save_map`, `save_x`, `save_y`, `save_z`, `save_o`, `last_map`, `last_x`, `last_y`, `last_z`, `last_o`, `return_map`, `return_x`, `return_y`, "
-        "`return_z`, `return_o`, `hair_style`, `hair_color`, `in_form`, `option`, `fame` FROM `mod_rowow_identity` WHERE `guid` = {}", guid);
+        "`return_z`, `return_o`, `hair_style`, `hair_color`, `in_form`, `option`, `fame`, `carried_set` FROM `mod_rowow_identity` WHERE `guid` = {}", guid);
     if (!result)
     {
         // A new identity shares its account's variables: a # variable set before its first save must not rewrite them from an empty set
@@ -528,6 +671,8 @@ ROWOWIdentity* ROWOWMod::GetIdentity(Player* player)
     identity->WasInFormAtLoad = fields[33].Get<uint8>() != 0;
     identity->Option = fields[34].Get<uint32>();
     identity->Fame = fields[35].Get<int32>();
+    identity->CarriedSet = fields[36].Get<uint8>();
+    identity->SavedCarriedSet = identity->CarriedSet;
 
     if (QueryResult actionResult = CharacterDatabase.Query("SELECT `button`, `action` FROM `mod_rowow_identity_action` WHERE `guid` = {}", guid))
     {
@@ -572,6 +717,7 @@ ROWOWIdentity* ROWOWMod::GetIdentity(Player* player)
         } while (statusResult->NextRow());
     }
     LoadIdentityCart(player, *identity);
+    LoadIdentityStowedItems(player, *identity);
     LoadIdentityMemo(player, *identity);
     LoadIdentityQuests(player, *identity);
     LoadIdentityPet(player, *identity);
@@ -582,7 +728,10 @@ ROWOWIdentity* ROWOWMod::GetIdentity(Player* player)
 
 void ROWOWMod::DeleteIdentityRows(ObjectGuid::LowType guid, CharacterDatabaseTransaction trans)
 {
-    // What makes the identity, in tables of the character (its pet's row is the egg's: see OnPlayerDeleteFromDB)
+    // What makes the identity, in tables of the character (its pet's row is the egg's: see OnPlayerDeleteFromDB).  The put away carried set's items
+    // go with their rows: a deleted character's are gone already (owned by it), and a reset's are the identity's (the character's own are back on it)
+    trans->Append("DELETE `instance` FROM `item_instance` `instance` JOIN `mod_rowow_identity_stowed_item` `stowed` ON `stowed`.`item_guid` = `instance`.`guid` WHERE `stowed`.`guid` = {}", guid);
+    trans->Append("DELETE FROM `mod_rowow_identity_stowed_item` WHERE `guid` = {}", guid);
     trans->Append("DELETE FROM `mod_rowow_identity` WHERE `guid` = {}", guid);
     trans->Append("DELETE FROM `mod_rowow_identity_action` WHERE `guid` = {}", guid);
     trans->Append("DELETE FROM `mod_rowow_identity_equipment` WHERE `guid` = {}", guid);
@@ -617,19 +766,24 @@ void ROWOWMod::SaveIdentity(Player* player, CharacterDatabaseTransaction trans, 
         }
     }
 
+    // Which carried set is on the character goes with the bags' rows: a save of the money alone keeps the one last saved with them
+    if (isInventorySaved == true)
+        identity->SavedCarriedSet = identity->CarriedSet;
+
     uint32 guid = player->GetGUID().GetCounter();
     ROWOWPosition const& savePoint = identity->SavePoint;
     ROWOWPosition const& lastPosition = identity->LastPosition;
     ROWOWPosition const& returnPosition = identity->ReturnPosition;
     trans->Append("REPLACE INTO `mod_rowow_identity` (`guid`, `job`, `base_level`, `base_exp`, `job_level`, `job_exp`, `status_points`, `skill_points`, `str`, `agi`, `vit`, "
         "`int`, `dex`, `luk`, `hp`, `sp`, `zeny`, `save_map`, `save_x`, `save_y`, `save_z`, `save_o`, `last_map`, `last_x`, `last_y`, `last_z`, `last_o`, `return_map`, "
-        "`return_x`, `return_y`, `return_z`, `return_o`, `hair_style`, `hair_color`, `in_form`, `option`, `fame`, `updated`) VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, "
-        "{}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
+        "`return_x`, `return_y`, `return_z`, `return_o`, `hair_style`, `hair_color`, `in_form`, `option`, `fame`, `carried_set`, `updated`) VALUES ({}, {}, {}, {}, {}, {}, {}, {}, "
+        "{}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
         guid, identity->JobID, identity->BaseLevel, identity->BaseExp, identity->JobLevel, identity->JobExp, identity->StatusPoints, identity->SkillPoints,
         identity->Stats[0], identity->Stats[1], identity->Stats[2], identity->Stats[3], identity->Stats[4], identity->Stats[5], identity->HP, identity->SP, identity->Zeny,
         GetPositionMapValue(savePoint), savePoint.X, savePoint.Y, savePoint.Z, savePoint.O, GetPositionMapValue(lastPosition), lastPosition.X, lastPosition.Y,
         lastPosition.Z, lastPosition.O, GetPositionMapValue(returnPosition), returnPosition.X, returnPosition.Y, returnPosition.Z, returnPosition.O,
-        identity->HairStyle, identity->HairColor, identity->IsInForm == true ? 1 : 0, identity->Option, identity->Fame, uint32(GameTime::GetGameTime().count()));
+        identity->HairStyle, identity->HairColor, identity->IsInForm == true ? 1 : 0, identity->Option, identity->Fame, identity->SavedCarriedSet,
+        uint32(GameTime::GetGameTime().count()));
 
     if (identity->AreActionsChanged == true)
     {
@@ -655,8 +809,11 @@ void ROWOWMod::SaveIdentity(Player* player, CharacterDatabaseTransaction trans, 
     }
     SaveIdentityScriptVariables(player, *identity, trans);
     SaveIdentityStatusChanges(player, *identity, trans);
-    if (isInventorySaved == true) // The cart holds what left the bags: its rows go with theirs
+    if (isInventorySaved == true) // The cart and the put away carried set hold what left the bags: their rows go with theirs
+    {
         SaveIdentityCart(player, *identity, trans);
+        SaveIdentityStowedItems(player, *identity, trans);
+    }
     SaveIdentityMemo(player, *identity, trans);
     SaveIdentityQuests(player, *identity, trans);
     SaveIdentityPet(player, *identity, trans);
@@ -778,6 +935,9 @@ void ROWOWMod::EnterROForm(Player* player)
     }
     identity->IsInForm = true;
 
+    // The form's carried set on the character, the character's own put away, before anything reads the RO equipment in it
+    UpdateCarriedSet(player, *identity);
+
     // The client forgets the character's spells (the server keeps them, and refuses them while in the form), keeping the form's
     identity->HiddenSpellIDs.clear();
     uint8 activeSpec = player->GetActiveSpec();
@@ -827,7 +987,7 @@ void ROWOWMod::CompleteROFormChange(Player* player)
     // A safety net for an arrival that didn't come through OnPlayerSendInitialPacketsBeforeAddToMap
     ROWOWIdentity* identity = GetIdentity(player);
     bool isROMap = IsROMap(player->GetMapId());
-    if (isROMap == true && identity->IsInForm == false)
+    if (isROMap == true && identity->IsInForm == false && identity->IsLeavingForReset == false)
     {
         EnterROForm(player);
         return;
@@ -837,6 +997,8 @@ void ROWOWMod::CompleteROFormChange(Player* player)
         LeaveROForm(player);
         return;
     }
+    // Saved in the form but logging in out of the RO world (the server stopped before the character left it): its own carried set back on it
+    UpdateCarriedSet(player, *identity);
 
     if (identity->IsInForm == true)
     {
@@ -994,6 +1156,124 @@ void ROWOWMod::GiveStartBags(Player* player)
     }
 }
 
+void ROWOWMod::UpdateCarriedSet(Player* player, ROWOWIdentity& identity)
+{
+    // The character and its RO identity each have their own carried set: the backpack, the bag slots and the bags' items (the worn equipment, keyring,
+    // currencies, bank and buyback stay the character's).  The side the character is on has its set on it, and the other is put away (StowedItems),
+    // each item as it is with its place, and comes back to it (Nathan 2026-11-02).  A new identity's set starts empty, and the arrival gives the start
+    // bags and items.  The changed rows (the bags', the items', the put away set's and carried_set) are written only by a save of the inventory, in its
+    // transaction (SaveIdentityStowedItems), so whenever the server stops the database has each item in exactly one place.  Runs where the form
+    // changes: the world thread (a login, a map change, a command), with the maps idle
+    uint8 carriedSet = identity.IsInForm == true ? ROWOW_CARRIED_SET_RO : ROWOW_CARRIED_SET_WOW;
+    if (identity.CarriedSet == carriedSet || (identity.CarriedSet == ROWOW_CARRIED_SET_NONE && identity.IsInForm == false))
+        return;
+
+    // Nothing in the bags may be in use as they change (the form change already stopped casts): a trade offering them, the loot of one being opened
+    if (player->GetTradeData() != nullptr)
+        player->TradeCancel(true);
+    if (ObjectGuid lootGUID = player->GetLootGUID())
+        player->GetSession()->DoLootRelease(lootGUID);
+
+    std::vector<ROWOWStowedItem> takenItems = TakeCarriedSet(player);
+    std::vector<Item*> unplacedItems;
+    if (identity.CarriedSet == ROWOW_CARRIED_SET_NONE && identity.IsNewIdentityPending == false)
+    {
+        // An identity from before the sets were apart, its RO items (the converter's RO item range, its bags with them) mixed in with the character's.
+        // The character's things become its set, each in its place (one that was in an RO bag where there's room), and are put away; the RO things
+        // become the form's set, each in its place, the RO bags in the bag slots.  None is put away yet, but any that were go in too, so none is lost
+        takenItems.insert(takenItems.end(), identity.StowedItems.begin(), identity.StowedItems.end());
+        identity.StowedItems.clear();
+        std::vector<ROWOWStowedItem> characterItems;
+        std::vector<ROWOWStowedItem> identityItems;
+        for (ROWOWStowedItem takenItem : takenItems)
+        {
+            uint32 itemTemplateID = takenItem.StowedItem->GetEntry();
+            if (itemTemplateID < ROWOW_ITEM_TEMPLATE_ENTRY_START || itemTemplateID > ROWOW_ITEM_TEMPLATE_ENTRY_END)
+            {
+                characterItems.push_back(takenItem);
+                continue;
+            }
+            if (takenItem.StowedItem->ToBag() != nullptr && IsCarriedBagSlot(takenItem.Bag, takenItem.Slot) == false)
+                takenItem.Slot = NULL_SLOT; // An RO bag given while the bag slots were full goes in one now
+            identityItems.push_back(takenItem);
+        }
+        std::vector<Item*> unplacedCharacterItems = PutCarriedSet(player, characterItems, false);
+        identity.StowedItems = TakeCarriedSet(player);
+        unplacedItems = PutCarriedSet(player, identityItems, true);
+        // The character's things its own set has no room for stay with the form's rather than leave the bags
+        PutCarriedItemsAnywhere(player, unplacedCharacterItems, false, unplacedItems);
+        LOG_INFO("module.ROWOW", "Carried set of {}: set apart, {} of the character's things put away and {} of the identity's in the bags ({} of the character's stay with them)",
+            player->GetName(), identity.StowedItems.size(), identityItems.size(), unplacedCharacterItems.size());
+    }
+    else
+    {
+        unplacedItems = PutCarriedSet(player, identity.StowedItems, false);
+        identity.StowedItems = takenItems;
+    }
+    // Only a set saved wrong (or a mixed one too full) leaves anything with no room
+    MailCarriedItems(player, unplacedItems);
+    identity.CarriedSet = carriedSet;
+    identity.AreStowedItemsChanged = true;
+}
+
+void ROWOWMod::LoadIdentityStowedItems(Player* player, ROWOWIdentity& identity) const
+{
+    // The put away carried set's items, loaded as Player::_LoadInventory loads the bags' (its columns, for Item::LoadFromDB), but kept out of the
+    // player's slots.  One that can't be loaded (no such item template now) or that is in the player's slots already is left out, its item_instance
+    // row as it was; the next save of the set drops its row from the set
+    QueryResult result = CharacterDatabase.Query("SELECT `instance`.`creatorGuid`, `instance`.`giftCreatorGuid`, `instance`.`count`, `instance`.`duration`, `instance`.`charges`, "
+        "`instance`.`flags`, `instance`.`enchantments`, `instance`.`randomPropertyId`, `instance`.`durability`, `instance`.`playedTime`, `instance`.`text`, `stowed`.`bag`, "
+        "`stowed`.`slot`, `stowed`.`item_guid`, `instance`.`itemEntry` FROM `mod_rowow_identity_stowed_item` `stowed` JOIN `item_instance` `instance` ON `instance`.`guid` = "
+        "`stowed`.`item_guid` WHERE `stowed`.`guid` = {}", player->GetGUID().GetCounter());
+    if (!result)
+        return;
+    do
+    {
+        Field* fields = result->Fetch();
+        ObjectGuid::LowType itemGUID = fields[13].Get<uint32>();
+        uint32 itemTemplateID = fields[14].Get<uint32>();
+        ItemTemplate const* itemTemplate = sObjectMgr->GetItemTemplate(itemTemplateID);
+        if (itemTemplate == nullptr || player->GetItemByGuid(ObjectGuid::Create<HighGuid::Item>(itemGUID)) != nullptr)
+        {
+            LOG_ERROR("module.ROWOW", "ROWOWMod::LoadIdentityStowedItems: {}'s put away item {} (entry {}) {}, left out", player->GetName(), itemGUID, itemTemplateID,
+                itemTemplate == nullptr ? "has no item template" : "is in the bags too");
+            continue;
+        }
+        Item* item = NewItemOrBag(itemTemplate);
+        if (item->LoadFromDB(itemGUID, player->GetGUID(), fields, itemTemplateID) == false)
+        {
+            LOG_ERROR("module.ROWOW", "ROWOWMod::LoadIdentityStowedItems: {}'s put away item {} (entry {}) didn't load, left out", player->GetName(), itemGUID, itemTemplateID);
+            delete item;
+            continue;
+        }
+        item->FSetState(ITEM_UNCHANGED);
+        ROWOWStowedItem stowedItem;
+        stowedItem.StowedItem = item;
+        stowedItem.Bag = fields[11].Get<uint8>();
+        stowedItem.Slot = fields[12].Get<uint8>();
+        identity.StowedItems.push_back(stowedItem);
+    } while (result->NextRow());
+}
+
+void ROWOWMod::SaveIdentityStowedItems(Player* player, ROWOWIdentity& identity, CharacterDatabaseTransaction trans) const
+{
+    // In the inventory save's transaction: the put away items leave the bags' rows (and the account bank's) as they come into the set's, with their
+    // item_instance rows as they are now, and the items that came back have their bags' rows from the same save (Player::_SaveInventory)
+    if (identity.AreStowedItemsChanged == false)
+        return;
+    uint32 guid = player->GetGUID().GetCounter();
+    trans->Append("DELETE FROM `mod_rowow_identity_stowed_item` WHERE `guid` = {}", guid);
+    for (ROWOWStowedItem const& stowedItem : identity.StowedItems)
+    {
+        Item* item = stowedItem.StowedItem;
+        Item::DeleteFromInventoryDB(trans, item->GetGUID().GetCounter());
+        item->SaveToDB(trans);
+        trans->Append("INSERT INTO `mod_rowow_identity_stowed_item` (`guid`, `item_guid`, `bag`, `slot`) VALUES ({}, {}, {}, {})", guid, item->GetGUID().GetCounter(),
+            stowedItem.Bag, stowedItem.Slot);
+    }
+    identity.AreStowedItemsChanged = false;
+}
+
 void ROWOWMod::RestoreWoWShapeshift(Player* player, ROWOWIdentity& identity)
 {
     // Leaving the form: the stance or form the character came in with, which the arrival took off with its buffs.  When that isn't known (it
@@ -1104,6 +1384,7 @@ void ROWOWMod::LeaveROForm(Player* player)
     }
     player->InterruptNonMeleeSpells(false);
     identity->IsInForm = false;
+    UpdateCarriedSet(player, *identity); // The character's own carried set back on it, the form's put away
     GrantIdentitySkillSpells(player, *identity); // Out of the form, it knows none of them
 
     // The character's own values back

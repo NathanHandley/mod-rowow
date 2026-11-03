@@ -112,6 +112,11 @@ public:
 
     void OnPlayerUpdate(Player* player, uint32 p_time) override
     {
+        // The carried sets changed (UpdateCarriedSet): saved now with the inventory, not at the next autosave
+        ROWOWIdentity* stowingIdentity = player->CustomData.Get<ROWOWIdentity>("ROWOWIdentity");
+        if (stowingIdentity != nullptr && stowingIdentity->Exists == true && stowingIdentity->AreStowedItemsChanged == true && player->IsBeingTeleported() == false)
+            player->SaveToDB(false, false);
+
         ROWOW->UpdateNaturalRegen(player, p_time);
         ROWOW->UpdateStatusChanges(player);
         if (ROWOW->IsEnabled == false || ROWOW->IsInROForm(player) == false)
@@ -2736,16 +2741,34 @@ public:
 
     static bool HandleROIdentityResetCommand(ChatHandler* handler)
     {
-        // Deletes the identity, so the next entry into the RO world makes a new one (at once, when in the RO world now)
+        // Deletes the identity and its carried set's items, so the next entry into the RO world makes a new one (at once, when in the RO world now)
         Player* player = handler->getSelectedPlayerOrSelf();
-        if (player == nullptr)
+        if (player == nullptr || player->IsBeingTeleportedFar() == true)
             return false;
         bool wasInForm = ROWOW->IsInROForm(player);
+        // Out of the form, on an RO map too (put back on there, the identity's carried set would be on the character, and the new identity would take the
+        // form's values for the character's own), so the character's own values and carried set are back on it and the identity's set is put away
+        ROWOW->GetIdentity(player)->IsLeavingForReset = true;
         ROWOW->LeaveROForm(player);
+        if (ROWOW->GetIdentity(player)->CarriedSet == ROWOW_CARRIED_SET_RO) // The put away set is the character's own: deleting it would lose it
+        {
+            ROWOW->GetIdentity(player)->IsLeavingForReset = false;
+            handler->SendSysMessage("The character's own bags didn't come back, so the identity was kept.");
+            return false;
+        }
+        // One transaction saves the character as it is now, then deletes the identity's rows and its put away set's items.  It's queued (a save can't be
+        // committed directly), so the new identity isn't read from the database, where the old rows may still be: it starts as a new one does, with the
+        // account's variables as the old one had them
         CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
+        player->SaveToDB(trans, false, false);
         ROWOW->DeleteIdentityRows(player->GetGUID().GetCounter(), trans);
-        CharacterDatabase.DirectCommitTransaction(trans); // Before the new identity's save, which is queued
+        CharacterDatabase.CommitTransaction(trans); // Before the new identity's save, which is queued after it
+        ROWOWScriptVariables accountVariables = ROWOW->GetIdentity(player)->AccountVariables;
         player->CustomData.Erase("ROWOWIdentity");
+        ROWOWIdentity* identity = player->CustomData.GetDefault<ROWOWIdentity>("ROWOWIdentity");
+        identity->IsLoaded = true;
+        identity->CharacterGUID = player->GetGUID().GetCounter();
+        identity->AccountVariables = accountVariables;
         if (wasInForm == true)
             ROWOW->EnterROForm(player);
         handler->PSendSysMessage("Reset {}'s Ragnarok Online identity.", player->GetName());
