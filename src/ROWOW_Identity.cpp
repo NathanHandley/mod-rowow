@@ -1009,7 +1009,7 @@ void ROWOWMod::CompleteROFormChange(Player* player)
             // max health also takes that much health, so the form's HP and SP are put back after
             uint32 formHealth = player->GetHealth();
             uint32 formSP = player->GetPower(POWER_MANA);
-            player->UnsummonPetTemporaryIfAny();
+            StowCharacterPet(player, *identity);
             player->UnsummonAllTotems();
             RemovePositiveAuras(player, [](uint32 /*spellID*/) { return false; });
             identity->SuspendedPassiveSpellIDs.clear();
@@ -1082,6 +1082,7 @@ void ROWOWMod::CompleteROFormChange(Player* player)
                     player->IsNeedCastPassiveSpellAtLearn(spellInfo) == true && player->HasAura(spellID) == false)
                     player->CastSpell(player, spellID, true);
             }
+            RestoreCharacterPet(player, *identity);
             player->ResummonPetTemporaryUnSummonedIfAny();
         }
         identity->SuspendedPassiveSpellIDs.clear();
@@ -1093,9 +1094,12 @@ void ROWOWMod::CompleteROFormChange(Player* player)
                 player->SetPower(Powers(powerIndex), std::min(powers[powerIndex], player->GetMaxPower(Powers(powerIndex))));
         }
     }
+    bool isFormChanged = identity->IsFormArrivalPending == true || identity->IsFormDeparturePending == true || identity->WasInFormAtLoad == true;
     identity->IsFormArrivalPending = false;
     identity->IsFormDeparturePending = false;
     identity->WasInFormAtLoad = false;
+    if (isFormChanged == true)
+        SendFormActionButtons(player, *identity); // In the world now, so the client takes every button (the arrival's left the other side's on the empty ones)
     SendROFormStateToClient(player);
     SendROStatusToClient(player);
     if (identity->IsInForm == true)
@@ -1604,6 +1608,36 @@ void ROWOWMod::SetIdentityActionButton(Player* player, uint8 button, uint32 pack
     else
         identity->ActionsByButton[button] = packedAction;
     identity->AreActionsChanged = true;
+}
+
+void ROWOWMod::SendFormActionButtons(Player* player, ROWOWIdentity const& identity) const
+{
+    // With the character in the world, the client sets every button from these (a used one, or none) instead of only the used ones
+    if (identity.IsInForm == true)
+        SendIdentityActionButtons(player, identity);
+    else
+        player->SendActionButtons(1);
+}
+
+void ROWOWMod::StowCharacterPet(Player* player, ROWOWIdentity& identity) const
+{
+    // A pet the core or a module summoned again in the form (arriving, logging in) goes away again, its number kept by the identity rather than
+    // the character, so nothing summons it until the form comes off.  Its row stays the current pet's, so a logout in the form keeps it
+    if (player->GetPet() != nullptr)
+        player->UnsummonPetTemporaryIfAny();
+    if (player->GetTemporaryUnsummonedPetNumber() != 0)
+    {
+        identity.StowedPetNumber = player->GetTemporaryUnsummonedPetNumber();
+        player->SetTemporaryUnsummonedPetNumber(0);
+    }
+}
+
+void ROWOWMod::RestoreCharacterPet(Player* player, ROWOWIdentity& identity) const
+{
+    // The pet put away for the form is the character's temporarily unsummoned one again, for the core to summon back out of the RO world
+    if (identity.StowedPetNumber != 0 && player->GetTemporaryUnsummonedPetNumber() == 0)
+        player->SetTemporaryUnsummonedPetNumber(identity.StowedPetNumber);
+    identity.StowedPetNumber = 0;
 }
 
 Item* ROWOWMod::GetIdentityEquippedItem(Player* player, uint32 equipPosition) const

@@ -121,6 +121,9 @@ public:
         ROWOW->UpdateStatusChanges(player);
         if (ROWOW->IsEnabled == false || ROWOW->IsInROForm(player) == false)
             return;
+        // The character's pet stays put away in the form, whatever summoned it again (the core on arrival or at login)
+        if (player->GetPet() != nullptr || player->GetTemporaryUnsummonedPetNumber() != 0)
+            ROWOW->StowCharacterPet(player, *ROWOW->GetIdentity(player));
         ROWOW->CheckNoSaveArrival(player);
         ROWOW->CheckArrivalFloor(player);
         ROWOW->UpdateLoginDeath(player, p_time);
@@ -779,6 +782,7 @@ public:
             { "cardlist", HandleROCardListCommand, SEC_PLAYER,   Console::No },
             { "compound", HandleROCompoundCommand, SEC_PLAYER,   Console::No },
             { "skillup",  HandleROSkillUpCommand, SEC_PLAYER,    Console::No },
+            { "skillplan", HandleROSkillPlanCommand, SEC_PLAYER, Console::No },
             { "skills",   HandleROSkillsCommand, SEC_PLAYER,     Console::No },
             { "cart",     HandleROCartCommand,   SEC_PLAYER,     Console::No },
             { "cartadd",  HandleROCartAddCommand, SEC_PLAYER,    Console::No },
@@ -1027,6 +1031,28 @@ public:
             skillID = uint16(strtoul(skillName.c_str(), nullptr, 10));
         if (ROWOW->PCSkillUp(player, skillID) == false)
             ROWOW->SendSkillsToClient(player, *ROWOW->GetIdentity(player), true); // Refused: the window shows the tree again
+        return true;
+    }
+
+    static bool HandleROSkillPlanCommand(ChatHandler* handler, std::string planText)
+    {
+        // The Skill window's Apply: the skill points it planned, "<skill ID>:<levels>,..." with the needed skills first, each level raised as
+        // .ro skillup raises it (one command, as one chat line per level would trip the chat flood limit).  It stops at the first refused level
+        Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
+        if (player == nullptr || ROWOW->IsInROForm(player) == false)
+            return false;
+        bool isRefused = false;
+        for (std::string_view entryText : Acore::Tokenize(planText, ',', false))
+        {
+            std::vector<std::string_view> fields = Acore::Tokenize(entryText, ':', false);
+            uint16 skillID = fields.size() == 2 ? uint16(strtoul(std::string(fields[0]).c_str(), nullptr, 10)) : 0;
+            uint32 levelCount = fields.size() == 2 ? uint32(strtoul(std::string(fields[1]).c_str(), nullptr, 10)) : 0;
+            for (uint32 levelIndex = 0; levelIndex < levelCount && isRefused == false; levelIndex++)
+                isRefused = ROWOW->PCSkillUp(player, skillID) == false;
+            if (skillID == 0 || isRefused == true)
+                break;
+        }
+        ROWOW->SendSkillsToClient(player, *ROWOW->GetIdentity(player), true);
         return true;
     }
 

@@ -2040,6 +2040,7 @@ struct ROWOWIdentity : public DataMap::Base
     uint32 WoWShapeshiftSpellID = 0; // The stance or form the character came in with (the arrival takes it off), 0 for none or not known
     std::vector<uint32> HiddenSpellIDs; // The character's spells the client was told to forget for the form
     std::vector<uint32> SuspendedPassiveSpellIDs; // The passive auras of those, taken off for the form and cast again on leaving it
+    uint32 StowedPetNumber = 0; // The character's pet put away for the form (its temporarily unsummoned pet number, taken so nothing summons it in the form)
 };
 
 #define ROWOW_ARRIVAL_FLOOR_TOLERANCE               3.0f    // Yards above the floor an arrival may be before it's put down on it
@@ -2333,6 +2334,15 @@ public:
     void SendIdentityActionButtons(Player* player, ROWOWIdentity const& identity) const;
     void SetIdentityActionButton(Player* player, uint8 button, uint32 packedAction);
 
+    // The action bars of the side the character is on, sent again once it's in the world.  During a far teleport the client has no
+    // character yet, so it ignores the clear and only fills in the new bars' used buttons: the other side's stayed on every empty one
+    void SendFormActionButtons(Player* player, ROWOWIdentity const& identity) const;
+
+    // The character's pet is put away while in the form, as it can't go to the RO world: a far teleport only unsummons it for the trip (and the
+    // core summons it again on arrival, as logging in does), so in the form its pet number is kept by the identity until the form comes off
+    void StowCharacterPet(Player* player, ROWOWIdentity& identity) const;
+    void RestoreCharacterPet(Player* player, ROWOWIdentity& identity) const;
+
     // The RO item worn in an RO equipment position, or null
     Item* GetIdentityEquippedItem(Player* player, uint32 equipPosition) const;
 
@@ -2398,6 +2408,7 @@ public:
     uint16 SkillTreeGetMax(uint16 skillID, uint16 jobID) const; // skill_tree_get_max
     uint32 PCCalcSkillPoint(ROWOWIdentity const& identity) const; // pc_calc_skillpoint: the points spent
     uint16 PCCalcSkillTreeNormalizeJob(ROWOWIdentity const& identity) const; // pc_calc_skilltree_normalize_job: the job whose tree it may use
+    void GetSkillUpLimitPoints(ROWOWIdentity const& identity, int32& firstJobSkillPointsOut, int32& secondJobSkillPointsOut) const; // skillup_limit's
     void PCCalcSkillTree(ROWOWIdentity& identity) const; // pc_calc_skilltree
     bool PCSkillUp(Player* player, uint16 skillID); // pc_skillup
     void PCSkill(Player* player, uint16 skillID, uint16 level); // pc_skill (ADDSKILL_PERMANENT): a quest NPC or a GM sets a skill's level

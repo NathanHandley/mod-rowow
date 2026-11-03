@@ -709,6 +709,29 @@ uint32 ROWOWMod::PCCalcSkillPoint(ROWOWIdentity const& identity) const
     return skillPoints;
 }
 
+void ROWOWMod::GetSkillUpLimitPoints(ROWOWIdentity const& identity, int32& firstJobSkillPointsOut, int32& secondJobSkillPointsOut) const
+{
+    // skillup_limit's skill points used before the first job's skills open (the Novice's basic skill points: its max job level less 1), and
+    // before a second job's open (those and the first job's: the job level it changed at less 1).  0 for none
+    firstJobSkillPointsOut = 0;
+    secondJobSkillPointsOut = 0;
+    ROWOWJob const* job = GetJob(identity.JobID);
+    if (BattleConfig.SkillUpLimit == 0 || job == nullptr)
+        return;
+    ROWOWJob const* noviceJob = GetJob(ROWOW_JOB_NOVICE);
+    firstJobSkillPointsOut = noviceJob != nullptr ? int32(noviceJob->MaxJobLevel) - 1 : 9;
+    if (job->FirstJobID > 0)
+    {
+        int64 changeLevel = GetIdentityVariable(identity, JobChange2ndVariable);
+        if (changeLevel == 0)
+        {
+            ROWOWJob const* firstJob = GetJob(uint16(job->FirstJobID));
+            changeLevel = firstJob != nullptr ? firstJob->MaxJobLevel : 0;
+        }
+        secondJobSkillPointsOut = firstJobSkillPointsOut + int32(changeLevel) - 1;
+    }
+}
+
 uint16 ROWOWMod::PCCalcSkillTreeNormalizeJob(ROWOWIdentity const& identity) const
 {
     // pc_calc_skilltree_normalize_job: with skillup_limit, a job's skills wait until the Novice's basic skill points (the Novice's max job
@@ -718,22 +741,13 @@ uint16 ROWOWMod::PCCalcSkillTreeNormalizeJob(ROWOWIdentity const& identity) cons
         return identity.JobID;
     uint16 normalizedJobID = identity.JobID;
     int32 skillPoints = int32(PCCalcSkillPoint(identity));
-    ROWOWJob const* noviceJob = GetJob(ROWOW_JOB_NOVICE);
-    int32 noviceSkills = noviceJob != nullptr ? int32(noviceJob->MaxJobLevel) - 1 : 9;
-    if (skillPoints < noviceSkills)
+    int32 firstJobSkillPoints = 0;
+    int32 secondJobSkillPoints = 0;
+    GetSkillUpLimitPoints(identity, firstJobSkillPoints, secondJobSkillPoints);
+    if (skillPoints < firstJobSkillPoints)
         normalizedJobID = ROWOW_JOB_NOVICE;
-    else if (job->FirstJobID >= 0)
-    {
-        skillPoints -= noviceSkills;
-        int64 changeLevel = GetIdentityVariable(identity, JobChange2ndVariable);
-        if (changeLevel == 0)
-        {
-            ROWOWJob const* firstJob = GetJob(uint16(job->FirstJobID));
-            changeLevel = firstJob != nullptr ? firstJob->MaxJobLevel : 0;
-        }
-        if (job->FirstJobID > 0 && skillPoints < int32(changeLevel) - 1)
-            normalizedJobID = uint16(job->FirstJobID);
-    }
+    else if (job->FirstJobID > 0 && skillPoints < secondJobSkillPoints)
+        normalizedJobID = uint16(job->FirstJobID);
     if (normalizedJobID == identity.JobID)
         return identity.JobID;
 
@@ -1150,8 +1164,11 @@ void ROWOWMod::RefreshIdentitySkills(Player* player, ROWOWIdentity& identity)
 
 void ROWOWMod::SendSkillsToClient(Player* player, ROWOWIdentity& identity, bool isForced)
 {
-    // ROWOWSKILLS: the skill window's tree, in parts the client puts back together.  "B\t<skill points>\t<job>:<job name>,..." (its tabs), then the skills of
-    // the job's tree and any others learned, "S\t<skill>:<level>:<max level>:<1 when it can be learned or raised now>[:1 for Plagiarism's copy],...", then "E"
+    // ROWOWSKILLS: the skill window's tree, in parts the client puts back together.  "B\t<skill points>\t<job>:<job name>,...\t<skill points used>:<used
+    // before the first job's skills open>:<used before the second job's>" (its tabs, and skillup_limit's points, 0 for none), then the skills of
+    // the job's tree and any others learned, "S\t<skill>:<level>:<max level>:<1 when it can be learned or raised now>:<1 Plagiarism's copy, 2 equipment's off the
+    // tree, 3 equipment's on it, or nothing>:<1 when skill points can raise it at all (no quest, wedding or spirit skill)>:<the skills and levels it needs first,
+    // <skill>-<level>/...>,...", then "E".  The window plans skill points on the needed skills before a skill as RO's does
     std::vector<std::string> messages;
     std::string jobIDsText;
     for (uint16 jobID : GetSkillTreeJobIDs(identity.JobID))
@@ -1159,7 +1176,11 @@ void ROWOWMod::SendSkillsToClient(Player* player, ROWOWIdentity& identity, bool 
         ROWOWJob const* job = GetJob(jobID);
         jobIDsText += fmt::format("{}{}:{}", jobIDsText.empty() == true ? "" : ",", jobID, job != nullptr ? job->Name : "");
     }
-    messages.push_back(fmt::format("ROWOWSKILLS\tB\t{}\t{}", identity.SkillPoints, jobIDsText));
+    int32 firstJobSkillPoints = 0;
+    int32 secondJobSkillPoints = 0;
+    GetSkillUpLimitPoints(identity, firstJobSkillPoints, secondJobSkillPoints);
+    messages.push_back(fmt::format("ROWOWSKILLS\tB\t{}\t{}\t{}:{}:{}", identity.SkillPoints, jobIDsText, PCCalcSkillPoint(identity), firstJobSkillPoints,
+        secondJobSkillPoints));
     std::set<uint16> skillIDs;
     auto treeIter = SkillTreesByJobID.find(identity.JobID);
     if (treeIter != SkillTreesByJobID.end())
@@ -1181,12 +1202,21 @@ void ROWOWMod::SendSkillsToClient(Player* player, ROWOWIdentity& identity, bool 
         if (auto tempIter = identity.TempSkillLevelsByID.find(skillID); tempIter != identity.TempSkillLevelsByID.end())
             level = tempIter->second; // A spirit link's skill, at its level for now
         bool isOnTree = identity.TreeSkillIDs.find(skillID) != identity.TreeSkillIDs.end();
-        std::string skillText = fmt::format("{}:{}:{}:{}", skillID, level, SkillTreeGetMax(skillID, identity.JobID), isOnTree == true ? 1 : 0);
+        ROWOWSkill const* skill = GetSkill(skillID);
+        ROWOWSkillTreeEntry const* treeEntry = GetSkillTreeEntry(identity.JobID, skillID);
+        bool isRaisedWithPoints = skill != nullptr && treeEntry != nullptr && (skill->IsQuest == false || BattleConfig.QuestSkillLearn != 0) &&
+            skill->IsWedding == false && skill->IsSpirit == false;
+        std::string needsText;
+        if (treeEntry != nullptr)
+            for (auto const& need : treeEntry->Needs)
+                needsText += fmt::format("{}{}-{}", needsText.empty() == true ? "" : "/", need.first, need.second);
+        std::string skillText = fmt::format("{}:{}:{}:{}::{}:{}", skillID, level, SkillTreeGetMax(skillID, identity.JobID), isOnTree == true ? 1 : 0,
+            isRaisedWithPoints == true ? 1 : 0, needsText);
         if (skillID == identity.CloneSkillID)
-            skillText = fmt::format("{}:{}:{}:1:1", skillID, identity.CloneSkillLevel, identity.CloneSkillLevel);
+            skillText = fmt::format("{}:{}:{}:1:1:0:", skillID, identity.CloneSkillLevel, identity.CloneSkillLevel);
         else if (auto itemIter = identity.ItemSkillLevelsByID.find(skillID); itemIter != identity.ItemSkillLevelsByID.end())
-            skillText = fmt::format("{}:{}:{}:1:{}", skillID, itemIter->second, std::max<uint16>(itemIter->second, SkillTreeGetMax(skillID, identity.JobID)),
-                GetSkillTreeEntry(identity.JobID, skillID) != nullptr ? 3 : 2); // Equipment's: 3 for a skill of the job's tree, which shows there unraised
+            skillText = fmt::format("{}:{}:{}:1:{}:0:", skillID, itemIter->second, std::max<uint16>(itemIter->second, SkillTreeGetMax(skillID, identity.JobID)),
+                treeEntry != nullptr ? 3 : 2); // Equipment's: 3 for a skill of the job's tree, which shows there unraised
         if (skillsText.empty() == false && skillsText.size() + 1 + skillText.size() > SkillMessageChunkLength)
         {
             messages.push_back("ROWOWSKILLS\tS\t" + skillsText);
