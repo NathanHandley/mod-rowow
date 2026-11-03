@@ -331,6 +331,8 @@ public:
 
     // Whether a word is a constant (registered, or with a symbol prefix), and its value
     bool GetConstant(std::string const& name, int64& valueOut);
+    // The same at run time, for a name worked out as it runs (getd): only constants and symbols already known, so nothing is written
+    bool GetKnownConstant(std::string const& name, int64& valueOut) const;
 
     int32 GetCommandIndex(std::string const& name) const;
     ROWOWScriptCommand const* GetCommand(int32 commandIndex) const;

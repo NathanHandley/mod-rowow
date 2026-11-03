@@ -1193,9 +1193,7 @@ bool ROWOWMod::GetWorldTravelDestination(Player* player, ROWOWPosition& destinat
 
 void ROWOWMod::RespawnAtSavePoint(Player* player)
 {
-    // rAthena's pc_respawn: standing again at the save point with the restart HP and SP (pc_setrestartvalue, from the respawn values
-    // status_calc_pc_sub works out).  With restart_hp_rate below 50 a Novice comes back with half its HP and everyone else with 1, healed
-    // on top of the 1 HP a resurrection starts from, and SP stays as it was unless that's below the restart SP
+    // rAthena's pc_respawn: standing again at the save point with the restart HP and SP
     ROWOWIdentity* identity = GetIdentity(player);
     ROWOWPosition savePoint = identity->SavePoint;
     if (savePoint.IsSet == false && GetCellPosition(StartMapID, StartCellX, StartCellY, savePoint) == false)
@@ -1207,6 +1205,16 @@ void ROWOWMod::RespawnAtSavePoint(Player* player)
         savePoint.Z = player->GetPositionZ();
         savePoint.O = player->GetOrientation();
     }
+    PCSetRestartValue(player);
+    player->TeleportTo(savePoint.MapID, savePoint.X, savePoint.Y, savePoint.Z, savePoint.O);
+}
+
+void ROWOWMod::PCSetRestartValue(Player* player)
+{
+    // pc_setrestartvalue's normal resurrection (type 1), from the respawn values status_calc_pc_sub works out.  With restart_hp_rate below
+    // 50 a Novice comes back with half its HP and everyone else with 1, healed on top of the 1 HP a resurrection starts from, and SP stays as
+    // it was unless that's below the restart SP
+    ROWOWIdentity* identity = GetIdentity(player);
     uint32 maxHP = identity->Status.MaxHP;
     uint32 maxSP = identity->Status.MaxSP;
     uint32 restartHP = 0;
@@ -1224,7 +1232,6 @@ void ROWOWMod::RespawnAtSavePoint(Player* player)
     player->SetHealth(std::min(1 + restartHP, player->GetMaxHealth()));
     player->SetPower(POWER_MANA, std::min(sp, player->GetMaxPower(POWER_MANA)));
     SendStatusChangesToClient(player); // The statuses that stay through death show again
-    player->TeleportTo(savePoint.MapID, savePoint.X, savePoint.Y, savePoint.Z, savePoint.O);
 }
 
 void ROWOWMod::SendROFormClientSpellsAndActions(Player* player, ROWOWIdentity const& identity) const

@@ -484,6 +484,10 @@ void ROWOWMod::RegisterNpcScriptCommands()
     {
         std::string name;
         uint32 index = splitDynamicName(GetTextArgument(arguments, 0), name);
+        // get_val: a constant's name is the constant (the Mercenary Managers read getd("SPEAR_MERC_GUILD"))
+        int64 constant = 0;
+        if (ROWOWSCRIPT->GetKnownConstant(name, constant) == true)
+            return ROWOWScriptValue::FromNumber(constant);
         return ROWOWSCRIPT->GetVariable(context, name, index);
     });
     engine->RegisterCommand("getdref", [splitDynamicName](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const& arguments)

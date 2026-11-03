@@ -49,6 +49,26 @@ namespace
     {
         ChatHandler(player->GetSession()).SendSysMessage("You can't do that as your Ragnarok Online self.");
     }
+
+    bool IsAuctionSaleRestricted(Player* player, WorldPacket const& packet)
+    {
+        // CMSG_AUCTION_SELL_ITEM: the auctioneer, the item count, then each item's GUID and count.  A short packet throws as the handler's
+        // own read would, and the session update drops it
+        WorldPacket packetCopy(packet);
+        ObjectGuid auctioneerGUID;
+        uint32 itemCount = 0;
+        packetCopy >> auctioneerGUID >> itemCount;
+        for (uint32 itemIndex = 0; itemIndex < itemCount; itemIndex++)
+        {
+            ObjectGuid itemGUID;
+            uint32 count = 0;
+            packetCopy >> itemGUID >> count;
+            Item* item = player->GetItemByGuid(itemGUID);
+            if (item != nullptr && ROWOW->ItemDBIsRestricted(item, &ROWOWItem::IsNoAuction) == true)
+                return true;
+        }
+        return false;
+    }
 }
 
 class ROWOW_IdentityPlayerScript : public PlayerScript
@@ -361,8 +381,20 @@ public:
         if (ROWOW->IsEnabled == false || session == nullptr)
             return true;
         Player* player = session->GetPlayer();
-        if (player == nullptr || ROWOW->IsInROForm(player) == false)
+        if (player == nullptr)
             return true;
+        if (ROWOW->IsInROForm(player) == false)
+        {
+            // auction_register's itemdb_canauction, for a character listing an RO item out of the form (in the form every auction is refused)
+            if (packet.GetOpcode() == CMSG_AUCTION_SELL_ITEM && IsAuctionSaleRestricted(player, packet) == true)
+            {
+                // The answer the handler gives an item that can't be traded, or the client's auction window waits for one and lists nothing more
+                ChatHandler(session).SendSysMessage("This item cannot be auctioned.");
+                session->SendAuctionCommandResult(0, AUCTION_SELL_ITEM, ERR_AUCTION_DATABASE_ERROR);
+                return false;
+            }
+            return true;
+        }
 
         switch (packet.GetOpcode())
         {

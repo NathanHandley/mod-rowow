@@ -577,13 +577,14 @@ struct ROWOWItem
     int32 WeaponLevel = 0;
     int32 Weight = 0; // In tenths
     int32 Buy = 0; // The NPC shops' price (zeny)
-    bool IsNoTrade = false; // item_db's Trade restrictions read (itemdb_cantrade, itemdb_cansell, itemdb_cancartstore, itemdb_canstore, itemdb_canguildstore, itemdb_canmail)
+    bool IsNoTrade = false; // item_db's Trade restrictions read (itemdb_cantrade, itemdb_cansell, itemdb_cancartstore, itemdb_canstore, itemdb_canguildstore, itemdb_canmail, itemdb_canauction)
     bool IsBuyingStore = false; // flag.buyingstore: a buying store may ask for it
     bool IsNoSell = false;
     bool IsNoCart = false;
     bool IsNoStorage = false;
     bool IsNoGuildStorage = false;
     bool IsNoMail = false;
+    bool IsNoAuction = false;
     std::vector<std::string> HatEffectNames; // The hat effects (HAT_EF_*, in upper case) it shows while worn (only the post-renewal looks have them)
 };
 
@@ -674,6 +675,7 @@ struct ROWOWBattleConfig
     int32 SPRate = 100;
     int32 RestartHPRate = 0;
     int32 RestartSPRate = 0;
+    int32 ReviveOnWarp = 0;
     int32 MaxHPLevel99 = 330000;
     int32 MaxHPLevel150 = 660000;
     int32 MaxHP = 1100000;
@@ -2291,6 +2293,7 @@ public:
 
     // An RO death's "return to save point": back to life at the save point with full HP and SP
     void RespawnAtSavePoint(Player* player);
+    void PCSetRestartValue(Player* player); // pc_setrestartvalue's normal resurrection: back to life with the restart HP and SP
 
     // Tells the client's RO interface (the RO_Identity addon) whether the player is in the form, under the ROWOWFORM prefix
     void SendROFormStateToClient(Player* player) const;

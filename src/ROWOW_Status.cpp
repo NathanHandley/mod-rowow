@@ -208,6 +208,7 @@ void ROWOWMod::LoadStatusData()
         readValue("sp_rate", BattleConfig.SPRate);
         readValue("restart_hp_rate", BattleConfig.RestartHPRate);
         readValue("restart_sp_rate", BattleConfig.RestartSPRate);
+        readValue("revive_onwarp", BattleConfig.ReviveOnWarp);
         readValue("max_hp_lv99", BattleConfig.MaxHPLevel99);
         readValue("max_hp_lv150", BattleConfig.MaxHPLevel150);
         readValue("max_hp", BattleConfig.MaxHP);
@@ -669,6 +670,8 @@ void ROWOWMod::LoadStatusData()
                     item.IsNoGuildStorage = tradeField.second == "true";
                 else if (tradeField.first == "NoMail")
                     item.IsNoMail = tradeField.second == "true";
+                else if (tradeField.first == "NoAuction")
+                    item.IsNoAuction = tradeField.second == "true";
             }
             item.HatEffectNames = ROWOWDataTable::ParseTextList(itemTable->GetCell(rowIndex, hatEffectsColumnIndex));
             for (std::string& hatEffectName : item.HatEffectNames) // The converter's mod_rowow_hat_effect goes by the upper case name

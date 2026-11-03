@@ -968,6 +968,14 @@ void ROWOWMod::CheckNpcTouchAreas(Player* player)
     auto npcIDsIter = TouchNpcIDsByMapID.find(mapID);
     if (npcIDsIter == TouchNpcIDsByMapID.end() || IsInROForm(player) == false)
         return;
+    // A trade holds its items by GUID until both accept, so no script starts on a player in one: its delitem would empty the trade's side
+    // while the other side's zeny still moved (rAthena's trade_check fails the commit instead).  The cell is checked again until the trade
+    // ends, so an area under the player still goes off then
+    if (player->GetTradeData() != nullptr)
+    {
+        identity->NpcTouchX = -1;
+        return;
+    }
     for (uint32 npcID : npcIDsIter->second)
     {
         ROWOWNpc const* npc = GetNpc(npcID);

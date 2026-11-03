@@ -1138,7 +1138,10 @@ bool ROWOWMod::ItemDBIsRestricted(Item const* item, bool ROWOWItem::* restrictio
 
 void ROWOWMod::WarpPlayerToCell(Player* player, std::string const& mapName, int32 x, int32 y)
 {
-    // pc_setpos for a script's warp: "SavePoint" and "Random" are the save point and a random spot on the map
+    // pc_setpos for a script's warp: "SavePoint" and "Random" are the save point and a random spot on the map.  revive_onwarp: a dead
+    // player is revived before it's warped (the Knight test's arena warps a player who died in one stage into the next)
+    if (BattleConfig.ReviveOnWarp != 0 && player->IsAlive() == false)
+        PCSetRestartValue(player);
     if (mapName == "SavePoint" || mapName == "Save")
         TeleportToSavePoint(player);
     else if (mapName == "Random")

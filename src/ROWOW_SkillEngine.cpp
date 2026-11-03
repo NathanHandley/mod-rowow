@@ -3760,6 +3760,19 @@ void ROWOWMod::SkillCombo(Unit* src, Unit* dsrc, Unit* bl, uint16 skillID, uint1
             case ROWOW_SKILL_TK_STORMKICK:
             case ROWOW_SKILL_TK_DOWNKICK:
             case ROWOW_SKILL_TK_COUNTER:
+                if (src->IsPlayer() == true && PCFameRank(src->GetGUID().GetCounter(), ROWOW_FAME_TAEKWON) != 0)
+                {
+                    // Extend combo time.
+                    ROWOWStatusChangeEntry* sce = GetStatusChange(src)->GetSCE(ROWOW_SC_COMBO);
+                    sce->Val1 = skillID; // Update combo-skill
+                    sce->Val3 = skillID;
+                    if (sce->TimerTime != 0)
+                    {
+                        sce->TimerTime = tick + uint64(std::max(0, sce->Val4));
+                        sce->EndTime = sce->TimerTime;
+                    }
+                    break;
+                }
                 UnitCancelCombo(src); // Cancel combo wait
                 break;
             default:

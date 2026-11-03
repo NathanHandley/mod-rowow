@@ -1521,6 +1521,22 @@ bool ROWOWScriptEngine::GetConstant(std::string const& name, int64& valueOut)
     return true;
 }
 
+bool ROWOWScriptEngine::GetKnownConstant(std::string const& name, int64& valueOut) const
+{
+    std::string lowerName = ToLower(name);
+    auto constantIter = ConstantsByName.find(lowerName);
+    if (constantIter != ConstantsByName.end())
+    {
+        valueOut = constantIter->second;
+        return true;
+    }
+    auto symbolIter = SymbolsByName.find(lowerName);
+    if (symbolIter == SymbolsByName.end())
+        return false;
+    valueOut = symbolIter->second;
+    return true;
+}
+
 std::string ROWOWScriptEngine::GetSymbolName(int64 value) const
 {
     if (IsSymbol(value) == false)
