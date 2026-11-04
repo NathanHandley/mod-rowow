@@ -3057,12 +3057,15 @@ void ROWOWMod::SkillUnitMoveUnitGroup(Map* map, std::shared_ptr<ROWOWSkillUnitGr
                 return 0;
             });
         }
-        // Move Cell using "smart" criteria (avoid useless moving around)
+        // Move Cell using "smart" criteria (avoid useless moving around).  A cell stays on its RO map: on a stitched map one that would move onto
+        // another part (over the seam) stays where it is
+        uint32 cellMapKey = GetMapKey(map->GetId(), unit1.X, unit1.Y);
         switch (mFlag[i])
         {
             case 0:
                 // Cell moves independently, safely move it.
-                SkillUnitMoveBlock(map, mapUnits, *group, i, unit1.X + dx, unit1.Y + dy);
+                if (GetMapKey(map->GetId(), unit1.X + dx, unit1.Y + dy) == cellMapKey)
+                    SkillUnitMoveBlock(map, mapUnits, *group, i, unit1.X + dx, unit1.Y + dy);
                 break;
             case 1:
                 // Cell moves unto another cell, look for a replacement cell that won't collide and has no cell moving into it (flag == 2)
@@ -3072,7 +3075,8 @@ void ROWOWMod::SkillUnitMoveUnitGroup(Map* map, std::shared_ptr<ROWOWSkillUnitGr
                         continue;
                     // Move to where this cell would had moved.
                     ROWOWSkillUnit const& unit2 = group->Units[j];
-                    SkillUnitMoveBlock(map, mapUnits, *group, i, unit2.X + dx, unit2.Y + dy);
+                    if (GetMapKey(map->GetId(), unit2.X + dx, unit2.Y + dy) == cellMapKey)
+                        SkillUnitMoveBlock(map, mapUnits, *group, i, unit2.X + dx, unit2.Y + dy);
                     j++; // Skip this cell as we have used it.
                     break;
                 }

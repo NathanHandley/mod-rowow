@@ -200,7 +200,7 @@ bool ROWOWMod::MobCheckVisibility(Creature* md, Unit const* target, bool isCheck
     int32 viewRange = status != nullptr ? status->Range3 : BattleConfig.AreaSize;
     if (isCheckBlind == true && GetSCE(md, ROWOW_SC_BLIND) != nullptr)
         viewRange = 1;
-    if (md->GetMap() != target->GetMap() || CheckDistanceBL(md, target, viewRange) == false)
+    if (IsOnSameROMap(md, target) == false || CheckDistanceBL(md, target, viewRange) == false) // tbl->m != md->bl.m (a stitched map's other part)
         return false;
     return StatusCheckVisibility(md, target);
 }
@@ -628,12 +628,12 @@ bool ROWOWMod::MobAISubHard(Creature* md, uint64 tick)
     {
         // Check validity of current target. [Skotlex]
         tbl = ObjectAccessor::GetUnit(*md, mob->TargetID);
-        if (tbl == nullptr || tbl->IsInWorld() == false || tbl->GetMap() != md->GetMap() || tbl->IsAlive() == false || GetROStatus(tbl) == nullptr ||
+        if (tbl == nullptr || tbl->IsInWorld() == false || IsOnSameROMap(tbl, md) == false || tbl->IsAlive() == false || GetROStatus(tbl) == nullptr ||
             (mob->AttackTargetID.IsEmpty() == true && StatusCheckSkillUse(md, tbl, 0, 0) == false) ||
             MobCanTarget(md, tbl) == false || PCIsInvincible(tbl) == true)
         {
             // No valid target: walk at least "mob_chase_refresh" cells before dropping the target unless target is non-existent
-            if (tbl != nullptr && tbl->IsAlive() == true && tbl->GetMap() == md->GetMap() && mob->IsWalking == true &&
+            if (tbl != nullptr && tbl->IsAlive() == true && IsOnSameROMap(tbl, md) == true && mob->IsWalking == true &&
                 (canMove == false || UnitWalkPathPos(md, mob, tick) <= BattleConfig.MobChaseRefresh))
                 return true;
             MobUnlockTarget(md, tick); // Unlock target
@@ -668,7 +668,7 @@ bool ROWOWMod::MobAISubHard(Creature* md, uint64 tick)
         else if ((abl = ObjectAccessor::GetUnit(*md, mob->AttackedID)) != nullptr && (tbl == nullptr || MobCanChangeTarget(md, mob, abl, mode) == true))
         {
             int32 dist = 0;
-            if (abl->GetMap() != md->GetMap() || abl->IsInWorld() == false ||
+            if (abl->IsInWorld() == false || IsOnSameROMap(abl, md) == false ||
                 (dist = DistanceBL(md, abl)) > BattleConfig.AreaSize || // Attacker longer than visual area
                 BattleCheckTarget(md, abl, ROWOW_BCT_ENEMY) <= 0 || // Attacker is not enemy of mob
                 ((BattleConfig.MobAI & 0x2) != 0 && StatusCheckSkillUse(md, abl, 0, 0) == false) || // Cannot normal attack back to Attacker

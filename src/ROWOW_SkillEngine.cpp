@@ -530,8 +530,9 @@ int32 ROWOWMod::MapForEachInArea(Unit* origin, int32 x0, int32 y0, int32 x1, int
     Acore::UnitListSearcher<Acore::AnyUnitInObjectRangeCheck> searcher(origin, units, check);
     Cell::VisitObjects(origin, searcher, searchRadius);
 
-    // The square is on one RO map, the part of its middle on a stitched map (an RO area ends at its map's edge, never reaching the next part)
-    uint32 areaMapKey = GetMapKey(origin->GetMapId(), (x0 + x1) / 2, (y0 + y1) / 2);
+    // The square is on the origin's RO map (rAthena searches src->m), on a stitched map its part: an RO area ends at its map's edge, never
+    // reaching the next part.  (Not the square's middle: a path square from the caster toward a seam has its middle over it)
+    uint32 areaMapKey = GetUnitMapKey(origin);
     int32 returnCount = 0;
     for (Unit* unit : units)
     {

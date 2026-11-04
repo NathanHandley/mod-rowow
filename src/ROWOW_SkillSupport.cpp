@@ -603,7 +603,7 @@ bool ROWOWMod::SkillCastAbraSkill(Unit* src, uint16 skillID, uint16 skillLevel)
     if (skill == nullptr || src->IsAlive() == false || IsROCombatant(src) == false || (sd != nullptr && ud->SkillItemID != skillID))
         return false;
     Unit* selected = sd != nullptr ? sd->GetSelectedUnit() : src->GetVictim();
-    if (selected != nullptr && (selected->GetMap() != src->GetMap() || IsROCombatant(selected) == false))
+    if (selected != nullptr && (IsOnSameROMap(selected, src) == false || IsROCombatant(selected) == false)) // On a stitched map, the caster's part
         selected = nullptr;
     uint8 castType = SkillGetCastType(skillID);
     Unit* target = src;
@@ -1814,11 +1814,12 @@ bool ROWOWMod::MapSearchFreeCell(Unit* center, int32 range, int32& xOut, int32& 
     int32 tries = (range * 2 + 1) * (range * 2 + 1);
     if (tries > 100)
         tries = 100;
+    uint32 mapKey = GetUnitMapKey(center); // A cell of the center's map (on a stitched map, its part)
     while (tries-- > 0)
     {
         int32 x = centerX + int32(urand(0, uint32(range * 2))) - range;
         int32 y = centerY + int32(urand(0, uint32(range * 2))) - range;
-        if (IsCellNoPass(center, *mapGrid, x, y) == false)
+        if (IsCellNoPass(center, *mapGrid, x, y) == false && GetMapKey(center->GetMapId(), x, y) == mapKey)
         {
             xOut = x;
             yOut = y;

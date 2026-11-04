@@ -409,11 +409,14 @@ namespace
             ROWOWSkill const* skill = ROWOW->GetSkill(SkillID);
             int32 area = ROWOWSkill::GetLevelValue(skill->SplashArea, skillLevel);
             int32 interval = std::max(1, skill->UnitInterval);
+            uint32 mapKey = ROWOW->GetMapKey(src->GetMapId(), x, y);
             for (int32 i = 1; i <= ROWOW->SkillGetTime(SkillID, skillLevel) / interval; i++)
             {
-                // Creates a random Cell in the Splash Area
+                // Creates a random Cell in the Splash Area.  One off the map is lost (on a stitched map, one on another part)
                 int32 tmpx = x - area + int32(urand(0, uint32(area * 2)));
                 int32 tmpy = y - area + int32(urand(0, uint32(area * 2)));
+                if (ROWOW->GetMapKey(src->GetMapId(), tmpx, tmpy) != mapKey)
+                    continue;
                 ROWOW->SkillUnitSetting(src, SkillID, skillLevel, tmpx, tmpy, flag + i * interval);
             }
         }

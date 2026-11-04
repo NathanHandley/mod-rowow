@@ -254,7 +254,8 @@ int32 ROWOWMod::ChatJoinChatSub(Player* player, uint32 roomID, std::string const
         uint32 mapID = room.IsPlayerRoom == true ? room.MapID : (npc != nullptr ? npc->MapID : 0);
         int32 roomX = room.IsPlayerRoom == true ? room.X : (npc != nullptr ? npc->X : 0);
         int32 roomY = room.IsPlayerRoom == true ? room.Y : (npc != nullptr ? npc->Y : 0);
-        if (mapID != player->GetMapId() || std::abs(x - roomX) > range || std::abs(y - roomY) > range || (room.IsPlayerRoom == false && (npc == nullptr || npc->IsEnabled == false)))
+        if (mapID != player->GetMapId() || std::abs(x - roomX) > range || std::abs(y - roomY) > range || GetMapKey(mapID, x, y) != GetMapKey(mapID, roomX, roomY) ||
+            (room.IsPlayerRoom == false && (npc == nullptr || npc->IsEnabled == false)))
             return ROWOW_ENTERROOM_FULL;
         if ((room.IsPlayerRoom == true ? int32(room.Users.size()) : int32(room.Users.size()) + 1) >= room.Limit)
             return ROWOW_ENTERROOM_FULL;
@@ -540,6 +541,7 @@ void ROWOWMod::UpdatePlayerWaitingRooms(Player* player, uint32 diff)
     uint32 mapID = player->GetMapId();
     int32 x = 0, y = 0;
     GetUnitCell(player, x, y);
+    uint32 viewerMapKey = GetMapKey(mapID, x, y); // On a stitched map, the rooms and signs of the player's part only
 
     struct ShownRoom
     {
@@ -586,11 +588,12 @@ void ROWOWMod::UpdatePlayerWaitingRooms(Player* player, uint32 diff)
             }
             if (room.IsPlayerRoom == true)
             {
-                if (room.MapID != mapID || std::abs(room.X - x) > BattleConfig.AreaSize || std::abs(room.Y - y) > BattleConfig.AreaSize)
+                if (room.MapID != mapID || std::abs(room.X - x) > BattleConfig.AreaSize || std::abs(room.Y - y) > BattleConfig.AreaSize ||
+                    GetMapKey(mapID, room.X, room.Y) != viewerMapKey)
                     continue;
             }
             else if (npc == nullptr || npc->MapID != mapID || npc->IsEnabled == false || std::abs(npc->X - x) > BattleConfig.AreaSize ||
-                std::abs(npc->Y - y) > BattleConfig.AreaSize)
+                std::abs(npc->Y - y) > BattleConfig.AreaSize || GetMapKey(mapID, npc->X, npc->Y) != viewerMapKey)
                 continue;
             ShownRoom shownRoom;
             shownRoom.NpcID = room.NpcID;
@@ -604,7 +607,8 @@ void ROWOWMod::UpdatePlayerWaitingRooms(Player* player, uint32 diff)
         for (auto const& signByPlayerGUID : ShopSignsByPlayerGUID)
         {
             ROWOWShopSign const& sign = signByPlayerGUID.second;
-            if (sign.MapID == mapID && std::abs(sign.X - x) <= BattleConfig.AreaSize && std::abs(sign.Y - y) <= BattleConfig.AreaSize)
+            if (sign.MapID == mapID && std::abs(sign.X - x) <= BattleConfig.AreaSize && std::abs(sign.Y - y) <= BattleConfig.AreaSize &&
+                GetMapKey(mapID, sign.X, sign.Y) == viewerMapKey)
                 shopLines.push_back(fmt::format("{}\t{}\t{:.2f}\t{:.2f}\t{:.2f}\t{}", sign.IsBuyingStore == true ? "Y" : "V", signByPlayerGUID.first, sign.PositionX,
                     sign.PositionY, sign.PositionZ, sign.Title));
         }

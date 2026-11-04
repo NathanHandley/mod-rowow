@@ -295,6 +295,10 @@ namespace
             ROWOWMapGrid const* mapGrid = ROWOW->GetMapGrid(src->GetMapId());
             if (mapGrid == nullptr)
                 return;
+            // The landing is on the map (on a stitched map, the jumper's part: a jump over the seam would be off its map)
+            uint32 mapKey = ROWOW->GetUnitMapKey(src);
+            if (ROWOW->GetMapKey(src->GetMapId(), x, y) != mapKey || ROWOW->GetMapKey(src->GetMapId(), x1, y1) != mapKey)
+                return;
             if (ROWOW->MapCountOnCell(src, x, y) == 0 && ROWOW->IsCellNoPass(src, *mapGrid, x, y) == false &&
                 ROWOW->MapCountOnCell(src, x1, y1) == 0 && ROWOW->IsCellNoPass(src, *mapGrid, x1, y1) == false)
                 ROWOW->UnitJumpPos(src, x, y);

@@ -160,7 +160,7 @@ void ROWOWMod::VendingVendingListReq(Player* player, Player* vendor)
     // vending_vendinglistreq: the shop's items for the buyer's shop window ("B<tab><vendor><tab><shop id><tab><title>", "S<tab><index>:<template>:<amount>:
     // <price>:<enchantment>:..|...", "E"), or an empty list when it's no shop
     ROWOWIdentity* vendorIdentity = vendor != nullptr ? vendor->CustomData.Get<ROWOWIdentity>("ROWOWIdentity") : nullptr;
-    if (vendorIdentity == nullptr || vendorIdentity->IsVending == false || vendor == player || vendor->GetMap() != player->GetMap())
+    if (vendorIdentity == nullptr || vendorIdentity->IsVending == false || vendor == player || IsOnSameROMap(vendor, player) == false)
     {
         SendAddonMessage(player, fmt::format("ROWOWVENDLIST\tB\t{}\t0\t", vendor != nullptr ? vendor->GetGUID().GetCounter() : 0));
         SendAddonMessage(player, "ROWOWVENDLIST\tE");
@@ -206,8 +206,8 @@ void ROWOWMod::VendingPurchaseReq(Player* player, Player* vendor, uint32 vending
         VendingVendingListReq(player, vendor);
         return;
     }
-    if (vendor->GetMap() != player->GetMap() || DistanceBL(player, vendor) > BattleConfig.AreaSize)
-        return; // shop too far away
+    if (IsOnSameROMap(vendor, player) == false || DistanceBL(player, vendor) > BattleConfig.AreaSize)
+        return; // shop too far away (on a stitched map, another part is another map)
     int32 count = int32(purchases.size());
     if (count < 1 || count > ROWOW_MAX_VENDING || count > int32(vendorIdentity->VendingItems.size()))
         return; // invalid amount of purchased items

@@ -156,7 +156,7 @@ void ROWOWMod::BuyingStoreOpen(Player* player, Player* buyer)
     // buyingstore_open and clif_buyingstore_itemlist: what the store still buys, for the seller's window ("B<tab><buyer GUID><tab><buyer id><tab>
     // <zeny limit><tab><title>", "S<tab><template>:<amount>:<price>|...", "E"), or an empty list for a store that's gone or out of sight
     ROWOWIdentity* buyerIdentity = buyer != nullptr ? buyer->CustomData.Get<ROWOWIdentity>("ROWOWIdentity") : nullptr;
-    if (buyerIdentity == nullptr || buyerIdentity->BuyingStore == nullptr || buyer == player || PCCantAct(player) == true || buyer->GetMap() != player->GetMap() ||
+    if (buyerIdentity == nullptr || buyerIdentity->BuyingStore == nullptr || buyer == player || PCCantAct(player) == true || IsOnSameROMap(buyer, player) == false ||
         DistanceBL(player, buyer) > BattleConfig.AreaSize)
     {
         SendAddonMessage(player, "ROWOWBUYLIST\tB\t0\t0\t0\t");
@@ -197,8 +197,8 @@ void ROWOWMod::BuyingStoreTrade(Player* player, Player* buyer, uint32 buyerID, s
     if (sales.empty() == true)
         return;
     if (PCCantAct(player) == true || buyerIdentity == nullptr || buyerIdentity->BuyingStore == nullptr || buyerIdentity->BuyingStore->BuyerID != buyerID || buyer == player ||
-        buyer->GetMap() != player->GetMap() || DistanceBL(player, buyer) > BattleConfig.AreaSize)
-        return failed(); // not online, not buying or not same store; out of view range
+        IsOnSameROMap(buyer, player) == false || DistanceBL(player, buyer) > BattleConfig.AreaSize)
+        return failed(); // not online, not buying or not same store; out of view range (on a stitched map, another part is another map)
     ROWOWBuyingStore& store = *buyerIdentity->BuyingStore;
 
     // buyer lost zeny in the mean time? fix the limit

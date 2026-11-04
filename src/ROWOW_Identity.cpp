@@ -701,13 +701,26 @@ uint32 ROWOWMod::ResolveMapArea(std::string const& mapName, int32& x1, int32& y1
     y2 += part->CellOffsetY;
     if (part->HasArea() == true)
     {
-        // Kept to the part's cells, as rAthena keeps a box to its map's (one larger than the map would reach into the next part)
+        // Kept to the part's cells, as rAthena keeps a box to its map's (one larger than the map would reach into the next part); a box wholly
+        // off the part holds no cell (far past every map, never -1, which is "the whole map")
         int32 maxX = part->CellOffsetX + part->CellWidth - 1;
         int32 maxY = part->CellOffsetY + part->CellHeight - 1;
-        x1 = std::clamp(x1, part->CellOffsetX, maxX);
-        x2 = std::clamp(x2, part->CellOffsetX, maxX);
-        y1 = std::clamp(y1, part->CellOffsetY, maxY);
-        y2 = std::clamp(y2, part->CellOffsetY, maxY);
+        int32 lowX = std::max(std::min(x1, x2), part->CellOffsetX);
+        int32 highX = std::min(std::max(x1, x2), maxX);
+        int32 lowY = std::max(std::min(y1, y2), part->CellOffsetY);
+        int32 highY = std::min(std::max(y1, y2), maxY);
+        if (lowX > highX || lowY > highY)
+        {
+            constexpr int32 noCell = std::numeric_limits<int32>::max() / 2;
+            x1 = x2 = y1 = y2 = noCell;
+        }
+        else
+        {
+            x1 = lowX;
+            x2 = highX;
+            y1 = lowY;
+            y2 = highY;
+        }
     }
     return part->MapID;
 }
