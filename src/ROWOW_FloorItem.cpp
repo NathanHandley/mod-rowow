@@ -470,7 +470,7 @@ void ROWOWMod::MobDeadDrops(Creature* md, Unit* src, ROWOWLootPriority const& pr
     ROWOWMobSummon const* summon = md->CustomData.Get<ROWOWMobSummon>("ROWOWMobSummon");
     uint8 ai = summon != nullptr ? summon->AI : uint8(ROWOW_AI_NONE);
     std::vector<ROWOWDropItem> dropItems;
-    bool isNoMobLoot = MapIDsByMapFlag.count("nomobloot") != 0 && MapIDsByMapFlag.at("nomobloot").count(md->GetMapId()) != 0;
+    bool isNoMobLoot = HasMapFlag(md, "nomobloot");
     if (isNoDrops == false && isNoMobLoot == false && mob->IsRebirth == false &&
         (ai == ROWOW_AI_NONE || BattleConfig.AlchemistSummonReward == 2 || (ai == ROWOW_AI_SPHERE && BattleConfig.AlchemistSummonReward == 1)))
     {

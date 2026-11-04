@@ -193,8 +193,7 @@ bool ROWOWMod::ChatCreatePCChat(Player* player, std::string const& title, std::s
         return false; // Prevent people abusing the chat system by creating multiple chats, as pointed out by End of Exam. [Skotlex]
     if (identity->IsVending == true || identity->BuyingStore != nullptr)
         return false; // not chat, when you already have a store open
-    auto mapIDsIter = MapIDsByMapFlag.find("nochat");
-    if (mapIDsIter != MapIDsByMapFlag.end() && mapIDsIter->second.find(player->GetMapId()) != mapIDsIter->second.end())
+    if (HasMapFlag(player, "nochat") == true)
     {
         handler.SendSysMessage("You can't create chat rooms on this map.");
         return false; // Can't create chatrooms on this map.

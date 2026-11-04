@@ -120,6 +120,27 @@ struct ROWOWItemVisual
 #define ROWOW_CELL_CHKNOPASS                        0
 #define ROWOW_CELL_CHKWALL                          1
 
+// An RO map that's part of a bigger one (RoMapMerges.csv: the Prontera region in prt_fields): its name is an alias of the big map, and its
+// cell x,y is the big map's x + CellOffsetX, y + CellOffsetY.  Its own size, and the map it was before (whose saved spots move onto the big map).
+// It stays an RO map of its own inside the big one: its map flags, name and map-level script commands go by its map key, the map it was
+struct ROWOWMapPart
+{
+    uint32 MapID = 0;
+    int32 CellOffsetX = 0;
+    int32 CellOffsetY = 0;
+    int32 CellWidth = 0; // 0 when not known: then the whole big map stands for it
+    int32 CellHeight = 0;
+    uint32 FormerMapID = 0;
+    std::string Name; // Its own RO name (the shortest of its names: prt_fild08, not rAthena's prt_fild08a)
+
+    bool HasArea() const { return CellWidth > 0 && CellHeight > 0; }
+    bool HasCell(int32 cellX, int32 cellY) const
+    {
+        return HasArea() == true && cellX >= CellOffsetX && cellY >= CellOffsetY && cellX < CellOffsetX + CellWidth && cellY < CellOffsetY + CellHeight;
+    }
+    uint32 GetMapKey() const { return FormerMapID != 0 ? FormerMapID : MapID; } // The big map's own, when the map it was isn't known
+};
+
 // The RO cell grid of an RO map (from mod_rowow_map_grid).  RO's x runs against WoW's Y, and RO's y along WoW's X
 struct ROWOWMapGrid
 {
@@ -1417,6 +1438,10 @@ struct ROWOWMobSpawnLine
     uint32 Delay2 = 0;
     bool IsBoss = false; // state.boss: a boss_monster line
     std::string Name; // The line's own name when it isn't mob_db's (npc_parse_mob: the job tests' "Orange Mushroom"), shown by MobSpawnReset
+    int32 AreaX = 0; // A line of a map stitched into a bigger one: its "anywhere on the map" is its part's cells (AreaWidth 0 for the whole map)
+    int32 AreaY = 0;
+    int32 AreaWidth = 0;
+    int32 AreaHeight = 0;
 };
 
 // A monster of a spawn line and its center (mob_data's spawn, centerX and centerY), from mod_rowow_creature_spawn.  -1 is anywhere on the map
@@ -2094,6 +2119,9 @@ public:
     std::unordered_map<uint32, uint32> StatusPointsByBaseLevel; // Total status points at each base level (rAthena's statpoint.yml)
     std::unordered_map<std::string, uint32> MapIDsByMapName; // RO map names (rAthena's, including its aliases), lowercase
     std::unordered_map<uint32, std::string> MapNamesByMapID; // Each RO map's own name (not an alias), lowercase
+    std::unordered_map<std::string, ROWOWMapPart> MapPartsByMapName; // The names of maps stitched into a bigger one, lowercase (loaded at startup only)
+    std::unordered_map<uint32, std::vector<ROWOWMapPart>> MapPartsByMapID; // Each stitched map's parts, one per part (startup only, then read-only)
+    std::unordered_map<uint32, ROWOWMapPart const*> MapPartsByMapKey; // Into MapPartsByMapID
     std::unordered_map<uint32, uint32> ItemTemplateIDsByItemID; // The item template of each converted RO item (item_db Id)
     std::unordered_set<uint32> ItemTemplateIDs; // Every RO item template
     std::unordered_map<uint64, uint32> IllusionSpellIDsByJobKey; // See GetIllusionJobKey
@@ -2105,7 +2133,7 @@ public:
     uint32 StartBagItemTemplateID = 0; // The general bag a new identity is given ROWOW_START_BAG_COUNT of, 0 when the converter made none
     std::unordered_map<uint32, ROWOWItem> ItemsByItemTemplateID;
     ROWOWBattleConfig BattleConfig;
-    std::unordered_set<uint32> NoPenaltyMapIDs; // RO maps with rAthena's nopenalty map flag (no exp lost on death)
+    std::unordered_set<uint32> NoPenaltyMapIDs; // RO maps with rAthena's nopenalty map flag (no exp lost on death), by map key (GetMapKey)
     int32 SizeFixByWeaponType[ROWOW_WEAPON_TYPE_MAX][ROWOW_SIZE_COUNT] = { }; // size_fix.yml: each weapon type's damage against each size, in percent
     int32 AttrFix[ROWOW_ELEMENT_LEVEL_MAX][ROWOW_ELEMENT_COUNT][ROWOW_ELEMENT_COUNT] = { }; // attr_fix.yml: by defense element level, attack element and defense element
     std::unordered_map<uint32, ROWOWStatus> MobStatusesByMobID; // Each RO monster's status, as rAthena's mob_db loading leaves it
@@ -2114,12 +2142,13 @@ public:
     std::unordered_map<std::string, uint32> ItemIDsByAegisName; // Every converted RO item, by its lowercase AegisName
     std::unordered_map<std::string, ROWOWItemGroup> ItemGroupsByName; // By the uppercase group name (IG_ without the prefix)
     std::mutex ItemGroupSharedPoolMutex; // The shared pools' given counts are shared by every map thread
-    std::unordered_map<std::string, std::unordered_set<uint32>> MapIDsByMapFlag; // The RO maps with each map flag
-    bool HasMapFlag(uint32 mapID, std::string const& mapFlag) const // map_getmapflag
+    std::unordered_map<std::string, std::unordered_set<uint32>> MapIDsByMapFlag; // The RO maps with each map flag, by map key (GetMapKey)
+    bool HasMapFlag(uint32 mapKey, std::string const& mapFlag) const // map_getmapflag
     {
         auto mapIDsIter = MapIDsByMapFlag.find(mapFlag);
-        return mapIDsIter != MapIDsByMapFlag.end() && mapIDsIter->second.find(mapID) != mapIDsIter->second.end();
+        return mapIDsIter != MapIDsByMapFlag.end() && mapIDsIter->second.find(mapKey) != mapIDsIter->second.end();
     }
+    bool HasMapFlag(Unit const* unit, std::string const& mapFlag) const { return HasMapFlag(GetUnitMapKey(unit), mapFlag); } // Where the unit stands
     std::unordered_map<uint32, uint32> CardItemIDsByEnchantmentID;
     std::vector<ROWOWItemCombo> ItemCombos;
     std::unordered_map<uint32, std::vector<size_t>> ItemComboIndexesByItemID;
@@ -2215,7 +2244,23 @@ public:
     uint16 GetNonBabyJobID(uint16 jobID) const; // The job less JOBL_BABY (Baby_Monk's Monk, the job itself for the others)
     uint16 GetBabyJobID(uint16 normalJobID) const; // The Baby job of a normal job (Monk's Baby_Monk), 0 for none
     static uint8 GetItemClassMask(ROWOWJob const& job); // pc_isItemClass's class_upper bit of a job (ROWOW_ITEM_CLASS_*)
-    uint32 GetMapIDByMapName(std::string const& mapName) const;
+    uint32 GetMapIDByMapName(std::string const& mapName) const; // The map alone; with cells, ResolveMapCell
+    ROWOWMapPart const* GetMapPart(std::string const& mapName) const; // When the name is a map stitched into a bigger one, else nullptr
+    uint32 ResolveMapCell(std::string const& mapName, int32& cellX, int32& cellY) const; // The map, and the cell moved onto it (a stitched map's part)
+    uint32 ResolveMapArea(std::string const& mapName, int32& x1, int32& y1, int32& x2, int32& y2) const; // A box's both corners; a part's whole area for -1
+    void MoveSavedSpotsOffStitchedMaps(); // Characters and save points on a map that's now a part of a bigger one go onto it
+    std::unordered_map<std::string, std::unordered_set<uint32>> GetMapIDsByMapFlag() const; // RoMapFlags by map key (a stitched map's parts their own)
+
+    // Map keys: an RO map's own ID, or for a cell of a stitched map the part it's in (ROWOWMapPart::GetMapKey), which keeps its own map flags, name and
+    // map-level script commands.  HasMapFlag, NoPenaltyMapIDs, script monsters' maps and the users counts go by map key
+    ROWOWMapPart const* GetMapPartAt(uint32 mapID, int32 cellX, int32 cellY) const; // nullptr off every part (and on maps of their own)
+    uint32 GetMapKey(uint32 mapID, int32 cellX, int32 cellY) const;
+    uint32 GetUnitMapKey(Unit const* unit) const;
+    uint32 GetPositionMapKey(ROWOWPosition const& position) const;
+    uint32 GetMapKeyByMapName(std::string const& mapName) const;
+    uint32 GetMapIDOfMapKey(uint32 mapKey) const; // The WoW map a map key's cells are on
+    std::string GetMapNameAt(uint32 mapID, int32& cellX, int32& cellY) const; // The RO name, and the cell made its own (a part's)
+    std::string GetMapNameOfMapKey(uint32 mapKey) const;
     bool IsROItemTemplate(uint32 itemTemplateID) const { return ItemTemplateIDs.find(itemTemplateID) != ItemTemplateIDs.end(); }
 
     // The middle of an RO cell of an RO map, on the ground.  False when the map has no cell grid or no ground there
@@ -2373,7 +2418,7 @@ public:
     void SkillIdentify(Player* player, Item* item); // skill_identify
     void SendItemIdentifyList(Player* player); // clif_item_identify_list
     void TeleportToRandomSpot(Player* player); // A random spot on the map (AL_TELEPORT level 1), at one of its monsters' homes
-    bool MapSearchRandomSpot(Map* map, Position& positionOut) const; // map_search_freecell over the whole map: one of its monsters' homes
+    bool MapSearchRandomSpot(Map* map, uint32 mapKey, Position& positionOut) const; // map_search_freecell over the whole map (the map key's part): a monster's home
     void TeleportToSavePoint(Player* player); // The identity's save point (AL_TELEPORT level 2 and up)
 
     // RO bonuses and cards (ROWOW_Bonus.cpp): the port of rAthena's pc_bonus..pc_bonus5 and the item part of status_calc_pc_sub, the

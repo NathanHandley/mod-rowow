@@ -113,7 +113,7 @@ struct ROWOWPendingScriptMob
 // around a cell of it
 struct ROWOWNpcAnnouncement
 {
-    uint32 MapID = 0; // 0 for everyone in the RO form
+    uint32 MapID = 0; // A map key (GetMapKey: a part of a stitched map is its players only), 0 for everyone in the RO form
     int32 CellX = -1; // bc_area: its source's cell, -1 for the whole map
     int32 CellY = -1;
     std::string Text;
@@ -122,14 +122,14 @@ struct ROWOWNpcAnnouncement
 // A monster a script spawned (monster, areamonster): its map and the event its death runs ("<NPC>::<label>", empty for none)
 struct ROWOWScriptMob
 {
-    uint32 MapID = 0;
+    uint32 MapID = 0; // A map key (GetMapKey: a part of a stitched map is a map of its own)
     std::string Event;
 };
 
 // A killmonster for the world update: the script monsters of a map with that event, or all of them
 struct ROWOWScriptMobKill
 {
-    uint32 MapID = 0;
+    uint32 MapID = 0; // A map key
     std::string Event;
     bool IsAll = false;
 };

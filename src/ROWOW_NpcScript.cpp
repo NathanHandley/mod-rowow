@@ -374,10 +374,12 @@ void ROWOWMod::LoadNpcScriptData()
         npc->FullName = labelPosition != std::string::npos ? fullName.substr(0, labelPosition) : fullName;
         size_t hiddenPosition = npc->FullName.find('#');
         npc->Name = hiddenPosition != std::string::npos ? npc->FullName.substr(0, hiddenPosition) : npc->FullName;
+        // A part of a stitched map (prt_fild08 of prt_fields) puts its NPCs on the stitched map, their cells moved by the part's offset.  The
+        // NPC keeps its script's own map name (strnpcinfo(4)), which its script pairs with its own cells
         npc->MapName = definition.MapName;
-        npc->MapID = definition.MapName.empty() == false ? GetMapIDByMapName(definition.MapName) : 0;
         npc->X = definition.X;
         npc->Y = definition.Y;
+        npc->MapID = definition.MapName.empty() == false ? ResolveMapCell(definition.MapName, npc->X, npc->Y) : 0;
         npc->Direction = definition.Direction;
         npc->Sprite = definition.Sprite;
         npc->TriggerSpanX = definition.TriggerSpanX;
@@ -1348,12 +1350,15 @@ void ROWOWMod::UpdateNpcScripts(uint32 diff)
             }
             continue;
         }
-        if (Map* map = sMapMgr->FindBaseNonInstanceMap(announcement.MapID))
+        uint32 mapID = GetMapIDOfMapKey(announcement.MapID);
+        if (Map* map = sMapMgr->FindBaseNonInstanceMap(mapID))
         {
-            map->DoForAllPlayers([this, &announcement](Player* player)
+            map->DoForAllPlayers([this, &announcement, mapID](Player* player)
             {
                 int32 x = 0, y = 0;
                 GetUnitCell(player, x, y);
+                if (announcement.MapID != mapID && GetMapKey(mapID, x, y) != announcement.MapID)
+                    return; // Another part of the stitched map
                 if (IsInROForm(player) == true && (announcement.CellX < 0 ||
                     (std::abs(x - announcement.CellX) <= BattleConfig.AreaSize && std::abs(y - announcement.CellY) <= BattleConfig.AreaSize)))
                     ChatHandler(player->GetSession()).SendSysMessage(announcement.Text);
@@ -1368,7 +1373,7 @@ void ROWOWMod::UpdateNpcScripts(uint32 diff)
             std::lock_guard<std::mutex> lock(NpcStateMutex);
             ScriptMobsByGUID.erase(killedMob.second);
         }
-        Map* map = sMapMgr->FindBaseNonInstanceMap(killedMob.first);
+        Map* map = sMapMgr->FindBaseNonInstanceMap(GetMapIDOfMapKey(killedMob.first)); // Kills go by map key
         if (Creature* creature = map != nullptr ? map->GetCreature(killedMob.second) : nullptr)
             creature->DespawnOrUnsummon();
     }
@@ -1397,11 +1402,11 @@ void ROWOWMod::UpdateNpcScripts(uint32 diff)
                 // map, but for the player who asked
                 bool isHeldBack = false;
                 if (mapWarp.DestMapName == "Random")
-                    isHeldBack = HasMapFlag(mapWarp.MapID, "nowarp");
+                    isHeldBack = HasMapFlag(player, "nowarp");
                 else if (mapWarp.DestMapName == "SavePoint" || mapWarp.DestMapName == "SavePointAll")
-                    isHeldBack = HasMapFlag(mapWarp.MapID, "noreturn");
+                    isHeldBack = HasMapFlag(player, "noreturn");
                 else
-                    isHeldBack = player->GetGUID() != mapWarp.RequesterGUID && (HasMapFlag(mapWarp.MapID, "nowarp") == true || HasMapFlag(mapWarp.MapID, "noreturn") == true);
+                    isHeldBack = player->GetGUID() != mapWarp.RequesterGUID && (HasMapFlag(player, "nowarp") == true || HasMapFlag(player, "noreturn") == true);
                 if (isHeldBack == true)
                     return;
             }
@@ -1420,12 +1425,24 @@ void ROWOWMod::UpdateNpcScripts(uint32 diff)
         }
     }
 
-    // map_getmapdata(m)->users for getmapusers, as of now (the map threads read it until the next update)
+    // map_getmapdata(m)->users for getmapusers, as of now (the map threads read it until the next update), by map key: a stitched map's parts
+    // count their own players too
     {
         std::unordered_map<uint32, uint32> mapUserCounts;
         for (auto const& mapGridByMapID : MapGridsByMapID)
-            if (Map* map = sMapMgr->FindBaseNonInstanceMap(mapGridByMapID.first))
-                mapUserCounts[mapGridByMapID.first] = uint32(map->GetPlayers().getSize());
+        {
+            Map* map = sMapMgr->FindBaseNonInstanceMap(mapGridByMapID.first);
+            if (map == nullptr)
+                continue;
+            mapUserCounts[mapGridByMapID.first] = uint32(map->GetPlayers().getSize());
+            if (MapPartsByMapID.find(mapGridByMapID.first) != MapPartsByMapID.end())
+                map->DoForAllPlayers([this, &mapUserCounts](Player* player)
+                {
+                    uint32 mapKey = GetUnitMapKey(player);
+                    if (mapKey != player->GetMapId())
+                        mapUserCounts[mapKey]++;
+                });
+        }
         std::lock_guard<std::mutex> lock(NpcStateMutex);
         MapUserCounts.swap(mapUserCounts);
     }

@@ -696,26 +696,10 @@ void ROWOWMod::LoadStatusData()
         }
     }
 
-    // The maps with no exp penalty on death (nopenalty), by any of their RO names
-    if (ROWOWDataTable const* mapFlagTable = GetDataTable(ROWOW_DATA_TABLE_MAP_FLAG))
-    {
-        int32 mapColumnIndex = mapFlagTable->GetColumnIndex("Map");
-        int32 flagColumnIndex = mapFlagTable->GetColumnIndex("Flag");
-        int32 valueColumnIndex = mapFlagTable->GetColumnIndex("Value");
-        for (size_t rowIndex = 0; rowIndex < mapFlagTable->Rows.size(); rowIndex++)
-        {
-            std::string const& flag = mapFlagTable->GetCell(rowIndex, flagColumnIndex);
-            if (flag != "nopenalty" && flag != "noexppenalty")
-                continue;
-            uint32 mapID = GetMapIDByMapName(mapFlagTable->GetCell(rowIndex, mapColumnIndex));
-            if (mapID == 0)
-                continue;
-            if (mapFlagTable->GetCell(rowIndex, valueColumnIndex) == "off")
-                NoPenaltyMapIDs.erase(mapID);
-            else
-                NoPenaltyMapIDs.insert(mapID);
-        }
-    }
+    // The maps with no exp penalty on death (nopenalty), by any of their RO names (a stitched map's by all its parts)
+    std::unordered_map<std::string, std::unordered_set<uint32>> mapIDsByMapFlag = GetMapIDsByMapFlag();
+    for (char const* flag : { "nopenalty", "noexppenalty" })
+        NoPenaltyMapIDs.insert(mapIDsByMapFlag[flag].begin(), mapIDsByMapFlag[flag].end());
 
     LOG_INFO("module.ROWOW", "ROWOWMod::LoadStatusData loaded {} RO items for the status calculation and {} maps without a death penalty", ItemsByItemTemplateID.size(),
         NoPenaltyMapIDs.size());
@@ -1409,7 +1393,7 @@ void ROWOWMod::PCDeadPenalty(Player* player)
         return;
     if (GetNonBabyJobID(identity->JobID) == ROWOW_JOB_NOVICE || identity->JobID == ROWOW_JOB_NOVICE_HIGH)
         return;
-    if (NoPenaltyMapIDs.find(player->GetMapId()) != NoPenaltyMapIDs.end())
+    if (NoPenaltyMapIDs.find(GetUnitMapKey(player)) != NoPenaltyMapIDs.end())
         return;
 
     uint64 basePenalty = 0;

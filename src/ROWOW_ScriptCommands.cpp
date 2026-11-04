@@ -552,8 +552,10 @@ void ROWOWMod::RegisterNpcScriptCommands()
             }
             case 3:
             {
-                auto mapNameIter = MapNamesByMapID.find(player->GetMapId());
-                return ROWOWScriptValue::FromText(mapNameIter != MapNamesByMapID.end() ? mapNameIter->second : std::string());
+                // The RO map's name; on a stitched map the part's the player is in
+                int32 x = 0, y = 0;
+                GetUnitCell(player, x, y);
+                return ROWOWScriptValue::FromText(GetMapNameAt(player->GetMapId(), x, y));
             }
             default: return ROWOWScriptValue::FromText(std::string());
         }
@@ -738,7 +740,10 @@ void ROWOWMod::RegisterNpcScriptCommands()
             if (player == nullptr)
                 return ROWOWScriptValue::FromNumber(0);
             ROWOWPosition savePoint;
-            if (GetCellPosition(GetMapIDByMapName(GetTextArgument(arguments, 0)), int32(GetArgument(arguments, 1, 0)), int32(GetArgument(arguments, 2, 0)), savePoint) == false)
+            int32 x = int32(GetArgument(arguments, 1, 0));
+            int32 y = int32(GetArgument(arguments, 2, 0));
+            uint32 mapID = ResolveMapCell(GetTextArgument(arguments, 0), x, y);
+            if (GetCellPosition(mapID, x, y, savePoint) == false)
                 return Fail(context, "savepoint on an unknown map or cell");
             context.Identity->SavePoint = savePoint;
             return ROWOWScriptValue::FromNumber(0);
@@ -752,8 +757,8 @@ void ROWOWMod::RegisterNpcScriptCommands()
         int32 x = 0;
         int32 y = 0;
         GetUnitCell(context.AttachedPlayer, x, y);
-        auto mapNameIter = MapNamesByMapID.find(context.AttachedPlayer->GetMapId());
-        ROWOWSCRIPT->SetReferenceValue(context, arguments[0], ROWOWScriptValue::FromText(mapNameIter != MapNamesByMapID.end() ? mapNameIter->second : std::string()));
+        std::string mapName = GetMapNameAt(context.AttachedPlayer->GetMapId(), x, y); // On a stitched map, the part's name and its own cell
+        ROWOWSCRIPT->SetReferenceValue(context, arguments[0], ROWOWScriptValue::FromText(mapName));
         ROWOWSCRIPT->SetReferenceValue(context, arguments[1], ROWOWScriptValue::FromNumber(x));
         ROWOWSCRIPT->SetReferenceValue(context, arguments[2], ROWOWScriptValue::FromNumber(y));
         return ROWOWScriptValue::FromNumber(0);
@@ -845,7 +850,7 @@ void ROWOWMod::RegisterNpcScriptCommands()
         {
             case ANNOUNCE_TARGET_MAP:
                 if (mapID != 0)
-                    queueAnnouncement(mapID, text);
+                    queueAnnouncement(GetMapKey(mapID, x, y), text); // A part of a stitched map is a map of its own
                 break;
             case ANNOUNCE_TARGET_AREA:
                 if (mapID != 0)
@@ -863,10 +868,10 @@ void ROWOWMod::RegisterNpcScriptCommands()
     });
     engine->RegisterCommand("mapannounce", [this, queueAnnouncement](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const& arguments)
     {
-        // mapannounce "<map>","<text>",<flag>{,...}
-        uint32 mapID = GetMapIDByMapName(GetTextArgument(arguments, 0));
-        if (mapID != 0)
-            queueAnnouncement(mapID, GetTextArgument(arguments, 1));
+        // mapannounce "<map>","<text>",<flag>{,...}: a part of a stitched map is its own players only
+        uint32 mapKey = GetMapKeyByMapName(GetTextArgument(arguments, 0));
+        if (mapKey != 0)
+            queueAnnouncement(mapKey, GetTextArgument(arguments, 1));
         return ROWOWScriptValue::FromNumber(0);
     });
 
@@ -960,7 +965,14 @@ void ROWOWMod::RegisterNpcScriptCommands()
     auto spawnMobs = [this](ROWOWScriptContext& context, std::string const& mapName, int32 x1, int32 y1, int32 x2, int32 y2, std::string const& name,
         uint32 mobID, int64 amount, std::string const& event)
     {
-        uint32 mapID = GetMapIDByMapName(mapName);
+        // A part of a stitched map: its cells moved onto the stitched map, and its 0,0 (anywhere on the map) anywhere on the part
+        ROWOWMapPart const* part = GetMapPart(mapName);
+        if (part != nullptr && x1 == 0 && y1 == 0 && x2 == 0 && y2 == 0 && part->HasArea() == true)
+        {
+            x1 = -1;
+            y1 = -1;
+        }
+        uint32 mapID = ResolveMapArea(mapName, x1, y1, x2, y2);
         if (mapID == 0 && context.AttachedPlayer != nullptr && (mapName == "this" || mapName.empty() == true))
             mapID = context.AttachedPlayer->GetMapId();
         Map* map = nullptr;
@@ -1011,8 +1023,8 @@ void ROWOWMod::RegisterNpcScriptCommands()
     });
     engine->RegisterCommand("mobcount", [this](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const& arguments)
     {
-        // mobcount("<map>","<event>"): the living script monsters of the map with that event ("all" for any)
-        uint32 mapID = GetMapIDByMapName(GetTextArgument(arguments, 0));
+        // mobcount("<map>","<event>"): the living script monsters of the map with that event ("all" for any); a part of a stitched map its own
+        uint32 mapID = GetMapKeyByMapName(GetTextArgument(arguments, 0));
         std::string event = GetTextArgument(arguments, 1);
         bool isAll = ToLower(event) == "all";
         int64 count = 0;
@@ -1079,7 +1091,8 @@ void ROWOWMod::RegisterNpcScriptCommands()
     auto queueKill =[this](uint32 mapID, std::string const& event, bool isAll)
     {
         // At once in the world update (the maps idle), as rAthena's: a script that kills a stage's monsters and spawns the next stage's
-        // right after must not lose the new ones.  From a map's thread the kill waits for the world update (the monsters can be on another map)
+        // right after must not lose the new ones.  From a map's thread the kill waits for the world update (the monsters can be on another map).
+        // The map is a map key (a part of a stitched map: its own monsters)
         if (IsInNpcWorldUpdate == true)
         {
             std::vector<ObjectGuid> killedGUIDs;
@@ -1096,7 +1109,7 @@ void ROWOWMod::RegisterNpcScriptCommands()
                         ++scriptMobIter;
                 }
             }
-            Map* map = sMapMgr->FindBaseNonInstanceMap(mapID);
+            Map* map = sMapMgr->FindBaseNonInstanceMap(GetMapIDOfMapKey(mapID));
             for (ObjectGuid const& killedGUID : killedGUIDs)
                 if (Creature* creature = map != nullptr ? map->GetCreature(killedGUID) : nullptr)
                     creature->DespawnOrUnsummon();
@@ -1129,7 +1142,9 @@ void ROWOWMod::RegisterNpcScriptCommands()
             itemID = uint32(std::abs(value));
         }
         std::string mapName = GetTextArgument(arguments, 2);
-        uint32 mapID = mapName == "this" && context.AttachedPlayer != nullptr ? context.AttachedPlayer->GetMapId() : GetMapIDByMapName(mapName);
+        int32 x = int32(GetArgument(arguments, 3, 0));
+        int32 y = int32(GetArgument(arguments, 4, 0));
+        uint32 mapID = mapName == "this" && context.AttachedPlayer != nullptr ? context.AttachedPlayer->GetMapId() : ResolveMapCell(mapName, x, y);
         Map* map = nullptr;
         if (context.AttachedPlayer != nullptr)
             map = context.AttachedPlayer->GetMapId() == mapID ? context.AttachedPlayer->GetMap() : nullptr;
@@ -1142,21 +1157,20 @@ void ROWOWMod::RegisterNpcScriptCommands()
         item.ItemTemplateID = itemTemplateIDIter->second;
         item.Amount = uint32(std::max<int64>(1, GetArgument(arguments, 1, 1)));
         item.IsIdentified = isNegative == false || ItemDBIsIdentified(itemID);
-        MapAddFloorItem(map, item, int32(GetArgument(arguments, 3, 0)), int32(GetArgument(arguments, 4, 0)), ObjectGuid::Empty, ObjectGuid::Empty, ObjectGuid::Empty,
-            ROWOW_FLOORITEM_NO_DROP_CHECK, ROWOW_RO_DIRECTION_COUNT, false);
+        MapAddFloorItem(map, item, x, y, ObjectGuid::Empty, ObjectGuid::Empty, ObjectGuid::Empty, ROWOW_FLOORITEM_NO_DROP_CHECK, ROWOW_RO_DIRECTION_COUNT, false);
         return ROWOWScriptValue::FromNumber(0);
     });
     engine->RegisterCommand("killmonster", [this, queueKill](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const& arguments)
     {
         // killmonster "<map>","<event>"{,<type>}: "All" for every script monster of the map
         std::string event = GetTextArgument(arguments, 1);
-        queueKill(GetMapIDByMapName(GetTextArgument(arguments, 0)), event, ToLower(event) == "all");
+        queueKill(GetMapKeyByMapName(GetTextArgument(arguments, 0)), event, ToLower(event) == "all");
         return ROWOWScriptValue::FromNumber(0);
     });
     engine->RegisterCommand("killmonsterall", [this, queueKill](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const& arguments)
     {
         // killmonsterall "<map>": the script monsters of the map (its normal spawns stay)
-        queueKill(GetMapIDByMapName(GetTextArgument(arguments, 0)), std::string(), true);
+        queueKill(GetMapKeyByMapName(GetTextArgument(arguments, 0)), std::string(), true);
         return ROWOWScriptValue::FromNumber(0);
     });
 
@@ -1267,9 +1281,10 @@ void ROWOWMod::RegisterNpcScriptCommands()
     };
     engine->RegisterCommand("mapwarp", [this, queueMapWarp](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const& arguments)
     {
-        // mapwarp "<from map>","<to map>",<x>,<y>{,<type>,<ID>}: everyone on the map (the guild and party filters aren't in)
+        // mapwarp "<from map>","<to map>",<x>,<y>{,<type>,<ID>}: everyone on the map (the guild and party filters aren't in); a part of a stitched
+        // map is its own cells of it
         ROWOWNpcMapWarp mapWarp;
-        mapWarp.MapID = GetMapIDByMapName(GetTextArgument(arguments, 0));
+        mapWarp.MapID = ResolveMapArea(GetTextArgument(arguments, 0), mapWarp.X1, mapWarp.Y1, mapWarp.X2, mapWarp.Y2);
         mapWarp.DestMapName = GetTextArgument(arguments, 1);
         mapWarp.DestX = int32(GetArgument(arguments, 2, 0));
         mapWarp.DestY = int32(GetArgument(arguments, 3, 0));
@@ -1282,11 +1297,11 @@ void ROWOWMod::RegisterNpcScriptCommands()
         // areawarp "<from map>",<x1>,<y1>,<x2>,<y2>,"<to map>",<x3>,<y3>{,<x4>,<y4>}: everyone in the box, to the cell (or a random one of x3..x4,
         // y3..y4)
         ROWOWNpcMapWarp mapWarp;
-        mapWarp.MapID = GetMapIDByMapName(GetTextArgument(arguments, 0));
         mapWarp.X1 = int32(GetArgument(arguments, 1, 0));
         mapWarp.Y1 = int32(GetArgument(arguments, 2, 0));
         mapWarp.X2 = int32(GetArgument(arguments, 3, 0));
         mapWarp.Y2 = int32(GetArgument(arguments, 4, 0));
+        mapWarp.MapID = ResolveMapArea(GetTextArgument(arguments, 0), mapWarp.X1, mapWarp.Y1, mapWarp.X2, mapWarp.Y2);
         mapWarp.DestMapName = GetTextArgument(arguments, 5);
         mapWarp.DestX = int32(GetArgument(arguments, 6, 0));
         mapWarp.DestY = int32(GetArgument(arguments, 7, 0));
@@ -1309,8 +1324,8 @@ void ROWOWMod::RegisterNpcScriptCommands()
     });
     engine->RegisterCommand("getmapusers", [this](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const& arguments)
     {
-        // getmapusers("<map>"): the players on it as of the last world update, -1 for a map that isn't converted
-        uint32 mapID = GetMapIDByMapName(GetTextArgument(arguments, 0));
+        // getmapusers("<map>"): the players on it as of the last world update, -1 for a map that isn't converted (a part of a stitched map: its own)
+        uint32 mapID = GetMapKeyByMapName(GetTextArgument(arguments, 0));
         if (mapID == 0)
             return ROWOWScriptValue::FromNumber(-1);
         std::lock_guard<std::mutex> lock(NpcStateMutex);
@@ -1321,12 +1336,12 @@ void ROWOWMod::RegisterNpcScriptCommands()
     {
         // getareausers("<map>",<x1>,<y1>,<x2>,<y2>): the players in the box; only the run's own map can be looked at (another map's players
         // belong to its thread), so 0 for another
-        uint32 mapID = GetMapIDByMapName(GetTextArgument(arguments, 0));
+        int32 x1 = int32(GetArgument(arguments, 1, 0)), y1 = int32(GetArgument(arguments, 2, 0));
+        int32 x2 = int32(GetArgument(arguments, 3, 0)), y2 = int32(GetArgument(arguments, 4, 0));
+        uint32 mapID = ResolveMapArea(GetTextArgument(arguments, 0), x1, y1, x2, y2);
         Map* map = context.AttachedPlayer != nullptr ? context.AttachedPlayer->GetMap() : nullptr;
         if (map == nullptr || map->GetId() != mapID)
             return ROWOWScriptValue::FromNumber(0);
-        int32 x1 = int32(GetArgument(arguments, 1, 0)), y1 = int32(GetArgument(arguments, 2, 0));
-        int32 x2 = int32(GetArgument(arguments, 3, 0)), y2 = int32(GetArgument(arguments, 4, 0));
         int64 count = 0;
         map->DoForAllPlayers([this, x1, y1, x2, y2, &count](Player* player)
         {
@@ -1568,13 +1583,10 @@ void ROWOWMod::RegisterNpcScriptCommands()
         ROWOWPosition const& savePoint = context.Identity->SavePoint;
         int32 x = 0, y = 0;
         GetWorldCell(savePoint.MapID, savePoint.X, savePoint.Y, x, y);
+        std::string mapName = GetMapNameAt(savePoint.MapID, x, y); // On a stitched map, its part's name and cell
         switch (GetArgument(arguments, 0, 0))
         {
-            case 0:
-            {
-                auto mapNameIter = MapNamesByMapID.find(savePoint.MapID);
-                return ROWOWScriptValue::FromText(mapNameIter != MapNamesByMapID.end() ? mapNameIter->second : std::string());
-            }
+            case 0: return ROWOWScriptValue::FromText(mapName);
             case 1: return ROWOWScriptValue::FromNumber(x);
             case 2: return ROWOWScriptValue::FromNumber(y);
             default: return ROWOWScriptValue::FromNumber(0);
@@ -2164,7 +2176,7 @@ void ROWOWMod::RegisterNpcScriptCommands()
     auto forEachPlayerInArea = [this](ROWOWScriptContext& context, std::string const& mapName, int32 x0, int32 y0, int32 x1, int32 y1,
         std::function<void(Player*)> const& action)
     {
-        uint32 mapID = GetMapIDByMapName(mapName);
+        uint32 mapID = ResolveMapArea(mapName, x0, y0, x1, y1);
         Map* map = nullptr;
         if (IsInNpcWorldUpdate == true)
             map = sMapMgr->FindBaseNonInstanceMap(mapID);
@@ -2524,7 +2536,7 @@ void ROWOWMod::RegisterNpcScriptCommands()
             return ROWOWScriptValue::FromNumber(0);
         ROWOWNpcMapWarp mapWarp;
         std::string fromMap = GetTextArgument(arguments, 4);
-        mapWarp.MapID = fromMap.empty() == false ? GetMapIDByMapName(fromMap) : player->GetMapId();
+        mapWarp.MapID = fromMap.empty() == false ? ResolveMapArea(fromMap, mapWarp.X1, mapWarp.Y1, mapWarp.X2, mapWarp.Y2) : player->GetMapId(); // A part: its own cells
         mapWarp.DestMapName = GetTextArgument(arguments, 0);
         mapWarp.DestX = int32(GetArgument(arguments, 1, 0));
         mapWarp.DestY = int32(GetArgument(arguments, 2, 0));
@@ -2619,7 +2631,7 @@ Creature* ROWOWMod::SpawnScriptMob(Map* map, uint32 mobID, int32 x, int32 y, std
         creature->SetUInt32Value(UNIT_FIELD_PET_NAME_TIMESTAMP, uint32(GameTime::GetGameTime().count()));
     }
     ROWOWScriptMob scriptMob;
-    scriptMob.MapID = map->GetId();
+    scriptMob.MapID = GetMapKey(map->GetId(), x, y); // A part of a stitched map: mobcount and killmonster by its name are its own
     scriptMob.Event = event;
     std::lock_guard<std::mutex> lock(NpcStateMutex);
     ScriptMobsByGUID[creature->GetGUID()] = scriptMob;

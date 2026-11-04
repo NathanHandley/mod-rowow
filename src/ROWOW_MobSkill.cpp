@@ -939,7 +939,7 @@ void ROWOWMod::MobDeadMVP(Creature* md, Player* mvpSD, int32 count, ROWOWLootPri
 
     // Order might be random depending on item_drop_mvp_mode config setting: only one item is given unless it's 2
     auto mvpDropsIter = MobMvpDropsByMobID.find(mobID);
-    if (mvpDropsIter == MobMvpDropsByMobID.end() || (MapIDsByMapFlag.count("nomvploot") != 0 && MapIDsByMapFlag.at("nomvploot").count(md->GetMapId()) != 0))
+    if (mvpDropsIter == MobMvpDropsByMobID.end() || HasMapFlag(md, "nomvploot") == true)
         return;
     std::vector<ROWOWMobDrop> mdrop = mvpDropsIter->second;
     if (BattleConfig.ItemDropMvpMode == 1)

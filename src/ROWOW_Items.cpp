@@ -237,24 +237,9 @@ void ROWOWMod::LoadItemScriptData()
         }
     }
 
-    // The map flags (monster_noteleport: Intimidate's warp), by any of the maps' RO names
-    if (ROWOWDataTable const* mapFlagTable = GetDataTable(ROWOW_DATA_TABLE_MAP_FLAG))
-    {
-        int32 mapColumnIndex = mapFlagTable->GetColumnIndex("Map");
-        int32 flagColumnIndex = mapFlagTable->GetColumnIndex("Flag");
-        int32 valueColumnIndex = mapFlagTable->GetColumnIndex("Value");
-        for (size_t rowIndex = 0; rowIndex < mapFlagTable->Rows.size(); rowIndex++)
-        {
-            std::string const& flag = mapFlagTable->GetCell(rowIndex, flagColumnIndex);
-            uint32 mapID = GetMapIDByMapName(mapFlagTable->GetCell(rowIndex, mapColumnIndex));
-            if (mapID == 0)
-                continue;
-            if (mapFlagTable->GetCell(rowIndex, valueColumnIndex) == "off")
-                MapIDsByMapFlag[flag].erase(mapID);
-            else
-                MapIDsByMapFlag[flag].insert(mapID);
-        }
-    }
+    // The map flags (monster_noteleport: Intimidate's warp), by any of the maps' RO names (a stitched map's by all its parts)
+    for (auto const& mapIDsByFlag : GetMapIDsByMapFlag())
+        MapIDsByMapFlag[mapIDsByFlag.first].insert(mapIDsByFlag.second.begin(), mapIDsByFlag.second.end());
 
     // The script engine's constants: elements, sizes, races and jobs by their numbers, and the rest by name (symbols)
     static char const* const ElementNames[ROWOW_ELEMENT_COUNT] = { "Neutral", "Water", "Earth", "Fire", "Wind", "Poison", "Holy", "Dark", "Ghost", "Undead" };
@@ -1064,11 +1049,10 @@ bool ROWOWMod::PCIsUseItem(Player* player, Item const* item, bool isReporting)
     }
 
     // Map restrictions: Dead Branches, and the wings a map without teleporting or returning refuses
-    uint32 mapID = player->GetMapId();
-    auto hasMapFlag = [this, mapID](char const* flag)
+    uint32 mapKey = GetUnitMapKey(player);
+    auto hasMapFlag = [this, mapKey](char const* flag)
     {
-        auto mapIDsIter = MapIDsByMapFlag.find(flag);
-        return mapIDsIter != MapIDsByMapFlag.end() && mapIDsIter->second.find(mapID) != mapIDsIter->second.end();
+        return HasMapFlag(mapKey, flag);
     };
     auto isInItemGroup = [this, roItem](char const* groupName)
     {
@@ -1149,7 +1133,9 @@ void ROWOWMod::WarpPlayerToCell(Player* player, std::string const& mapName, int3
     else
     {
         ROWOWPosition destination;
-        if (GetCellPosition(GetMapIDByMapName(mapName), x, y, destination) == true)
+        int32 mapX = x, mapY = y;
+        uint32 mapID = ResolveMapCell(mapName, mapX, mapY);
+        if (GetCellPosition(mapID, mapX, mapY, destination) == true)
             player->TeleportTo(destination.MapID, destination.X, destination.Y, destination.Z, player->GetOrientation());
         else
             LOG_ERROR("module.ROWOW", "ROWOWMod warp: no RO cell {},{} on map '{}'", x, y, mapName);
@@ -1427,30 +1413,37 @@ void ROWOWMod::SkillIdentify(Player* player, Item* item)
 
 void ROWOWMod::TeleportToRandomSpot(Player* player)
 {
-    // RO's random teleport lands on a free cell anywhere on the map
+    // RO's random teleport lands on a free cell anywhere on the map (on a stitched map, the part the player is in)
     Position position;
-    if (MapSearchRandomSpot(player->GetMap(), position) == true)
+    if (MapSearchRandomSpot(player->GetMap(), GetUnitMapKey(player), position) == true)
         player->NearTeleportTo(position.GetPositionX(), position.GetPositionY(), position.GetPositionZ(), player->GetOrientation());
 }
 
-bool ROWOWMod::MapSearchRandomSpot(Map* map, Position& positionOut) const
+bool ROWOWMod::MapSearchRandomSpot(Map* map, uint32 mapKey, Position& positionOut) const
 {
     // map_search_freecell over the whole map: one of the map's monsters' homes is a spot known to be walkable (a little above the ground, so
-    // arriving there never starts under it)
+    // arriving there never starts under it).  A part of a stitched map (a map key other than the map's) takes a home on the part: a few tries
     if (map == nullptr || map->Instanceable() == true)
         return false;
     Map::CreatureBySpawnIdContainer const& creaturesBySpawnID = map->GetCreatureBySpawnIdStore();
     if (creaturesBySpawnID.empty() == true)
         return false;
-    uint32 index = urand(0, uint32(creaturesBySpawnID.size() - 1));
-    Map::CreatureBySpawnIdContainer::const_iterator creatureIter = creaturesBySpawnID.begin();
-    std::advance(creatureIter, index);
-    Creature* creature = creatureIter->second;
-    if (creature == nullptr)
-        return false;
-    Position const& homePosition = creature->GetHomePosition();
-    positionOut.Relocate(homePosition.GetPositionX(), homePosition.GetPositionY(), homePosition.GetPositionZ() + 0.5f);
-    return true;
+    ROWOWMapGrid const* mapGrid = mapKey != map->GetId() ? GetMapGrid(map->GetId()) : nullptr;
+    for (int32 tries = mapGrid != nullptr ? 50 : 1; tries > 0; tries--)
+    {
+        uint32 index = urand(0, uint32(creaturesBySpawnID.size() - 1));
+        Map::CreatureBySpawnIdContainer::const_iterator creatureIter = creaturesBySpawnID.begin();
+        std::advance(creatureIter, index);
+        Creature* creature = creatureIter->second;
+        if (creature == nullptr)
+            continue;
+        Position const& homePosition = creature->GetHomePosition();
+        if (mapGrid != nullptr && GetMapKey(map->GetId(), mapGrid->GetCellX(homePosition.GetPositionY()), mapGrid->GetCellY(homePosition.GetPositionX())) != mapKey)
+            continue;
+        positionOut.Relocate(homePosition.GetPositionX(), homePosition.GetPositionY(), homePosition.GetPositionZ() + 0.5f);
+        return true;
+    }
+    return false;
 }
 
 void ROWOWMod::TeleportToSavePoint(Player* player)

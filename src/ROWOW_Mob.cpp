@@ -1105,6 +1105,7 @@ void ROWOWMod::LoadMobSpawnData()
     int32 isBossColumnIndex = spawnTable->GetColumnIndex("IsBoss");
     int32 nameColumnIndex = spawnTable->GetColumnIndex("DisplayName");
     int32 mobIDColumnIndex = spawnTable->GetColumnIndex("MobId");
+    int32 mapColumnIndex = spawnTable->GetColumnIndex("MapName");
     ROWOWDataTable const* mobTable = GetDataTable(ROWOW_DATA_TABLE_MOB);
     MobSpawnLines.reserve(spawnTable->Rows.size());
     for (size_t rowIndex = 0; rowIndex < spawnTable->Rows.size(); rowIndex++)
@@ -1142,6 +1143,16 @@ void ROWOWMod::LoadMobSpawnData()
         // Check if monsters should have variance applied to their respawn time
         if (((BattleConfig.MobSpawnVariance & 1) == 0 && line.IsBoss == true) || ((BattleConfig.MobSpawnVariance & 2) == 0 && line.IsBoss == false))
             line.Delay2 = 0; // Remove the variance
+
+        // A line of a map stitched into a bigger one keeps to its part of it (its monsters' centers are the stitched map's cells already)
+        ROWOWMapPart const* part = mapColumnIndex >= 0 ? GetMapPart(spawnTable->GetCell(rowIndex, mapColumnIndex)) : nullptr;
+        if (part != nullptr && part->HasArea() == true)
+        {
+            line.AreaX = part->CellOffsetX;
+            line.AreaY = part->CellOffsetY;
+            line.AreaWidth = part->CellWidth;
+            line.AreaHeight = part->CellHeight;
+        }
         MobSpawnLines.push_back(line);
     }
 
@@ -1287,6 +1298,22 @@ bool ROWOWMod::MobSpawn(Creature* md)
     int32 xs = x < 0 ? 0 : line.XS; // The line of a monster with no center is anywhere on the map (-1, span 0)
     int32 ys = y < 0 ? 0 : line.YS;
 
+    // ...or, for a map stitched into a bigger one, anywhere on its part: the part's middle, spanning the part
+    int32 anywhereRX = -1;
+    int32 anywhereRY = -1;
+    if (line.AreaWidth > 0)
+    {
+        anywhereRX = line.AreaWidth / 2;
+        anywhereRY = line.AreaHeight / 2;
+        if (x < 0)
+        {
+            x = line.AreaX + anywhereRX;
+            y = line.AreaY + anywhereRY;
+            xs = anywhereRX + 1; // The search goes xs - 1 to each side
+            ys = anywhereRY + 1;
+        }
+    }
+
     // Search can be skipped for boss monster spawns if spawn location is fixed.  We can't skip normal monsters as they should pick a random location
     // if the cell is blocked (e.g. Icewall).  The center cell has a 1/(xs*ys) chance to be picked if free
     bool isCenterFree = MapGetCellNoPass(map, *mapGrid, x, y) == false;
@@ -1297,9 +1324,17 @@ bool ROWOWMod::MobSpawn(Creature* md)
         if (MapSearchFreeCellOfSpawn(*mapGrid, map, x, y, xs - 1, ys - 1, 8, x, y) == false)
         {
             // If area search failed and center cell not reachable, try to spawn the monster anywhere on the map (50 tries)
-            x = spawn->CenterX;
-            y = spawn->CenterY;
-            if (isCenterFree == false && MapSearchFreeCellOfSpawn(*mapGrid, map, x, y, -1, -1, 50, x, y) == false)
+            if (line.AreaWidth > 0)
+            {
+                x = line.AreaX + anywhereRX;
+                y = line.AreaY + anywhereRY;
+            }
+            else
+            {
+                x = spawn->CenterX;
+                y = spawn->CenterY;
+            }
+            if (isCenterFree == false && MapSearchFreeCellOfSpawn(*mapGrid, map, x, y, anywhereRX, anywhereRY, 50, x, y) == false)
             {
                 mob->SpawnTime = tick + uint64(BattleConfig.MobRespawnTime); // Retry again later
                 return false;

@@ -201,7 +201,7 @@ public:
         if (ROWOW->IsInROForm(player) == true)
         {
             player->UnsummonPetTemporaryIfAny();
-            ROWOW->GetIdentity(player)->IsNoSaveLoginPending = ROWOW->HasMapFlag(player->GetMapId(), "nosave");
+            ROWOW->GetIdentity(player)->IsNoSaveLoginPending = ROWOW->HasMapFlag(player, "nosave");
         }
     }
 
@@ -1630,7 +1630,7 @@ public:
             std::map<std::string, uint32> countsByEvent;
             std::lock_guard<std::mutex> lock(ROWOW->NpcStateMutex);
             for (auto const& scriptMobByGUID : ROWOW->ScriptMobsByGUID)
-                if (scriptMobByGUID.second.MapID == player->GetMapId())
+                if (ROWOW->GetMapIDOfMapKey(scriptMobByGUID.second.MapID) == player->GetMapId()) // (a map key)
                     countsByEvent[scriptMobByGUID.second.Event]++;
             for (auto const& countByEvent : countsByEvent)
                 handler->PSendSysMessage("{}: {}", countByEvent.first, countByEvent.second);
@@ -1641,7 +1641,7 @@ public:
         {
             std::lock_guard<std::mutex> lock(ROWOW->NpcStateMutex);
             for (auto const& scriptMobByGUID : ROWOW->ScriptMobsByGUID)
-                if (scriptMobByGUID.second.MapID == player->GetMapId() && (text.empty() == true || scriptMobByGUID.second.Event == text))
+                if (ROWOW->GetMapIDOfMapKey(scriptMobByGUID.second.MapID) == player->GetMapId() && (text.empty() == true || scriptMobByGUID.second.Event == text))
                     mobGUIDs.push_back(scriptMobByGUID.first);
         }
         for (ObjectGuid const& mobGUID : mobGUIDs)
@@ -2729,8 +2729,12 @@ public:
         handler->PSendSysMessage("Bank {}", player->GetSession()->IsPlayerBanker() == true ? "in reach" : "out of reach");
         int32 x = 0, y = 0;
         ROWOW->GetUnitCell(player, x, y);
-        auto mapNameIter = ROWOW->MapNamesByMapID.find(player->GetMapId());
-        handler->PSendSysMessage("RO map {} cell {},{}", mapNameIter != ROWOW->MapNamesByMapID.end() ? mapNameIter->second : std::string("-"), x, y);
+        int32 mapX = x, mapY = y;
+        std::string mapName = ROWOW->GetMapNameAt(player->GetMapId(), mapX, mapY);
+        if (mapX != x || mapY != y)
+            handler->PSendSysMessage("RO map {} cell {},{} (stitched map {} cell {},{})", mapName, mapX, mapY, player->GetMapId(), x, y);
+        else
+            handler->PSendSysMessage("RO map {} cell {},{}", mapName.empty() == false ? mapName : std::string("-"), x, y);
         return true;
     }
 
@@ -2744,8 +2748,16 @@ public:
             return false;
         }
         ROWOWPosition destination;
-        if (ROWOW->GetCellPosition(ROWOW->GetMapIDByMapName(mapName), x, y, destination) == true)
-            handler->PSendSysMessage("To {} cell {},{} (height {:.1f}).", mapName, x, y, destination.Z);
+        int32 mapX = x, mapY = y;
+        uint32 mapID = ROWOW->ResolveMapCell(mapName, mapX, mapY);
+        if (ROWOW->GetCellPosition(mapID, mapX, mapY, destination) == true)
+        {
+            if (mapX != x || mapY != y)
+                handler->PSendSysMessage("To {} cell {},{}: {} cell {},{} (height {:.1f}).", mapName, x, y, ROWOW->MapNamesByMapID.count(mapID) != 0 ?
+                    ROWOW->MapNamesByMapID.at(mapID) : std::string("?"), mapX, mapY, destination.Z);
+            else
+                handler->PSendSysMessage("To {} cell {},{} (height {:.1f}).", mapName, x, y, destination.Z);
+        }
         ROWOW->WarpPlayerToCell(player, mapName, x, y);
         return true;
     }

@@ -75,8 +75,7 @@ namespace
                 ROWOW->UnitWarpRandom(target, dest);
                 return;
             }
-            auto mapIDsIter = ROWOW->MapIDsByMapFlag.find("noteleport");
-            if (skillLevel <= 2 && mapIDsIter != ROWOW->MapIDsByMapFlag.end() && mapIDsIter->second.find(target->GetMapId()) != mapIDsIter->second.end())
+            if (skillLevel <= 2 && ROWOW->HasMapFlag(target, "noteleport") == true)
             {
                 ChatHandler(sd->GetSession()).SendNotification("You can't teleport in this area."); // clif_skill_teleportmessage
                 return;
@@ -96,7 +95,7 @@ namespace
                 ROWOWPosition savePoint = identity->SavePoint;
                 if (savePoint.IsSet == false)
                     ROWOW->GetCellPosition(ROWOW->StartMapID, ROWOW->StartCellX, ROWOW->StartCellY, savePoint);
-                mapIDs.push_back(savePoint.MapID);
+                mapIDs.push_back(ROWOW->GetPositionMapKey(savePoint)); // Map keys: a part of a stitched map is a map of its own
             }
             ROWOW->ClifSkillWarpPoint(sd, SkillID, skillLevel, mapIDs);
         }
@@ -117,9 +116,12 @@ namespace
                 ROWOWPosition savePoint = identity->SavePoint;
                 if (savePoint.IsSet == false)
                     ROWOW->GetCellPosition(ROWOW->StartMapID, ROWOW->StartCellX, ROWOW->StartCellY, savePoint);
-                std::vector<uint32> mapIDs = { savePoint.MapID };
+                std::vector<uint32> mapIDs = { ROWOW->GetPositionMapKey(savePoint) }; // Map keys: a part of a stitched map is a map of its own
                 for (int32 memo = 0; memo < ROWOW_MAX_MEMOPOINTS && memo < skillLevel - 1; memo++)
-                    mapIDs.push_back(identity->MemoPoints[memo].MapID);
+                {
+                    ROWOWMemoPoint const& memoPoint = identity->MemoPoints[memo];
+                    mapIDs.push_back(memoPoint.MapID != 0 ? ROWOW->GetMapKey(memoPoint.MapID, memoPoint.CellX, memoPoint.CellY) : 0);
+                }
                 identity->MenuSkillValue = (x << 16) | (y & 0xFFFF);
                 identity->MenuSkillZ = ROWOW->GetSkillUnitData(src)->SkillZ;
                 ROWOW->ClifSkillWarpPoint(sd, SkillID, skillLevel, mapIDs);

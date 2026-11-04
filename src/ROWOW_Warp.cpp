@@ -42,12 +42,12 @@ namespace
         player->SendDirectMessage(&data);
     }
 
-    // The RO name of a map the warp list shows (prontera, prt_fild08): its own, else the shortest of rAthena's names for it
+    // The RO name of a map key the warp list shows (prontera, prt_fild08): its own (a stitched map's part's), else the shortest of rAthena's names for it
     std::string GetROMapName(uint32 mapID)
     {
-        auto mapNameIter = ROWOW->MapNamesByMapID.find(mapID);
-        if (mapNameIter != ROWOW->MapNamesByMapID.end())
-            return mapNameIter->second;
+        std::string ownName = ROWOW->GetMapNameOfMapKey(mapID);
+        if (ownName.empty() == false)
+            return ownName;
         std::string mapName;
         for (auto const& mapIDByName : ROWOW->MapIDsByMapName)
             if (mapIDByName.second == mapID && (mapName.empty() == true || mapIDByName.first.size() < mapName.size()))
@@ -62,7 +62,7 @@ bool ROWOWMod::PCMemo(Player* player, int32 pos)
     ROWOWIdentity* identity = GetIdentity(player);
     ChatHandler handler(player->GetSession());
     // check mapflags
-    if (HasMapFlag(player->GetMapId(), "nomemo") == true || HasMapFlag(player->GetMapId(), "nowarpto") == true || IsROMap(player->GetMapId()) == false)
+    if (HasMapFlag(player, "nomemo") == true || HasMapFlag(player, "nowarpto") == true || IsROMap(player->GetMapId()) == false)
     {
         handler.SendNotification("Saved point cannot be memorized."); // clif_skill_teleportmessage NOTIFY_MAPINFO_CANT_MEMO
         return false;
@@ -84,9 +84,11 @@ bool ROWOWMod::PCMemo(Player* player, int32 pos)
     }
     if (pos == -1)
     {
-        // prevent memo-ing the same map multiple times
+        // prevent memo-ing the same map multiple times (by map key: each part of a stitched map is a map of its own)
+        uint32 mapKey = GetUnitMapKey(player);
         int32 i = 0;
-        while (i < ROWOW_MAX_MEMOPOINTS && identity->MemoPoints[i].MapID != player->GetMapId())
+        while (i < ROWOW_MAX_MEMOPOINTS && (identity->MemoPoints[i].MapID == 0 ||
+            GetMapKey(identity->MemoPoints[i].MapID, identity->MemoPoints[i].CellX, identity->MemoPoints[i].CellY) != mapKey))
             i++;
         for (int32 j = std::min(i, ROWOW_MAX_MEMOPOINTS - 1); j > 0; j--)
             identity->MemoPoints[j] = identity->MemoPoints[j - 1];
@@ -194,16 +196,18 @@ void ROWOWMod::SkillCastendMap(Player* player, uint16 skillID, std::string const
             ROWOWPosition savePoint = identity->SavePoint;
             if (savePoint.IsSet == false)
                 GetCellPosition(StartMapID, StartCellX, StartCellY, savePoint);
+            // (the menu's map IDs are map keys: a part of a stitched map is a destination of its own)
             int32 x = 0, y = 0;
             bool isFound = false;
-            if (savePoint.MapID == mapID)
+            if (GetPositionMapKey(savePoint) == mapID)
             {
                 GetWorldCell(savePoint.MapID, savePoint.X, savePoint.Y, x, y);
                 isFound = true;
             }
             for (int32 i = 0; isFound == false && i < lv - 1 && i < ROWOW_MAX_MEMOPOINTS; i++)
             {
-                if (identity->MemoPoints[i].MapID != 0 && identity->MemoPoints[i].MapID == mapID)
+                ROWOWMemoPoint const& memo = identity->MemoPoints[i];
+                if (memo.MapID != 0 && GetMapKey(memo.MapID, memo.CellX, memo.CellY) == mapID)
                 {
                     x = identity->MemoPoints[i].CellX;
                     y = identity->MemoPoints[i].CellY;
@@ -232,7 +236,7 @@ void ROWOWMod::SkillCastendMap(Player* player, uint16 skillID, std::string const
             group->Val1 = (group->Val1 << 16) | int16(0);
             // record the destination coordinates
             group->Val2 = (x << 16) | (y & 0xFFFF);
-            group->Val3 = int32(mapID);
+            group->Val3 = int32(GetMapIDOfMapKey(mapID));
             break;
         }
     }

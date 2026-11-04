@@ -1350,15 +1350,15 @@ bool ROWOWMod::SkillIsNotOk(Player* sd, uint16 skillID)
     ROWOWSkillUnitData const* ud = GetSkillUnitData(sd);
     if (skillID == ROWOW_SKILL_AL_TELEPORT && ud->SkillItemID == skillID && ud->SkillItemLevel > 2)
         return false; // Teleport lv 3 bypasses this check.[Inkfish]
-    uint32 mapID = sd->GetMapId();
-    if (HasMapFlag(mapID, "noskill") == true && skillID != ROWOW_SKILL_ALL_EQSWITCH && ud->SkillItemID == 0)
+    uint32 mapKey = GetUnitMapKey(sd);
+    if (HasMapFlag(mapKey, "noskill") == true && skillID != ROWOW_SKILL_ALL_EQSWITCH && ud->SkillItemID == 0)
         return true; // Item skills bypass noskill
     if (ud->SkillItemID == skillID)
         return false;
     switch (skillID)
     {
         case ROWOW_SKILL_AL_WARP:
-            if (HasMapFlag(mapID, "nowarp") == true)
+            if (HasMapFlag(mapKey, "nowarp") == true)
             {
                 ChatHandler(sd->GetSession()).SendNotification("You can't teleport in this area."); // clif_skill_teleportmessage NOTIFY_MAPINFO_CANT_TP
                 return true;
@@ -1367,7 +1367,7 @@ bool ROWOWMod::SkillIsNotOk(Player* sd, uint16 skillID)
         case ROWOW_SKILL_WE_CALLPARTNER:
         case ROWOW_SKILL_WE_CALLPARENT:
         case ROWOW_SKILL_WE_CALLBABY:
-            if (HasMapFlag(mapID, "nomemo") == true)
+            if (HasMapFlag(mapKey, "nomemo") == true)
             {
                 ChatHandler(sd->GetSession()).SendNotification("Saved point cannot be memorized."); // clif_skill_teleportmessage NOTIFY_MAPINFO_CANT_MEMO
                 return true;
@@ -1546,8 +1546,7 @@ bool ROWOWMod::SkillCheckConditionCastBegin(Player* sd, uint16 skillID, uint16 s
     // MC_VENDING and ALL_BUYING_STORE: not on a novending map, nor beside an NPC
     if (skillID == ROWOW_SKILL_MC_VENDING || skillID == ROWOW_SKILL_ALL_BUYING_STORE)
     {
-        auto mapIDsIter = MapIDsByMapFlag.find("novending");
-        if (mapIDsIter != MapIDsByMapFlag.end() && mapIDsIter->second.find(sd->GetMapId()) != mapIDsIter->second.end())
+        if (HasMapFlag(sd, "novending") == true)
         {
             ChatHandler(sd->GetSession()).SendSysMessage("You can't open a shop on this map.");
             ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_LEVEL);
@@ -1912,7 +1911,7 @@ bool ROWOWMod::SkillCheckConditionCastBegin(Player* sd, uint16 skillID, uint16 s
             if (GetSCE(sd, ROWOW_SC_MIRACLE) != nullptr)
                 break;
             int32 i = skillID - ROWOW_SKILL_SG_SUN_COMFORT;
-            if (sd->GetMapId() == PCGetFeelMap(*identity, i) && SGIsDay(i) == true)
+            if (GetUnitMapKey(sd) == PCGetFeelMap(*identity, i) && SGIsDay(i) == true)
                 break;
             ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_LEVEL);
             return false;

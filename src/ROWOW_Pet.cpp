@@ -732,8 +732,7 @@ void ROWOWMod::PetCatchProcessStart(Player* sd, uint32 itemID, uint8 flag)
     // pet_catch_process_start: the item's spell picked the target already, which is RO's capture cursor (clif_catch_process).  Beastly Hypnosis has no spell of the
     // taming item's, so it takes the player's selection
     ROWOWIdentity* identity = GetIdentity(sd);
-    auto mapIDsIter = MapIDsByMapFlag.find("nopetcapture");
-    if (mapIDsIter != MapIDsByMapFlag.end() && mapIDsIter->second.find(sd->GetMapId()) != mapIDsIter->second.end())
+    if (HasMapFlag(sd, "nopetcapture") == true)
     {
         SendPetMessage(sd, "You can't catch any pet on this map.");
         return;
@@ -984,7 +983,7 @@ void ROWOWMod::PetOwnerDead(Player* sd)
     ROWOWPetData* pd = GetPet(sd);
     if (pd == nullptr)
         return;
-    if (NoPenaltyMapIDs.find(sd->GetMapId()) == NoPenaltyMapIDs.end())
+    if (NoPenaltyMapIDs.find(GetUnitMapKey(sd)) == NoPenaltyMapIDs.end())
     {
         PetSetIntimate(sd, *pd, pd->Pet.Intimate + pd->DB->Die);
         ClifSendPetStatus(sd);

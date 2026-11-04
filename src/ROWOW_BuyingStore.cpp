@@ -77,8 +77,7 @@ bool ROWOWMod::BuyingStoreSetup(Player* player, uint8 slots)
     ROWOWIdentity* identity = GetIdentity(player);
     if (identity->IsVending == true || identity->BuyingStore != nullptr || player->GetTradeData() != nullptr || slots == 0)
         return false;
-    auto mapIDsIter = MapIDsByMapFlag.find("nobuyingstore");
-    if (mapIDsIter != MapIDsByMapFlag.end() && mapIDsIter->second.find(player->GetMapId()) != mapIDsIter->second.end())
+    if (HasMapFlag(player, "nobuyingstore") == true)
     {
         ChatHandler(player->GetSession()).SendSysMessage("You can't open a shop on this map.");
         return false;

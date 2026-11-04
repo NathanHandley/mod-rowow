@@ -1582,8 +1582,7 @@ bool ROWOWMod::IsUnitWarpForbidden(Unit const* bl) const
     // unit_warp's map flags: noteleport for a player, monster_noteleport for a monster no one summoned
     auto isMapFlagged = [this, bl](char const* flag)
     {
-        auto mapIDsIter = MapIDsByMapFlag.find(flag);
-        return mapIDsIter != MapIDsByMapFlag.end() && mapIDsIter->second.find(bl->GetMapId()) != mapIDsIter->second.end();
+        return HasMapFlag(bl, flag);
     };
     if (bl->IsPlayer() == true)
         return isMapFlagged("noteleport");
@@ -1608,9 +1607,9 @@ void ROWOWMod::UnitRemoveMap(Unit* bl)
 
 bool ROWOWMod::UnitWarpRandom(Unit* bl, Position& destOut)
 {
-    // unit_warp(bl, -1, -1, -1, CLR_TELEPORT): to a random spot of its map, unless the map forbids it.  A player's teleport lands once its
-    // client answers, so where it goes is given back for those warped next to it
-    if (IsUnitWarpForbidden(bl) == true || MapSearchRandomSpot(bl->GetMap(), destOut) == false)
+    // unit_warp(bl, -1, -1, -1, CLR_TELEPORT): to a random spot of its map (a stitched map's part it's in), unless the map forbids it.  A player's
+    // teleport lands once its client answers, so where it goes is given back for those warped next to it
+    if (IsUnitWarpForbidden(bl) == true || MapSearchRandomSpot(bl->GetMap(), GetUnitMapKey(bl), destOut) == false)
         return false;
     UnitRemoveMap(bl);
     bl->NearTeleportTo(destOut.GetPositionX(), destOut.GetPositionY(), destOut.GetPositionZ(), bl->GetOrientation());
@@ -1967,10 +1966,9 @@ void ROWOWMod::ClifFeelReq(Player* sd, uint16 skillLevel)
     ROWOWIdentity* identity = GetIdentity(sd);
     identity->MenuSkillID = ROWOW_SKILL_SG_FEEL;
     identity->MenuSkillValue = skillLevel;
-    auto mapNameIter = MapNamesByMapID.find(sd->GetMapId());
     WorldPacket data;
     ChatHandler::BuildChatPacket(data, CHAT_MSG_SYSTEM, LANG_ADDON, nullptr, nullptr,
-        fmt::format("ROWOWFEEL\t{}:{}", skillLevel, mapNameIter != MapNamesByMapID.end() ? mapNameIter->second : ""));
+        fmt::format("ROWOWFEEL\t{}:{}", skillLevel, GetMapNameOfMapKey(GetUnitMapKey(sd))));
     sd->SendDirectMessage(&data);
 }
 
@@ -1986,7 +1984,7 @@ void ROWOWMod::ClifParseFeelSaveOk(Player* sd)
     identity.MenuSkillValue = 0;
     if (i < 0 || i >= ROWOW_MAX_PC_FEELHATE || IsROMap(sd->GetMapId()) == false)
         return; // Bug?
-    SetIdentityVariable(identity, feelVars[i], sd->GetMapId());
+    SetIdentityVariable(identity, feelVars[i], GetUnitMapKey(sd)); // A map key: a part of a stitched map is a place of its own
     ClifFeelInfo(sd, i, 0);
 }
 
@@ -1998,8 +1996,9 @@ void ROWOWMod::ClifFeelInfo(Player* sd, int32 pos, int32 type) const
     ROWOWIdentity const* identity = sd->CustomData.Get<ROWOWIdentity>("ROWOWIdentity");
     if (identity == nullptr || pos < 0 || pos >= ROWOW_MAX_PC_FEELHATE)
         return;
-    auto mapNameIter = MapNamesByMapID.find(PCGetFeelMap(*identity, pos));
-    std::string mapName = mapNameIter != MapNamesByMapID.end() ? mapNameIter->second : "?";
+    std::string mapName = GetMapNameOfMapKey(PCGetFeelMap(*identity, pos));
+    if (mapName.empty() == true)
+        mapName = "?";
     if (type == 0)
         ChatHandler(sd->GetSession()).PSendSysMessage("{} is now your Place of the {}.", mapName, placeNames[pos]);
     else
