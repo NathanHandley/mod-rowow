@@ -773,6 +773,8 @@ bool ROWOWMod::PCTakeItem(Player* sd, ObjectGuid const& guid, bool isGreed)
     GetUnitCell(sd, x, y);
     if (CheckDistance(fitem->X - x, fitem->Y - y, PICKUP_RANGE) == false && isGreed == false)
         return false; // Distance is too far
+    if (GetMapKey(map->GetId(), fitem->X, fitem->Y) != GetMapKey(map->GetId(), x, y))
+        return false; // On another map (a stitched map's other part, just over the gap; Greed's reach included)
     if (ROWOWStatusChange const* sc = GetStatusChange(static_cast<Unit const*>(sd)); sc != nullptr && sc->Cant.PickUp == true)
         return false;
     Group* group = sd->GetGroup();
