@@ -445,7 +445,7 @@ int32 ROWOWMod::PartyForEachSameMap(Player* sd, int32 range, std::function<int32
     for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next())
     {
         Player* member = itr->GetSource();
-        if (member == nullptr || member->IsInWorld() == false || member->IsInMap(sd) == false || GetROStatus(member) == nullptr)
+        if (member == nullptr || member->IsInWorld() == false || IsOnSameROMap(member, sd) == false || GetROStatus(member) == nullptr)
             continue;
         int32 memberX = 0, memberY = 0;
         GetUnitCell(member, memberX, memberY);

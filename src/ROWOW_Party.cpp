@@ -242,13 +242,13 @@ bool ROWOWMod::PartySkillCheckJob(Player const* sd, uint16 jobID)
 
 void ROWOWMod::PartyExpShare(Group* group, Creature* src, uint64 baseExp, uint64 jobExp)
 {
-    // party_exp_share: evenly among the members on the monster's map, alive (so its distance doesn't matter, as in rAthena), more for each with
-    // party_even_share_bonus.  Members on the monster's map share its thread.  (idle_no_share isn't in: no idle time is kept; it's off)
+    // party_exp_share: evenly among the members on the monster's map (on a stitched map, its part), alive (so its distance doesn't matter, as in
+    // rAthena), more for each with party_even_share_bonus.  Members on the monster's map share its thread.  (idle_no_share isn't in: no idle time is kept; it's off)
     std::vector<Player*> members;
     for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next())
     {
         Player* member = itr->GetSource();
-        if (member == nullptr || member->IsInMap(src) == false || member->IsAlive() == false || IsInROForm(member) == false)
+        if (member == nullptr || IsOnSameROMap(member, src) == false || member->IsAlive() == false || IsInROForm(member) == false)
             continue;
         members.push_back(member);
     }
@@ -280,7 +280,7 @@ bool ROWOWMod::PartyShareLoot(Player* sd, Group* group, ROWOWPartyOption const& 
         for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next())
         {
             Player* member = itr->GetSource();
-            if (member == nullptr || member->IsInMap(sd) == false || member->IsAlive() == false || IsInROForm(member) == false)
+            if (member == nullptr || IsOnSameROMap(member, sd) == false || member->IsAlive() == false || IsInROForm(member) == false)
                 continue;
             members.push_back(member);
         }
@@ -330,7 +330,7 @@ bool ROWOWMod::PartyShareLoot(Player* sd, Group* group, ROWOWPartyOption const& 
         for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next())
         {
             Player* member = itr->GetSource();
-            if (member != nullptr && member != target && member->IsInMap(sd) == true && IsInROForm(member) == true)
+            if (member != nullptr && member != target && IsOnSameROMap(member, sd) == true && IsInROForm(member) == true)
                 ChatHandler(member->GetSession()).SendSysMessage(message.c_str());
         }
     }

@@ -843,6 +843,12 @@ uint32 ROWOWMod::GetUnitMapKey(Unit const* unit) const
     return GetMapKey(unit->GetMapId(), x, y);
 }
 
+bool ROWOWMod::IsOnSameROMap(Unit const* a, Unit const* b) const
+{
+    // Units on one WoW map share its thread, so their positions are safe to read here
+    return a->IsInMap(b) == true && GetUnitMapKey(a) == GetUnitMapKey(b);
+}
+
 uint32 ROWOWMod::GetPositionMapKey(ROWOWPosition const& position) const
 {
     ROWOWMapGrid const* mapGrid = GetMapGrid(position.MapID);

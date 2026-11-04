@@ -2257,6 +2257,7 @@ public:
     ROWOWMapPart const* GetMapPartAt(uint32 mapID, int32 cellX, int32 cellY) const; // A gap cell is its nearer part's; nullptr off every part (and on maps of their own)
     uint32 GetMapKey(uint32 mapID, int32 cellX, int32 cellY) const;
     uint32 GetUnitMapKey(Unit const* unit) const;
+    bool IsOnSameROMap(Unit const* a, Unit const* b) const; // rAthena's bl.m == bl.m: the same WoW map and, on a stitched map, the same part
     uint32 GetPositionMapKey(ROWOWPosition const& position) const;
     uint32 GetMapKeyByMapName(std::string const& mapName) const;
     uint32 GetMapIDOfMapKey(uint32 mapKey) const; // The WoW map a map key's cells are on

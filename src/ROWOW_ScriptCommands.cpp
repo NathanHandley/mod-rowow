@@ -2391,12 +2391,18 @@ void ROWOWMod::RegisterNpcScriptCommands()
         bool isOff = GetArgument(arguments, 0, 0) == 2;
         if (isOff == false)
         {
-            // The script's cells are its map's: on a stitched map, the part the player is in
+            // The script's cells are its map's: on a stitched map, the part of the NPC talked to (the player may stand just over the gap from
+            // it), else the part the player is in
             int32 cellX = int32(GetArgument(arguments, 1, 0));
             int32 cellY = int32(GetArgument(arguments, 2, 0));
-            int32 playerX = 0, playerY = 0;
-            GetUnitCell(player, playerX, playerY);
-            if (ROWOWMapPart const* part = GetMapPartAt(player->GetMapId(), playerX, playerY))
+            ROWOWMapPart const* part = context.Npc != nullptr && context.Npc->MapID == player->GetMapId() ? GetMapPart(context.Npc->MapName) : nullptr;
+            if (part == nullptr)
+            {
+                int32 playerX = 0, playerY = 0;
+                GetUnitCell(player, playerX, playerY);
+                part = GetMapPartAt(player->GetMapId(), playerX, playerY);
+            }
+            if (part != nullptr && part->HasArea() == true)
             {
                 cellX += part->CellOffsetX;
                 cellY += part->CellOffsetY;

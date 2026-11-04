@@ -507,7 +507,7 @@ void ROWOWMod::QuestKillUpdate(Creature* md, Player* sd)
     for (GroupReference* memberReference = group->GetFirstMember(); memberReference != nullptr; memberReference = memberReference->next())
     {
         Player* member = memberReference->GetSource();
-        if (member == nullptr || member->IsInMap(md) == false || IsInROForm(member) == false)
+        if (member == nullptr || IsOnSameROMap(member, md) == false || IsInROForm(member) == false)
             continue;
         int32 memberX = 0, memberY = 0;
         GetUnitCell(member, memberX, memberY);

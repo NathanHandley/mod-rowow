@@ -887,7 +887,7 @@ Player* ROWOWMod::MobGetMVPPlayer(Creature* md)
     for (ROWOWDamageLogEntry const& entry : damageLog->Entries)
     {
         Player* sd = ObjectAccessor::GetPlayer(*md, entry.PlayerGUID);
-        if (sd == nullptr || sd->IsAlive() == false || IsInROForm(sd) == false)
+        if (sd == nullptr || sd->IsAlive() == false || IsInROForm(sd) == false || IsOnSameROMap(sd, md) == false)
             continue;
         if (mvpDamage >= entry.Damage + entry.DamageTanked)
             continue;
@@ -899,13 +899,15 @@ Player* ROWOWMod::MobGetMVPPlayer(Creature* md)
 
 int32 ROWOWMod::MobDeadAttackerCount(Creature* md)
 {
-    // mob_dead's count: only logged into same map chars are counted for the total.  A monster that came back (mob_revive) counts its self damage out
+    // mob_dead's count: only logged into same map chars are counted for the total (on a stitched map, the same part).  A monster that came back
+    // (mob_revive) counts its self damage out
     ROWOWDamageLog const* damageLog = md->CustomData.Get<ROWOWDamageLog>("ROWOWDamageLog");
     int32 count = 0;
     if (damageLog != nullptr)
         for (ROWOWDamageLogEntry const& entry : damageLog->Entries)
-            if (ObjectAccessor::GetPlayer(*md, entry.PlayerGUID) != nullptr)
-                count++;
+            if (Player* sd = ObjectAccessor::GetPlayer(*md, entry.PlayerGUID))
+                if (IsOnSameROMap(sd, md) == true)
+                    count++;
     return count;
 }
 

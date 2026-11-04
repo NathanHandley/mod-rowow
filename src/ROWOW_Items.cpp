@@ -1449,6 +1449,10 @@ bool ROWOWMod::MapSearchRandomSpot(Map* map, uint32 mapKey, Position& positionOu
             return true;
         }
     }
+
+    // Off every part of a stitched map (past its outer edge): no map of its own to land on, and a home anywhere on the stitched map is another part
+    if (mapKey == map->GetId() && MapPartsByMapID.find(map->GetId()) != MapPartsByMapID.end())
+        return false;
     Map::CreatureBySpawnIdContainer const& creaturesBySpawnID = map->GetCreatureBySpawnIdStore();
     if (creaturesBySpawnID.empty() == true)
         return false;
