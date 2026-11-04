@@ -243,6 +243,9 @@ struct ROWOWDataTable
 #define ROWOW_SPELL_TAME                            200012  // What a taming item casts: the use item spell with a target (RO's capture cursor)
 #define ROWOW_SPELL_FOLLOWER_ORDER                  200013  // A spot on the ground for a homunculus or mercenary (RO's Alt and click)
 #define ROWOW_SPELL_ARROW_ATTACK                    200014  // The arrow flying to the target of a bow attack (a visual-only missile)
+#define ROWOW_SPELL_WORLD_RETURN                    200015  // The world travel spell as the RO world's spell book shows it, World Return
+#define ROWOW_WORLD_TRAVEL_REQUEST_TIME_IN_MS       15000   // How long the Ragnarok page's Enter button lets the world travel spell start and finish
+#define ROWOW_IDENTITY_NEW_HP_SP                    0x7FFFFFFF // A new identity's HP and SP, past any maximum: full on its first arrival
 #define ROWOW_SPELL_ID_FIXED_END                    200099  // The fixed RO spells end here (generated ones follow)
 #define ROWOW_SPELL_ID_RO_START                     200000  // RO spells are 200000-248999
 #define ROWOW_SPELL_ID_RO_END                       248999
@@ -2050,6 +2053,11 @@ struct ROWOWIdentity : public DataMap::Base
     bool IsFormArrivalPending = false;
     bool IsFormDeparturePending = false;
     bool IsNewIdentityPending = false; // The first entry, whose start items are given once in the world
+    // Out of the form, the character window's Ragnarok page has the form's carried set on the character while it's shown, so its equipment and bags
+    // can be changed there (StartViewingROSet; Nathan 2026-11-04).  Never saved: anything that isn't the page's ends it first (StopViewingROSet)
+    bool IsViewingROSet = false;
+    std::string PageAreaName; // The page's MAP: the area the identity is in in the RO world, found when the page asks for its bags (world thread)
+    uint64 WorldTravelRequestTick = 0; // When the Ragnarok page's Enter button asked for the world travel spell (.ro enter), the only way into the RO world
     bool IsLeavingForReset = false; // .ro identity reset takes the form off, on an RO map too, where CompleteROFormChange would put it back on
     bool IsArrivalFloorCheckPending = false; // Arrived on an RO map: the next update checks it isn't left in the air (CheckArrivalFloor)
     uint32 MapKey = 0; // The map key it was last on (GetMapKey), 0 for none yet: a change on the same WoW map is RO's map change (UpdateMapKey)
@@ -2282,6 +2290,19 @@ public:
     void UpdateCarriedSet(Player* player, ROWOWIdentity& identity); // The set of the side the character is on now onto it, the other put away
     void LoadIdentityStowedItems(Player* player, ROWOWIdentity& identity) const;
     void SaveIdentityStowedItems(Player* player, ROWOWIdentity& identity, CharacterDatabaseTransaction trans) const; // Only with the inventory's rows
+    bool IsROSetCarried(Player* player) const; // The form's carried set is on the character: in the form, or out of it on the Ragnarok page
+    bool IsStartBagMoveRefused(Player* player, uint8 sourceBag, uint8 sourceSlot, uint8 destinationBag, uint8 destinationSlot) const; // The Adventurer's Bags stay in the bag slots
+
+    // The character window's Ragnarok page (the RO_Identity addon), out of the form: the identity's look, equipment and bags, making a new identity, and
+    // the way into the RO world.  The page tells the client under the ROWOWPAGE prefix (see SendRagnarokPageToClient)
+    void StartViewingROSet(Player* player); // The page is shown: the form's carried set on the character
+    void StopViewingROSet(Player* player); // The page is closed, or something else needs the character's own set: it's back
+    void SendRagnarokPageToClient(Player* player, char const* blockedText = nullptr);
+    void UpdatePageAreaName(ROWOWIdentity& identity) const; // The page's MAP line (world thread only)
+    bool CreateIdentity(Player* player, uint32 hairStyle, uint32 hairColor); // The page's character creation (.ro create): a new Novice, with its start items
+    void StartWorldTravel(Player* player); // The page's Enter button (.ro enter): the world travel spell's 8 second cast into the RO world
+    bool IsWorldTravelRequested(Player* player) const; // Out of the RO world, the world travel spell is only the Enter button's
+    void SendWorldTravelSpellsToClient(Player* player) const; // The book shows World Return in the RO world, and neither travel spell out of it
 
     // Turning into the form and back, on arriving in and leaving the RO world (and at login).  These change the character's values,
     // spells and action bars, which works before the character is added to the map, so the client is first sent the character already
@@ -2294,6 +2315,8 @@ public:
     void RefreshROFormValues(Player* player, ROWOWIdentity& identity); // The level, exp bar, status and maximums
     void RefreshROFormLook(Player* player); // The job's look
     void RemoveROFormAuras(Player* player); // The job's look, its head and headgear
+    void InitNewIdentity(ROWOWIdentity& identity) const; // A level 1 Novice (rAthena's new character), saving at the start point
+    void GiveNewIdentityStartItems(Player* player, ROWOWIdentity& identity); // Its general bags, then its start items, worn where they go
     void GiveStartBags(Player* player); // A new identity's general bags: in the empty bag slots, then the bags, then by mail
     void GiveStartItemOrMail(Player* player, uint32 itemTemplateID, uint32 amount, Item** itemOut); // Into the bags, or by mail when there's no room
     void RestoreWoWShapeshift(Player* player, ROWOWIdentity& identity); // Leaving the form: the stance or form the character came in with

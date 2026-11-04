@@ -766,10 +766,11 @@ int32 ROWOWMod::PCEquipPoint(Player* player, ROWOWIdentity const& identity, ROWO
 
 bool ROWOWMod::PCEquipItem(Player* player, Item* item, int32 reqPos)
 {
-    // pc_equipitem
+    // pc_equipitem.  Out of the form, on the character window's Ragnarok page, the item is only put in its place: its scripts, its status and the
+    // statuses it needs wait for the RO world, where the form's status is worked out with what it wears (RefreshROForm)
     ROWOWIdentity* identity = GetIdentity(player);
     ROWOWItem const* roItem = GetROItem(item);
-    if (identity->IsInForm == false || roItem == nullptr || PCCantAct(player) == true) // clif_parse_EquipItem's pc_cant_act2
+    if (IsROSetCarried(player) == false || roItem == nullptr || (identity->IsInForm == true && PCCantAct(player) == true)) // clif_parse_EquipItem's pc_cant_act2
         return false;
     int32 pos = PCEquipPoint(player, *identity, *roItem);
     uint8 result = PCIsEquip(player, *identity, item);
@@ -835,6 +836,11 @@ bool ROWOWMod::PCEquipItem(Player* player, Item* item, int32 reqPos)
             PCUnequipItem(player, ROWOW_EQUIP_POSITION_AMMO, 2 | 4);
     }
 
+    if (identity->IsInForm == false)
+    {
+        SendEquipmentToClient(player, *identity, false); // The Ragnarok page's slots
+        return true;
+    }
     RefreshROForm(player);
     PCCheckAllowSkill(player); // Check if status changes should be halted (with the new weapon's status)
 
@@ -866,8 +872,8 @@ bool ROWOWMod::PCUnequipItem(Player* player, uint32 equipPosition, int32 flag)
     identity->ItemGUIDsByEquipPosition.erase(itemGUIDIter);
     identity->IsEquipmentChanged = true;
 
-    // pc_unequipitem_sub: the item's UnEquipScript, and its cards'
-    if (roItem != nullptr)
+    // pc_unequipitem_sub: the item's UnEquipScript, and its cards' (in the form: on the Ragnarok page nothing ran when it was put on)
+    if (roItem != nullptr && identity->IsInForm == true)
     {
         RunItemScript(player, roItem->UnEquipScript.get(), item);
         for (uint8 slot = 0; slot < ROWOW_MAX_SLOTS; slot++)
@@ -897,8 +903,14 @@ bool ROWOWMod::PCUnequipItem(Player* player, uint32 equipPosition, int32 flag)
         }
     }
     // Taking off the weapon ends Enchant Deadly Poison (switch_remove_edp&1, pre-renewal's bit)
-    if ((pos & ROWOW_EQUIP_POSITION_HAND_R) != 0 && (BattleConfig.SwitchRemoveEdp & 1) != 0)
+    if ((pos & ROWOW_EQUIP_POSITION_HAND_R) != 0 && (BattleConfig.SwitchRemoveEdp & 1) != 0 && identity->IsInForm == true)
         StatusChangeEnd(player, ROWOW_SC_EDP);
+    if (identity->IsInForm == false)
+    {
+        if ((flag & 2) == 0)
+            SendEquipmentToClient(player, *identity, false); // The Ragnarok page's slots (an equip taking it off sends them itself)
+        return true;
+    }
     if ((flag & 1) != 0)
     {
         RefreshROForm(player);

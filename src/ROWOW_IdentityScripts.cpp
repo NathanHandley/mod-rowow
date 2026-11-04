@@ -69,6 +69,153 @@ namespace
         }
         return false;
     }
+
+    // A place in a carried set: the bag slots and the backpack, or any slot of a bag (NULL_SLOT for anywhere in it)
+    bool IsCarriedSetPosition(uint8 bag, uint8 slot)
+    {
+        if (bag == INVENTORY_SLOT_BAG_0)
+            return slot >= INVENTORY_SLOT_BAG_START && slot < INVENTORY_SLOT_ITEM_END;
+        return bag >= INVENTORY_SLOT_BAG_START && bag < INVENTORY_SLOT_BAG_END;
+    }
+
+    // An item move with the form's carried set on the character: the Adventurer's Bags stay in the bag slots (IsStartBagMoveRefused), and on the
+    // Ragnarok page (out of the form) nothing moves between the set and the character's own things (its worn gear, keyring and bank).  True when it's
+    // refused, which the client is told so it lets go of the item.  A short packet throws, as the handler's own read would
+    bool IsItemMoveRefused(Player* player, WorldPacket const& packet)
+    {
+        uint8 sourceBag = 0;
+        uint8 sourceSlot = 0;
+        uint8 destinationBag = NULL_BAG;
+        uint8 destinationSlot = NULL_SLOT; // None for a destroy, an equip slot found by the core, or a bank place
+        bool hasCarriedDestination = true;
+        WorldPacket packetCopy(packet);
+        switch (packet.GetOpcode())
+        {
+            case CMSG_SWAP_INV_ITEM:
+                sourceBag = INVENTORY_SLOT_BAG_0;
+                destinationBag = INVENTORY_SLOT_BAG_0;
+                packetCopy >> destinationSlot >> sourceSlot;
+                hasCarriedDestination = IsCarriedSetPosition(destinationBag, destinationSlot);
+                break;
+            case CMSG_SWAP_ITEM:
+                packetCopy >> destinationBag >> destinationSlot >> sourceBag >> sourceSlot;
+                hasCarriedDestination = IsCarriedSetPosition(destinationBag, destinationSlot);
+                break;
+            case CMSG_SPLIT_ITEM:
+                packetCopy >> sourceBag >> sourceSlot >> destinationBag >> destinationSlot;
+                hasCarriedDestination = IsCarriedSetPosition(destinationBag, destinationSlot);
+                break;
+            case CMSG_AUTOSTORE_BAG_ITEM:
+                packetCopy >> sourceBag >> sourceSlot >> destinationBag;
+                hasCarriedDestination = IsCarriedSetPosition(destinationBag, NULL_SLOT);
+                break;
+            case CMSG_AUTOEQUIP_ITEM:
+            {
+                // Only a bag goes from the set into the set's bag slots; anything else would go on the character's worn gear
+                packetCopy >> sourceBag >> sourceSlot;
+                Item* item = player->GetItemByPos(sourceBag, sourceSlot);
+                hasCarriedDestination = item != nullptr && item->ToBag() != nullptr;
+                break;
+            }
+            case CMSG_AUTOEQUIP_ITEM_SLOT:
+            {
+                ObjectGuid itemGUID;
+                packetCopy >> itemGUID >> destinationSlot;
+                Item* item = player->GetItemByGuid(itemGUID);
+                if (item == nullptr)
+                    return false;
+                sourceBag = item->GetBagSlot();
+                sourceSlot = item->GetSlot();
+                destinationBag = INVENTORY_SLOT_BAG_0;
+                hasCarriedDestination = IsCarriedSetPosition(destinationBag, destinationSlot);
+                break;
+            }
+            case CMSG_DESTROYITEM:
+                packetCopy >> sourceBag >> sourceSlot;
+                break;
+            case CMSG_AUTOBANK_ITEM:
+            case CMSG_AUTOSTORE_BANK_ITEM:
+                packetCopy >> sourceBag >> sourceSlot;
+                hasCarriedDestination = false;
+                break;
+            default:
+                return false;
+        }
+        char const* refusal = nullptr;
+        if (ROWOW->IsStartBagMoveRefused(player, sourceBag, sourceSlot, destinationBag, destinationSlot) == true)
+            refusal = "The Adventurer's Bags can't be taken off.";
+        else if (ROWOW->IsInROForm(player) == false && (IsCarriedSetPosition(sourceBag, sourceSlot) == false || hasCarriedDestination == false))
+            refusal = "Only your Ragnarok Online character's things move here.";
+        else if (ROWOW->IsInROForm(player) == false && packet.GetOpcode() == CMSG_DESTROYITEM && player->GetItemByPos(sourceBag, sourceSlot) != nullptr &&
+            ROWOW->GetIdentityEquipPosition(*ROWOW->GetIdentity(player), player->GetItemByPos(sourceBag, sourceSlot)->GetGUID().GetCounter()) != 0)
+            refusal = "Take it off before destroying it."; // The form's own check is CanPacketReceive's, after this
+        if (refusal == nullptr)
+            return false;
+        ChatHandler(player->GetSession()).SendNotification(refusal);
+        Item* item = player->GetItemByPos(sourceBag, sourceSlot);
+        player->SendEquipError(EQUIP_ERR_NONE, item, nullptr);
+        return true;
+    }
+
+    // On the Ragnarok page (the form's carried set on the character, out of the form), what the character's own things are for: a vendor, the bank or
+    // mail, a trade, loot, a quest, casting or using an item, fighting.  These put the character's own set back first, then go on as they would
+    bool IsViewingEndedBy(uint16 opcode)
+    {
+        switch (opcode)
+        {
+            case CMSG_GOSSIP_HELLO:
+            case CMSG_BANKER_ACTIVATE:
+            case CMSG_LIST_INVENTORY:
+            case CMSG_SELL_ITEM:
+            case CMSG_BUY_ITEM:
+            case CMSG_BUY_ITEM_IN_SLOT:
+            case CMSG_BUYBACK_ITEM:
+            case CMSG_REPAIR_ITEM:
+            case CMSG_INITIATE_TRADE:
+            case CMSG_BEGIN_TRADE:
+            case CMSG_SET_TRADE_ITEM:
+            case CMSG_LOOT:
+            case CMSG_AUTOSTORE_LOOT_ITEM:
+            case CMSG_LOOT_ROLL:
+            case CMSG_GAMEOBJ_USE:
+            case CMSG_GAMEOBJ_REPORT_USE:
+            case CMSG_GET_MAIL_LIST:
+            case CMSG_SEND_MAIL:
+            case CMSG_MAIL_TAKE_ITEM:
+            case CMSG_MAIL_CREATE_TEXT_ITEM:
+            case MSG_AUCTION_HELLO:
+            case CMSG_AUCTION_SELL_ITEM:
+            case CMSG_QUESTGIVER_HELLO:
+            case CMSG_QUESTGIVER_ACCEPT_QUEST:
+            case CMSG_QUESTGIVER_COMPLETE_QUEST:
+            case CMSG_QUESTGIVER_REQUEST_REWARD:
+            case CMSG_QUESTGIVER_CHOOSE_REWARD:
+            case CMSG_GUILD_BANKER_ACTIVATE:
+            case CMSG_GUILD_BANK_SWAP_ITEMS:
+            case CMSG_TRAINER_LIST:
+            case CMSG_TRAINER_BUY_SPELL:
+            case CMSG_PETITION_SHOWLIST:
+            case CMSG_PETITION_BUY:
+            case CMSG_BINDER_ACTIVATE:
+            case CMSG_SPIRIT_HEALER_ACTIVATE:
+            case CMSG_ACTIVATETAXI:
+            case CMSG_ACTIVATETAXIEXPRESS:
+            case CMSG_USE_ITEM:
+            case CMSG_OPEN_ITEM:
+            case CMSG_WRAP_ITEM:
+            case CMSG_SOCKET_GEMS:
+            case CMSG_ITEM_REFUND:
+            case CMSG_SET_AMMO:
+            case CMSG_EQUIPMENT_SET_USE:
+            case CMSG_CAST_SPELL:
+            case CMSG_ATTACKSWING:
+            case CMSG_REPOP_REQUEST:
+            case CMSG_RECLAIM_CORPSE:
+                return true;
+            default:
+                return false;
+        }
+    }
 }
 
 class ROWOW_IdentityPlayerScript : public PlayerScript
@@ -91,6 +238,7 @@ public:
             ROWOW->EnterROForm(player);
         else if (identity->IsInForm == true)
             ROWOW->LeaveROForm(player);
+        ROWOW->SendWorldTravelSpellsToClient(player); // The client was just sent every spell, the travel spells too
     }
 
     void OnPlayerMapChanged(Player* player) override
@@ -180,8 +328,24 @@ public:
         return ROWOW->IsInROForm(player) == false;
     }
 
+    void OnPlayerBeforeLogout(Player* player) override
+    {
+        // The Ragnarok page's bags are put away before the logout's save: the character is saved with its own
+        if (ROWOW->IsEnabled == true)
+            ROWOW->StopViewingROSet(player);
+    }
+
+    void OnPlayerEnterCombat(Player* player, Unit* /*enemy*/) override
+    {
+        // The character fights with its own bags, not the Ragnarok page's.  The player's map thread, which the bags are the player's own on
+        if (ROWOW->IsEnabled == true)
+            ROWOW->StopViewingROSet(player);
+    }
+
     void OnPlayerJustDied(Player* player) override
     {
+        if (ROWOW->IsEnabled == true)
+            ROWOW->StopViewingROSet(player);
         // RO's restart window has no countdown: with the release timer shown, the client's death window would close by itself
         if (ROWOW->IsEnabled == false || ROWOW->IsInROForm(player) == false)
             return;
@@ -193,11 +357,11 @@ public:
         if (ROWOW->IsEnabled == false)
             return;
 
-        // Every character has the world travel spell (new ones start with it)
-        if (player->HasSpell(ROWOW_SPELL_WORLD_TRAVEL) == false && sSpellMgr->GetSpellInfo(ROWOW_SPELL_WORLD_TRAVEL) != nullptr)
-            player->learnSpell(ROWOW_SPELL_WORLD_TRAVEL);
-        if (player->HasSpell(ROWOW_SPELL_FOLLOWER_ORDER) == false && sSpellMgr->GetSpellInfo(ROWOW_SPELL_FOLLOWER_ORDER) != nullptr)
-            player->learnSpell(ROWOW_SPELL_FOLLOWER_ORDER);
+        // Every character has the world travel spells (new ones start with the first), which the spell book shows only in the RO world (World Return)
+        for (uint32 spellID : { uint32(ROWOW_SPELL_WORLD_TRAVEL), uint32(ROWOW_SPELL_WORLD_RETURN), uint32(ROWOW_SPELL_FOLLOWER_ORDER) })
+            if (player->HasSpell(spellID) == false && sSpellMgr->GetSpellInfo(spellID) != nullptr)
+                player->learnSpell(spellID);
+        ROWOW->SendWorldTravelSpellsToClient(player);
 
         // The pet loads after the character is placed on the map, so it's put away again here
         if (ROWOW->IsInROForm(player) == true)
@@ -254,6 +418,7 @@ public:
         // Remember where the character came into the RO world from, and where the identity left it, for the world travel spell
         if (ROWOW->IsEnabled == false || player == nullptr || player->IsInWorld() == false)
             return true;
+        ROWOW->StopViewingROSet(player); // The Ragnarok page's bags are put away before any arrival
         if (ROWOW->IsInROForm(player) == true)
         {
             // A warp off the map takes the player's ground skills and its shop with it (clear_skills_on_warp); a warp on the map ends in the
@@ -402,6 +567,12 @@ public:
         Player* player = session->GetPlayer();
         if (player == nullptr)
             return true;
+        // The form's carried set (in the form, or out of it on the Ragnarok page): which item moves it takes.  On the page, anything else the character's
+        // own things are for puts them back on it first
+        if (ROWOW->IsROSetCarried(player) == true && IsItemMoveRefused(player, packet) == true)
+            return false;
+        if (ROWOW->IsInROForm(player) == false && IsViewingEndedBy(packet.GetOpcode()) == true)
+            ROWOW->StopViewingROSet(player);
         if (ROWOW->IsInROForm(player) == false)
         {
             // auction_register's itemdb_canauction, for a character listing an RO item out of the form (in the form every auction is refused)
@@ -683,6 +854,12 @@ class ROWOW_WorldTravelSpellScript : public SpellScript
         Map* map = player->GetMap();
         if (map->IsDungeon() == true || map->IsBattlegroundOrArena() == true)
             return SPELL_FAILED_NOT_HERE;
+        // The way in is the character window's Ragnarok page (its Enter button, .ro enter), not the spell itself (an old action button, a macro)
+        if (ROWOW->IsROMap(player->GetMapId()) == false && ROWOW->IsWorldTravelRequested(player) == false)
+        {
+            ChatHandler(player->GetSession()).SendSysMessage("Travel to Ragnarok Online from the Ragnarok page of your character window.");
+            return SPELL_FAILED_DONT_REPORT;
+        }
         ROWOWPosition destination;
         if (ROWOW->GetWorldTravelDestination(player, destination) == false)
             return SPELL_FAILED_NOT_HERE;
@@ -694,6 +871,7 @@ class ROWOW_WorldTravelSpellScript : public SpellScript
         Player* player = GetCaster() != nullptr ? GetCaster()->ToPlayer() : nullptr;
         if (player == nullptr)
             return;
+        ROWOW->GetIdentity(player)->WorldTravelRequestTick = 0;
         ROWOWPosition destination;
         if (ROWOW->GetWorldTravelDestination(player, destination) == false)
             return;
@@ -759,6 +937,9 @@ public:
         {
             { "sync",     HandleROSyncCommand,   SEC_PLAYER,     Console::No },
             { "hair",     HandleROHairCommand,   SEC_PLAYER,     Console::No },
+            { "view",     HandleROViewCommand,   SEC_PLAYER,     Console::No },
+            { "create",   HandleROCreateCommand, SEC_PLAYER,     Console::No },
+            { "enter",    HandleROEnterCommand,  SEC_PLAYER,     Console::No },
             { "statup",   HandleROStatUpCommand, SEC_PLAYER,     Console::No },
             { "partyoption", HandleROPartyOptionCommand, SEC_PLAYER, Console::No },
             { "pet",      HandleROPetCommand,    SEC_PLAYER,     Console::No },
@@ -2616,7 +2797,7 @@ public:
         // The RO Equipment window and the bags: wears the RO item at a bag position (the client's bag 0-4 and slot from 1), in the
         // equipment positions asked for or wherever it goes (rAthena's clif_parse_EquipItem)
         Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
-        if (player == nullptr || ROWOW->IsInROForm(player) == false)
+        if (player == nullptr || ROWOW->IsROSetCarried(player) == false) // In the form, or on the Ragnarok page
             return false;
         Item* item = ROWOWMod::GetItemByClientPosition(player, bag, slot);
         ROWOWItem const* roItem = ROWOW->GetROItem(item);
@@ -2640,7 +2821,7 @@ public:
     {
         // Takes off what's worn in an RO equipment position (rAthena's clif_parse_UnequipItem)
         Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
-        if (player == nullptr || ROWOW->IsInROForm(player) == false)
+        if (player == nullptr || ROWOW->IsROSetCarried(player) == false) // In the form, or on the Ragnarok page
             return false;
         if (ROWOW->IsItemUseBlockedByNpc(player) == true)
         {
@@ -2682,6 +2863,45 @@ public:
             return false;
         if (ROWOW->PCCantAct(player) == false) // A Magnifier is used up by this
             ROWOW->SkillIdentify(player, ROWOWMod::GetItemByClientPosition(player, bag, slot));
+        return true;
+    }
+
+    // The character window's Ragnarok page (the RO_Identity addon), out of the form: shown or closed (1 or 0), its character creation, its Enter button
+    static bool HandleROViewCommand(ChatHandler* handler, uint32 isViewing)
+    {
+        Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
+        if (player == nullptr)
+            return false;
+        if (isViewing != 0)
+            ROWOW->StartViewingROSet(player);
+        else
+        {
+            ROWOW->StopViewingROSet(player);
+            ROWOW->SendRagnarokPageToClient(player);
+        }
+        return true;
+    }
+
+    static bool HandleROCreateCommand(ChatHandler* handler, uint32 style, uint32 color)
+    {
+        Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
+        if (player == nullptr)
+            return false;
+        if (ROWOW->CreateIdentity(player, style, color) == false)
+        {
+            handler->SendSysMessage("Your Ragnarok Online character can't be made right now.");
+            ROWOW->SendRagnarokPageToClient(player);
+            return false;
+        }
+        return true;
+    }
+
+    static bool HandleROEnterCommand(ChatHandler* handler)
+    {
+        Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
+        if (player == nullptr)
+            return false;
+        ROWOW->StartWorldTravel(player);
         return true;
     }
 

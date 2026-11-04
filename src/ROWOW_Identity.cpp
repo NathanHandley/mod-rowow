@@ -32,6 +32,7 @@
 #include "SpellInfo.h"
 #include "SpellMgr.h"
 #include "Tokenize.h"
+#include "World.h"
 #include "WorldPacket.h"
 #include "WorldSession.h"
 
@@ -1240,49 +1241,25 @@ void ROWOWMod::EnterROForm(Player* player)
     ROWOWIdentity* identity = GetIdentity(player);
     if (identity->IsInForm == true)
         return;
+    identity->IsViewingROSet = false; // The carried set below is the form's now in any case
 
-    // The first entry makes the identity: a level 1 Novice (rAthena's new character), saving at the start point.  The start items are
-    // given once the character is in the world
+    // An arrival with no identity makes one (the Ragnarok page makes them, but a GM's teleport may come first).  The start items are given once the
+    // character is in the world
     bool isNewIdentity = identity->Exists == false;
     if (isNewIdentity == true)
     {
-        identity->Exists = true;
-        identity->JobID = ROWOW_JOB_NOVICE;
-        identity->BaseLevel = 1;
-        identity->JobLevel = 1;
-        identity->BaseExp = 0;
-        identity->JobExp = 0;
-        auto statusPointsIter = StatusPointsByBaseLevel.find(1);
-        identity->StatusPoints = statusPointsIter != StatusPointsByBaseLevel.end() ? statusPointsIter->second : 0;
-        identity->SkillPoints = 0;
-        for (uint8 statIndex = 0; statIndex < ROWOW_STAT_COUNT; statIndex++)
-            identity->Stats[statIndex] = 1;
-        identity->Zeny = StartZeny;
-        identity->HP = 0; // Full, below
-        identity->SP = 0;
-        identity->SavePoint = ROWOWPosition();
-        GetCellPosition(StartMapID, StartCellX, StartCellY, identity->SavePoint);
-        identity->ActionsByButton.clear();
-        identity->ActionsByButton[0] = ROWOW_SPELL_AUTO_ATTACK;
-        identity->ActionsByButton[1] = ROWOW_SPELL_WORLD_TRAVEL;
-        identity->AreActionsChanged = true;
-        identity->ItemGUIDsByEquipPosition.clear();
-        identity->IsEquipmentChanged = true;
-        identity->SkillLevelsByID.clear();
-        identity->AreSkillsChanged = true;
-        identity->Variables.Clear();
-        identity->SavedStatusChanges.clear();
-        identity->AreStatusChangesChanged = true;
-        identity->CartItems.fill(ROWOWCartItem());
-        identity->CartNum = 0;
-        identity->CartWeight = 0;
-        identity->AreCartItemsChanged = true;
-        identity->MemoPoints.fill(ROWOWMemoPoint());
-        identity->AreMemoPointsChanged = true;
-        identity->Quests.clear();
-        identity->AreQuestsChanged = true;
-        identity->Option = 0;
+        InitNewIdentity(*identity);
         identity->IsNewIdentityPending = true;
+    }
+
+    // The world travel spell's way back on the form's action bars is World Return (identities from before it had the travel spell itself)
+    for (auto& actionByButton : identity->ActionsByButton)
+    {
+        if (actionByButton.second == ROWOW_SPELL_WORLD_TRAVEL)
+        {
+            actionByButton.second = ROWOW_SPELL_WORLD_RETURN;
+            identity->AreActionsChanged = true;
+        }
     }
 
     // The character's own values, put back on leaving
@@ -1407,16 +1384,7 @@ void ROWOWMod::CompleteROFormChange(Player* player)
             // with them
             if (identity->IsNewIdentityPending == true)
             {
-                GiveStartBags(player);
-                for (ROWOWStartItem const& startItem : StartItems)
-                {
-                    Item* item = nullptr;
-                    GiveStartItemOrMail(player, startItem.ItemTemplateID, startItem.Amount, &item);
-                    if (item != nullptr && startItem.EquipPosition != 0) // One sent by mail isn't worn
-                        identity->ItemGUIDsByEquipPosition[startItem.EquipPosition] = item->GetGUID().GetCounter();
-                }
-                identity->IsEquipmentChanged = true;
-                identity->IsNewIdentityPending = false;
+                GiveNewIdentityStartItems(player, *identity);
                 RefreshROFormValues(player, *identity); // The start weapon and armor count from now
                 player->SaveToDB(false, false);
             }
@@ -1474,6 +1442,7 @@ void ROWOWMod::CompleteROFormChange(Player* player)
     if (isFormChanged == true)
         SendFormActionButtons(player, *identity); // In the world now, so the client takes every button (the arrival's left the other side's on the empty ones)
     SendROFormStateToClient(player);
+    SendWorldTravelSpellsToClient(player);
     SendROStatusToClient(player);
     if (identity->IsInForm == true)
     {
@@ -1484,6 +1453,67 @@ void ROWOWMod::CompleteROFormChange(Player* player)
         PetArrive(player);
         FollowerArrive(player);
     }
+}
+
+void ROWOWMod::InitNewIdentity(ROWOWIdentity& identity) const
+{
+    // rAthena's new character: a level 1 Novice with no exp, zeny to start, and its save point at the start point.  Its HP and SP are full on its
+    // first arrival: past any maximum, which EnterROForm holds them under (0 HP would be a death)
+    identity.Exists = true;
+    identity.JobID = ROWOW_JOB_NOVICE;
+    identity.BaseLevel = 1;
+    identity.JobLevel = 1;
+    identity.BaseExp = 0;
+    identity.JobExp = 0;
+    auto statusPointsIter = StatusPointsByBaseLevel.find(1);
+    identity.StatusPoints = statusPointsIter != StatusPointsByBaseLevel.end() ? statusPointsIter->second : 0;
+    identity.SkillPoints = 0;
+    for (uint8 statIndex = 0; statIndex < ROWOW_STAT_COUNT; statIndex++)
+        identity.Stats[statIndex] = 1;
+    identity.Zeny = StartZeny;
+    identity.HP = ROWOW_IDENTITY_NEW_HP_SP;
+    identity.SP = ROWOW_IDENTITY_NEW_HP_SP;
+    identity.SavePoint = ROWOWPosition();
+    GetCellPosition(StartMapID, StartCellX, StartCellY, identity.SavePoint);
+    identity.LastPosition = ROWOWPosition();
+    identity.ActionsByButton.clear();
+    identity.ActionsByButton[0] = ROWOW_SPELL_AUTO_ATTACK;
+    identity.ActionsByButton[1] = ROWOW_SPELL_WORLD_RETURN;
+    identity.AreActionsChanged = true;
+    identity.ItemGUIDsByEquipPosition.clear();
+    identity.IsEquipmentChanged = true;
+    identity.SkillLevelsByID.clear();
+    identity.AreSkillsChanged = true;
+    identity.Variables.Clear();
+    identity.SavedStatusChanges.clear();
+    identity.AreStatusChangesChanged = true;
+    identity.CartItems.fill(ROWOWCartItem());
+    identity.CartNum = 0;
+    identity.CartWeight = 0;
+    identity.AreCartItemsChanged = true;
+    identity.MemoPoints.fill(ROWOWMemoPoint());
+    identity.AreMemoPointsChanged = true;
+    identity.Quests.clear();
+    identity.AreQuestsChanged = true;
+    identity.Option = 0;
+}
+
+void ROWOWMod::GiveNewIdentityStartItems(Player* player, ROWOWIdentity& identity)
+{
+    // Into the form's carried set, which is on the character (the arrival's, or the Ragnarok page's): the general bags, then the start items, each
+    // worn in its RO equipment position.  Once
+    if (identity.IsNewIdentityPending == false || IsROSetCarried(player) == false)
+        return;
+    GiveStartBags(player);
+    for (ROWOWStartItem const& startItem : StartItems)
+    {
+        Item* item = nullptr;
+        GiveStartItemOrMail(player, startItem.ItemTemplateID, startItem.Amount, &item);
+        if (item != nullptr && startItem.EquipPosition != 0) // One sent by mail isn't worn
+            identity.ItemGUIDsByEquipPosition[startItem.EquipPosition] = item->GetGUID().GetCounter();
+    }
+    identity.IsEquipmentChanged = true;
+    identity.IsNewIdentityPending = false;
 }
 
 void ROWOWMod::GiveStartItemOrMail(Player* player, uint32 itemTemplateID, uint32 amount, Item** itemOut)
@@ -1541,8 +1571,9 @@ void ROWOWMod::UpdateCarriedSet(Player* player, ROWOWIdentity& identity)
     // bags and items.  The changed rows (the bags', the items', the put away set's and carried_set) are written only by a save of the inventory, in its
     // transaction (SaveIdentityStowedItems), so whenever the server stops the database has each item in exactly one place.  Runs where the form
     // changes: the world thread (a login, a map change, a command), with the maps idle
-    uint8 carriedSet = identity.IsInForm == true ? ROWOW_CARRIED_SET_RO : ROWOW_CARRIED_SET_WOW;
-    if (identity.CarriedSet == carriedSet || (identity.CarriedSet == ROWOW_CARRIED_SET_NONE && identity.IsInForm == false))
+    // The form's set is also on the character while the Ragnarok page shows it (IsViewingROSet)
+    uint8 carriedSet = (identity.IsInForm == true || identity.IsViewingROSet == true) ? ROWOW_CARRIED_SET_RO : ROWOW_CARRIED_SET_WOW;
+    if (identity.CarriedSet == carriedSet || (identity.CarriedSet == ROWOW_CARRIED_SET_NONE && carriedSet == ROWOW_CARRIED_SET_WOW))
         return;
 
     // Nothing in the bags may be in use as they change (the form change already stopped casts): a trade offering them, the loot of one being opened
@@ -1591,6 +1622,175 @@ void ROWOWMod::UpdateCarriedSet(Player* player, ROWOWIdentity& identity)
     MailCarriedItems(player, unplacedItems);
     identity.CarriedSet = carriedSet;
     identity.AreStowedItemsChanged = true;
+}
+
+bool ROWOWMod::IsROSetCarried(Player* player) const
+{
+    ROWOWIdentity const* identity = player->CustomData.Get<ROWOWIdentity>("ROWOWIdentity");
+    return identity != nullptr && (identity->IsInForm == true || identity->IsViewingROSet == true) && identity->CarriedSet == ROWOW_CARRIED_SET_RO;
+}
+
+bool ROWOWMod::IsStartBagMoveRefused(Player* player, uint8 sourceBag, uint8 sourceSlot, uint8 destinationBag, uint8 destinationSlot) const
+{
+    // The form's Adventurer's Bags can't be taken off, in the RO world or on the Ragnarok page (Nathan 2026-11-04): one only changes places with another
+    // bag slot.  A move puts each of its two places' items in the other, so a bag slot holding one may only meet another bag slot (a destroy, or a move to
+    // anywhere in the bags, has no bag slot on its other side)
+    if (StartBagItemTemplateID == 0 || IsROSetCarried(player) == false)
+        return false;
+    auto isStartBagAt = [player, this](uint8 bag, uint8 slot)
+    {
+        Item* item = IsCarriedBagSlot(bag, slot) == true ? player->GetItemByPos(bag, slot) : nullptr;
+        return item != nullptr && item->GetEntry() == StartBagItemTemplateID;
+    };
+    if (isStartBagAt(sourceBag, sourceSlot) == true && IsCarriedBagSlot(destinationBag, destinationSlot) == false)
+        return true;
+    return isStartBagAt(destinationBag, destinationSlot) == true && IsCarriedBagSlot(sourceBag, sourceSlot) == false;
+}
+
+void ROWOWMod::StartViewingROSet(Player* player)
+{
+    // The Ragnarok page is shown (.ro view 1): the form's carried set on the character, so the page's equipment slots and the bags are the identity's.
+    // Not in combat or dead (the character's own bags are what it fights with), nor while an item is in use (a trade, a loot window)
+    ROWOWIdentity* identity = GetIdentity(player);
+    if (IsEnabled == false || identity->IsInForm == true)
+        return;
+    if (identity->Exists == false)
+    {
+        SendRagnarokPageToClient(player);
+        return;
+    }
+    char const* blockedText = nullptr;
+    if (player->IsInCombat() == true)
+        blockedText = "You can't open your Ragnarok Online character's bags in combat.";
+    else if (player->IsAlive() == false)
+        blockedText = "You can't open your Ragnarok Online character's bags while dead.";
+    else if (player->IsBeingTeleported() == true || player->GetTradeData() != nullptr || player->GetLootGUID() || player->IsNonMeleeSpellCast(false) == true)
+        blockedText = "You can't open your Ragnarok Online character's bags right now.";
+    if (blockedText != nullptr)
+    {
+        SendRagnarokPageToClient(player, blockedText);
+        return;
+    }
+    if (identity->IsViewingROSet == false)
+    {
+        identity->IsViewingROSet = true;
+        UpdateCarriedSet(player, *identity);
+    }
+    UpdatePageAreaName(*identity);
+    SendRagnarokPageToClient(player);
+    SendEquipmentToClient(player, *identity, true);
+    SendItemCardsToClient(player, *identity, true);
+    SendHairToClient(player);
+}
+
+void ROWOWMod::StopViewingROSet(Player* player)
+{
+    // The page is closed (.ro view 0), or the character does something its own set is for (CanPacketReceive's list, combat, a teleport, death, logging
+    // out): its own carried set back on it, the form's put away
+    ROWOWIdentity* identity = player->CustomData.Get<ROWOWIdentity>("ROWOWIdentity");
+    if (identity == nullptr || identity->IsViewingROSet == false)
+        return;
+    identity->IsViewingROSet = false;
+    UpdateCarriedSet(player, *identity);
+    SendRagnarokPageToClient(player);
+}
+
+void ROWOWMod::SendRagnarokPageToClient(Player* player, char const* blockedText)
+{
+    // ROWOWPAGE: "N" with no identity yet, "B<tab><why>" when the bags can't be opened now, else "V" (its carried set is on the character) or "C" (put
+    // away), then "<tab><illusion job key><tab><job name><tab><base level><tab><job level><tab><zeny><tab><base exp><tab><HP><tab><SP><tab><STR>,<AGI>,
+    // <VIT>,<INT>,<DEX>,<LUK><tab><area>" (the HP and SP as saved: past any maximum for a new identity, which is full)
+    ROWOWIdentity* identity = GetIdentity(player);
+    std::string addonMessage;
+    if (identity->Exists == false)
+        addonMessage = "ROWOWPAGE\tN";
+    else if (blockedText != nullptr)
+        addonMessage = fmt::format("ROWOWPAGE\tB\t{}", blockedText);
+    else
+    {
+        ROWOWJob const* job = GetJob(identity->JobID);
+        addonMessage = fmt::format("ROWOWPAGE\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{},{},{},{},{},{}\t{}", identity->IsViewingROSet == true ? "V" : "C",
+            job != nullptr ? job->IllusionJobKey : "", job != nullptr ? job->Name : "?", identity->BaseLevel, identity->JobLevel, identity->Zeny, identity->BaseExp,
+            identity->HP, identity->SP, identity->Stats[0], identity->Stats[1], identity->Stats[2], identity->Stats[3], identity->Stats[4], identity->Stats[5],
+            identity->PageAreaName);
+    }
+    WorldPacket data;
+    ChatHandler::BuildChatPacket(data, CHAT_MSG_SYSTEM, LANG_ADDON, nullptr, nullptr, addonMessage);
+    player->SendDirectMessage(&data);
+}
+
+void ROWOWMod::UpdatePageAreaName(ROWOWIdentity& identity) const
+{
+    // Where the world travel spell takes the identity (where it left the RO world, else its save point: a new one's is the start point), as the area's name.
+    // The base map's area lookup may create the map and load its terrain, so only from the world thread (the page's commands), with the maps idle
+    ROWOWPosition const& position = identity.LastPosition.IsSet == true ? identity.LastPosition : identity.SavePoint;
+    identity.PageAreaName.clear();
+    if (position.IsSet == false)
+        return;
+    uint32 areaID = sMapMgr->GetAreaId(PHASEMASK_NORMAL, position.MapID, position.X, position.Y, position.Z);
+    if (AreaTableEntry const* area = sAreaTableStore.LookupEntry(areaID))
+        identity.PageAreaName = area->area_name[sWorld->GetDefaultDbcLocale()];
+}
+
+bool ROWOWMod::CreateIdentity(Player* player, uint32 hairStyle, uint32 hairColor)
+{
+    // The Ragnarok page's character creation (.ro create): a new Novice with the hair picked, given its general bags and start items in its carried set
+    // (which the page then shows), and saved with them.  It goes into the RO world by the page's Enter button, to the training ground
+    ROWOWIdentity* identity = GetIdentity(player);
+    if (IsEnabled == false || identity->Exists == true || identity->IsInForm == true || IsROMap(player->GetMapId()) == true)
+        return false;
+    if (HeadSpellIDsByKey.find(GetHeadKey(hairStyle, hairColor, player->getGender() == GENDER_MALE)) == HeadSpellIDsByKey.end())
+        return false;
+    if (player->IsInCombat() == true || player->IsAlive() == false || player->IsBeingTeleported() == true)
+        return false;
+    InitNewIdentity(*identity);
+    identity->IsNewIdentityPending = true;
+    identity->HairStyle = uint8(hairStyle);
+    identity->HairColor = uint8(hairColor);
+    identity->IsViewingROSet = true;
+    UpdateCarriedSet(player, *identity);
+    GiveNewIdentityStartItems(player, *identity);
+    player->SaveToDB(false, false);
+    UpdatePageAreaName(*identity);
+    LOG_INFO("module.ROWOW", "{} made a Ragnarok Online character on the Ragnarok page (hair {} {})", player->GetName(), hairStyle, hairColor);
+    SendRagnarokPageToClient(player);
+    SendEquipmentToClient(player, *identity, true);
+    SendItemCardsToClient(player, *identity, true);
+    SendHairToClient(player);
+    return true;
+}
+
+void ROWOWMod::StartWorldTravel(Player* player)
+{
+    // The Ragnarok page's Enter button (.ro enter): the world travel spell's cast, as the spell book's was.  The character's own bags are back on it first
+    ROWOWIdentity* identity = GetIdentity(player);
+    if (IsEnabled == false || IsROMap(player->GetMapId()) == true)
+        return;
+    if (identity->Exists == false)
+    {
+        ChatHandler(player->GetSession()).SendSysMessage("Make your Ragnarok Online character first.");
+        return;
+    }
+    StopViewingROSet(player);
+    identity->WorldTravelRequestTick = GetTick();
+    player->CastSpell(player, ROWOW_SPELL_WORLD_TRAVEL, false);
+}
+
+bool ROWOWMod::IsWorldTravelRequested(Player* player) const
+{
+    ROWOWIdentity const* identity = player->CustomData.Get<ROWOWIdentity>("ROWOWIdentity");
+    return identity != nullptr && identity->WorldTravelRequestTick != 0 && GetTick() - identity->WorldTravelRequestTick < ROWOW_WORLD_TRAVEL_REQUEST_TIME_IN_MS;
+}
+
+void ROWOWMod::SendWorldTravelSpellsToClient(Player* player) const
+{
+    // The RO world's spell book has World Return and Order, and the book out of it neither (the way in is the Ragnarok page).  The travel spell itself is
+    // never shown.  After the spells the client was sent on arriving (it was sent all it knows), so quietly
+    bool isInForm = IsInROForm(player);
+    SendQuietSpellChange(player, ROWOW_SPELL_WORLD_TRAVEL, false);
+    for (uint32 spellID : { uint32(ROWOW_SPELL_WORLD_RETURN), uint32(ROWOW_SPELL_FOLLOWER_ORDER) })
+        if (player->HasSpell(spellID) == true)
+            SendQuietSpellChange(player, spellID, isInForm);
 }
 
 void ROWOWMod::LoadIdentityStowedItems(Player* player, ROWOWIdentity& identity) const
