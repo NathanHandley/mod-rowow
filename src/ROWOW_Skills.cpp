@@ -1168,7 +1168,8 @@ void ROWOWMod::SendSkillsToClient(Player* player, ROWOWIdentity& identity, bool 
     // before the first job's skills open>:<used before the second job's>" (its tabs, and skillup_limit's points, 0 for none), then the skills of
     // the job's tree and any others learned, "S\t<skill>:<level>:<max level>:<1 when it can be learned or raised now>:<1 Plagiarism's copy, 2 equipment's off the
     // tree, 3 equipment's on it, or nothing>:<1 when skill points can raise it at all (no quest, wedding or spirit skill)>:<the skills and levels it needs first,
-    // <skill>-<level>/...>,...", then "E".  The window plans skill points on the needed skills before a skill as RO's does
+    // <skill>-<level>/...>[:<the level learned, for equipment's>],...", then "E".  The window plans skill points on the needed skills before a skill as RO's
+    // does; the spellbook puts an equipment skill's levels past those learned under its Card Effects tab
     std::vector<std::string> messages;
     std::string jobIDsText;
     for (uint16 jobID : GetSkillTreeJobIDs(identity.JobID))
@@ -1215,8 +1216,8 @@ void ROWOWMod::SendSkillsToClient(Player* player, ROWOWIdentity& identity, bool 
         if (skillID == identity.CloneSkillID)
             skillText = fmt::format("{}:{}:{}:1:1:0:", skillID, identity.CloneSkillLevel, identity.CloneSkillLevel);
         else if (auto itemIter = identity.ItemSkillLevelsByID.find(skillID); itemIter != identity.ItemSkillLevelsByID.end())
-            skillText = fmt::format("{}:{}:{}:1:{}:0:", skillID, itemIter->second, std::max<uint16>(itemIter->second, SkillTreeGetMax(skillID, identity.JobID)),
-                treeEntry != nullptr ? 3 : 2); // Equipment's: 3 for a skill of the job's tree, which shows there unraised
+            skillText = fmt::format("{}:{}:{}:1:{}:0::{}", skillID, itemIter->second, std::max<uint16>(itemIter->second, SkillTreeGetMax(skillID, identity.JobID)),
+                treeEntry != nullptr ? 3 : 2, levelIter != identity.SkillLevelsByID.end() ? levelIter->second : 0); // Equipment's: 3 for a skill of the job's tree, which shows there unraised
         if (skillsText.empty() == false && skillsText.size() + 1 + skillText.size() > SkillMessageChunkLength)
         {
             messages.push_back("ROWOWSKILLS\tS\t" + skillsText);
