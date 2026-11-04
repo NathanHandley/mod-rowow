@@ -423,7 +423,7 @@ void ROWOWMod::LoadIdentityData()
     if (tableNames.find("mod_rowow_map_name") != tableNames.end())
     {
         // A map's own name (not one of rAthena's aliases for it) is the one the warp lists show.  A map stitched into a bigger one (RoMapMerges)
-        // is an alias of it, with its cells' offset there, its own size and the map it was (columns an older conversion doesn't have read 0)
+        // is a name of the bigger map, with its cells' offset there, its own size and the map it was (columns an older conversion doesn't have read 0)
         auto getColumn = [](char const* columnName)
         {
             bool hasColumn = WorldDatabase.Query("SELECT 1 FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'mod_rowow_map_name' AND column_name = '{}'",
@@ -432,6 +432,9 @@ void ROWOWMod::LoadIdentityData()
         };
         std::string partColumns = getColumn("CellOffsetX") + ", " + getColumn("CellOffsetY") + ", " + getColumn("CellWidth") + ", " + getColumn("CellHeight") + ", " +
             getColumn("FormerMapID");
+        // A part's own name is its row that isn't an alias and has a size (prt_fild08); rAthena's other names for it (prt_fild08a) are aliases with its
+        // offsets, and the stitched map's own row (no size) names the stitched map.  An older conversion made every name of a part an alias
+        std::unordered_set<std::string> partOwnNames;
         if (QueryResult result = WorldDatabase.Query("SELECT `MapName`, `MapID`, {}, {} FROM `mod_rowow_map_name`", getColumn("IsAlias"), partColumns))
         {
             do
@@ -439,9 +442,7 @@ void ROWOWMod::LoadIdentityData()
                 Field* fields = result->Fetch();
                 std::string mapName = ToLower(fields[0].Get<std::string>());
                 uint32 mapID = fields[1].Get<uint32>();
-                MapIDsByMapName[mapName] = mapID;
-                if (fields[2].Get<uint32>() == 0)
-                    MapNamesByMapID[mapID] = mapName;
+                bool isAlias = fields[2].Get<uint32>() != 0;
                 ROWOWMapPart part;
                 part.MapID = mapID;
                 part.CellOffsetX = fields[3].Get<int32>();
@@ -450,19 +451,44 @@ void ROWOWMod::LoadIdentityData()
                 part.CellHeight = fields[6].Get<int32>();
                 part.FormerMapID = fields[7].Get<uint32>();
                 part.Name = mapName;
+                MapIDsByMapName[mapName] = mapID;
+                if (isAlias == false && part.HasArea() == false)
+                    MapNamesByMapID[mapID] = mapName; // A part's own name is the part's (GetMapNameAt), not the stitched map's
                 if (part.CellOffsetX != 0 || part.CellOffsetY != 0 || part.HasArea() == true || part.FormerMapID != 0)
+                {
                     MapPartsByMapName[mapName] = part;
+                    if (isAlias == false && part.HasArea() == true)
+                        partOwnNames.insert(mapName);
+                }
             } while (result->NextRow());
         }
 
-        // Each stitched map's parts, the names of one part (rAthena's aliases, prt_fild08a) being one part by its offset, named by the shortest
+        // Each stitched map's parts, the names of one part (its own and rAthena's aliases, prt_fild08a) being one part by its offset: the part is its
+        // own name's row, or with none (an older conversion) the shortest name's, its size and former map from any of its rows
         std::map<std::pair<uint32, std::pair<int32, int32>>, ROWOWMapPart> partsByOffset;
         for (auto const& partByName : MapPartsByMapName)
         {
             ROWOWMapPart const& part = partByName.second;
-            auto partIter = partsByOffset.emplace(std::make_pair(part.MapID, std::make_pair(part.CellOffsetX, part.CellOffsetY)), part).first;
-            if (part.Name.size() < partIter->second.Name.size() || (part.Name.size() == partIter->second.Name.size() && part.Name < partIter->second.Name))
-                partIter->second.Name = part.Name;
+            auto partEmplace = partsByOffset.emplace(std::make_pair(part.MapID, std::make_pair(part.CellOffsetX, part.CellOffsetY)), part);
+            if (partEmplace.second == true)
+                continue;
+            ROWOWMapPart& groupPart = partEmplace.first->second;
+            bool isOwnName = partOwnNames.count(part.Name) != 0;
+            bool isGroupOwnName = partOwnNames.count(groupPart.Name) != 0;
+            bool isShorter = part.Name.size() < groupPart.Name.size() || (part.Name.size() == groupPart.Name.size() && part.Name < groupPart.Name);
+            ROWOWMapPart otherPart = part;
+            if (isOwnName != isGroupOwnName ? isOwnName == true : isShorter == true)
+            {
+                otherPart = groupPart;
+                groupPart = part;
+            }
+            if (groupPart.HasArea() == false)
+            {
+                groupPart.CellWidth = otherPart.CellWidth;
+                groupPart.CellHeight = otherPart.CellHeight;
+            }
+            if (groupPart.FormerMapID == 0)
+                groupPart.FormerMapID = otherPart.FormerMapID;
         }
         for (auto& partByOffset : partsByOffset)
             MapPartsByMapID[partByOffset.first.first].push_back(partByOffset.second);
@@ -473,7 +499,28 @@ void ROWOWMod::LoadIdentityData()
         for (auto& partByName : MapPartsByMapName)
             if (auto partIter = partsByOffset.find(std::make_pair(partByName.second.MapID, std::make_pair(partByName.second.CellOffsetX, partByName.second.CellOffsetY)));
                 partIter != partsByOffset.end())
-                partByName.second.Name = partIter->second.Name;
+                partByName.second = partIter->second; // Every name of a part is the part: its name, size and map key
+
+        // GetMapPartAt takes the first part a cell is in, so parts that overlap give the cells they share to one of them
+        for (auto const& partsByMapID : MapPartsByMapID)
+        {
+            std::vector<ROWOWMapPart> const& parts = partsByMapID.second;
+            for (size_t partIndex = 0; partIndex < parts.size(); partIndex++)
+            {
+                ROWOWMapPart const& part = parts[partIndex];
+                for (size_t otherIndex = partIndex + 1; otherIndex < parts.size(); otherIndex++)
+                {
+                    ROWOWMapPart const& other = parts[otherIndex];
+                    if (part.HasArea() == false || other.HasArea() == false || part.CellOffsetX >= other.CellOffsetX + other.CellWidth ||
+                        other.CellOffsetX >= part.CellOffsetX + part.CellWidth || part.CellOffsetY >= other.CellOffsetY + other.CellHeight ||
+                        other.CellOffsetY >= part.CellOffsetY + part.CellHeight)
+                        continue;
+                    LOG_ERROR("module.ROWOW", "ROWOWMod::LoadIdentityData: the parts {} (cells {},{} size {}x{}) and {} (cells {},{} size {}x{}) of stitched map {} overlap, "
+                        "and the cells they share are {}'s", part.Name, part.CellOffsetX, part.CellOffsetY, part.CellWidth, part.CellHeight, other.Name, other.CellOffsetX,
+                        other.CellOffsetY, other.CellWidth, other.CellHeight, partsByMapID.first, part.Name);
+                }
+            }
+        }
         if (MapPartsByMapName.empty() == false)
             LOG_INFO("module.ROWOW", "ROWOWMod::LoadIdentityData: {} RO map names are {} parts of {} stitched maps", MapPartsByMapName.size(), partsByOffset.size(),
                 MapPartsByMapID.size());
@@ -682,8 +729,15 @@ void ROWOWMod::MoveSavedSpotsOffStitchedMaps()
         int32 cellY = std::clamp(int32(std::floor((x - originX) / mapGrid->CellSize)), 0, part->CellHeight - 1) + part->CellOffsetY;
         return GetCellPosition(part->MapID, cellX, cellY, positionOut);
     };
+    // Each table's map column read as its own type: the core's are smallint unsigned (character_entry_point's int unsigned), the identity's signed
+    // (-1 for none).  The zones the core keeps with them (characters.zone, character_homebind.zoneId) stay: the module doesn't know the stitched
+    // map's areas, and the core works the character's zone out again once it's on the map
+    auto getSmallMapID = [](Field const& field) { return uint32(field.Get<uint16>()); };
+    auto getMapID = [](Field const& field) { return field.Get<uint32>(); };
+    auto getSignedMapID = [](Field const& field) { return uint32(std::max<int32>(0, field.Get<int32>())); };
     uint32 movedCount = 0;
-    auto moveSpots = [&](char const* tableName, char const* keyColumn, char const* mapColumn, char const* xColumn, char const* yColumn, char const* zColumn)
+    auto moveSpots = [&](char const* tableName, char const* keyColumn, char const* mapColumn, char const* xColumn, char const* yColumn, char const* zColumn,
+        uint32 (*readMapID)(Field const&))
     {
         QueryResult result = CharacterDatabase.Query("SELECT `{}`, `{}`, `{}`, `{}` FROM `{}` WHERE `{}` IN ({})", keyColumn, mapColumn, xColumn, yColumn, tableName,
             mapColumn, formerMapIDsText);
@@ -692,20 +746,22 @@ void ROWOWMod::MoveSavedSpotsOffStitchedMaps()
         do
         {
             Field* fields = result->Fetch();
+            uint32 formerMapID = readMapID(fields[1]);
             ROWOWPosition position;
-            if (getStitchedPosition(fields[1].Get<uint32>(), fields[2].Get<float>(), fields[3].Get<float>(), position) == false)
+            if (partsByFormerMapID.count(formerMapID) == 0 || getStitchedPosition(formerMapID, fields[2].Get<float>(), fields[3].Get<float>(), position) == false)
                 continue;
             CharacterDatabase.DirectExecute("UPDATE `{}` SET `{}` = {}, `{}` = {}, `{}` = {}, `{}` = {} WHERE `{}` = {} AND `{}` = {}", tableName, mapColumn, position.MapID,
-                xColumn, position.X, yColumn, position.Y, zColumn, position.Z, keyColumn, fields[0].Get<uint32>(), mapColumn, fields[1].Get<uint32>());
+                xColumn, position.X, yColumn, position.Y, zColumn, position.Z, keyColumn, fields[0].Get<uint32>(), mapColumn, formerMapID);
             movedCount++;
         } while (result->NextRow());
     };
-    moveSpots("characters", "guid", "map", "position_x", "position_y", "position_z");
-    moveSpots("character_homebind", "guid", "mapId", "posX", "posY", "posZ");
-    moveSpots("corpse", "guid", "mapId", "posX", "posY", "posZ");
-    moveSpots("mod_rowow_identity", "guid", "save_map", "save_x", "save_y", "save_z");
-    moveSpots("mod_rowow_identity", "guid", "last_map", "last_x", "last_y", "last_z");
-    moveSpots("mod_rowow_identity", "guid", "return_map", "return_x", "return_y", "return_z");
+    moveSpots("characters", "guid", "map", "position_x", "position_y", "position_z", getSmallMapID);
+    moveSpots("character_homebind", "guid", "mapId", "posX", "posY", "posZ", getSmallMapID);
+    moveSpots("corpse", "guid", "mapId", "posX", "posY", "posZ", getSmallMapID);
+    moveSpots("character_entry_point", "guid", "joinMapId", "joinX", "joinY", "joinZ", getMapID); // Where leaving a battleground or dungeon finder group goes
+    moveSpots("mod_rowow_identity", "guid", "save_map", "save_x", "save_y", "save_z", getSignedMapID);
+    moveSpots("mod_rowow_identity", "guid", "last_map", "last_x", "last_y", "last_z", getSignedMapID);
+    moveSpots("mod_rowow_identity", "guid", "return_map", "return_x", "return_y", "return_z", getSignedMapID);
 
     // Memo points are cells of their map
     if (QueryResult result = CharacterDatabase.Query("SELECT `guid`, `slot`, `map`, `x`, `y` FROM `mod_rowow_identity_memo` WHERE `map` IN ({})", formerMapIDsText))
@@ -713,9 +769,12 @@ void ROWOWMod::MoveSavedSpotsOffStitchedMaps()
         do
         {
             Field* fields = result->Fetch();
-            ROWOWMapPart const* part = partsByFormerMapID.at(fields[2].Get<uint32>());
+            auto partIter = partsByFormerMapID.find(fields[2].Get<uint32>());
+            if (partIter == partsByFormerMapID.end())
+                continue;
+            ROWOWMapPart const* part = partIter->second;
             CharacterDatabase.DirectExecute("UPDATE `mod_rowow_identity_memo` SET `map` = {}, `x` = {}, `y` = {} WHERE `guid` = {} AND `slot` = {}", part->MapID,
-                fields[3].Get<int32>() + part->CellOffsetX, fields[4].Get<int32>() + part->CellOffsetY, fields[0].Get<uint32>(), fields[1].Get<uint32>());
+                fields[3].Get<int32>() + part->CellOffsetX, fields[4].Get<int32>() + part->CellOffsetY, fields[0].Get<uint32>(), uint32(fields[1].Get<uint8>()));
             movedCount++;
         } while (result->NextRow());
     }
@@ -861,6 +920,30 @@ void ROWOWMod::CheckArrivalFloor(Player* player)
     floorZ = std::max(floorZ, map->GetWaterLevel(player->GetPositionX(), player->GetPositionY()));
     if (player->GetPositionZ() - floorZ > ROWOW_ARRIVAL_FLOOR_TOLERANCE)
         player->NearTeleportTo(player->GetPositionX(), player->GetPositionY(), floorZ + 0.5f, player->GetOrientation());
+}
+
+void ROWOWMod::UpdateMapKey(Player* player)
+{
+    // A stitched map's parts are RO maps of their own, so walking over a seam, or a warp from one part into another (or off every part), is RO's
+    // map change (pc_setpos to another map) on one WoW map, which the core never sees as one: what a map change ends ends here as the core's map
+    // change ends it (OnPlayerMapChanged's statuses, chat room and storage, OnPlayerBeforeTeleport's ground and timer skills; a warp's floor check
+    // is OnPlayerBeforeTeleport's).  A change of WoW map is the core's own, and OnPlayerMapChanged keeps the key then.  The player's own map thread,
+    // in the form, once it's landed
+    ROWOWIdentity* identity = GetIdentity(player);
+    if (player->IsBeingTeleported() == true || player->IsInWorld() == false)
+        return;
+    uint32 mapKey = GetUnitMapKey(player);
+    if (mapKey == identity->MapKey)
+        return;
+    uint32 lastMapKey = identity->MapKey;
+    identity->MapKey = mapKey;
+    if (lastMapKey == 0 || GetMapIDOfMapKey(lastMapKey) != player->GetMapId())
+        return; // The first update, or another WoW map
+    StatusChangeClearOnChangeMap(player);
+    SkillClearUnitGroup(player);
+    SkillClearTimerSkill(player);
+    ChatLeaveChat(player, false);
+    StorageClose(player);
 }
 
 void ROWOWMod::UpdateLoginDeath(Player* player, uint32 diff)

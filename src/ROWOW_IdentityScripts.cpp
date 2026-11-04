@@ -100,6 +100,7 @@ public:
         ROWOW->CompleteROFormChange(player);
         if (ROWOW->IsInROForm(player) == true)
             ROWOW->GetIdentity(player)->IsArrivalFloorCheckPending = true;
+        ROWOW->GetIdentity(player)->MapKey = ROWOW->GetUnitMapKey(player); // This map change's done: UpdateMapKey only takes those the core doesn't see
     }
 
     void OnPlayerBeforeSendChatMessage(Player* player, uint32& /*type*/, uint32& /*lang*/, std::string& msg) override
@@ -125,6 +126,7 @@ public:
         if (player->GetPet() != nullptr || player->GetTemporaryUnsummonedPetNumber() != 0)
             ROWOW->StowCharacterPet(player, *ROWOW->GetIdentity(player));
         ROWOW->CheckNoSaveArrival(player);
+        ROWOW->UpdateMapKey(player);
         ROWOW->CheckArrivalFloor(player);
         ROWOW->UpdateLoginDeath(player, p_time);
         ROWOW->UpdateSkillUnitMove(player);
@@ -274,6 +276,15 @@ public:
                 ROWOWIdentity* identity = ROWOW->GetIdentity(player);
                 identity->InvinciblePositionX = x;
                 identity->InvinciblePositionY = y;
+
+                // Into another part of a stitched map: an arrival on another RO map, whose floor is checked once it lands (UpdateMapKey ends the
+                // rest of what the map change ends)
+                ROWOWPosition destination;
+                destination.MapID = mapid;
+                destination.X = x;
+                destination.Y = y;
+                if (ROWOW->GetPositionMapKey(destination) != ROWOW->GetUnitMapKey(player))
+                    identity->IsArrivalFloorCheckPending = true;
             }
         }
         bool isOnROMap = ROWOW->IsROMap(player->GetMapId());
@@ -1544,7 +1555,7 @@ public:
             else
                 name += (name.empty() == true ? "" : " ") + word;
         }
-        ROWOWNpc const* npc = name.empty() == true ? ROWOW->GetCreatureNpc(handler->getSelectedCreature()) : ROWOW->GetNpcByName(name, player->GetMapId());
+        ROWOWNpc const* npc = name.empty() == true ? ROWOW->GetCreatureNpc(handler->getSelectedCreature()) : ROWOW->GetNpcByName(name, ROWOW->GetUnitMapKey(player));
         if (npc == nullptr || npc->Script == nullptr)
         {
             handler->SendSysMessage("No such script NPC (give its name, or select its creature).");

@@ -1244,29 +1244,35 @@ void ROWOWMod::UpdateMobCorpse(Creature* md)
     md->RemoveCorpse(false);
 }
 
-bool ROWOWMod::MapSearchFreeCellOfSpawn(ROWOWMapGrid const& mapGrid, Map* map, int32 baseX, int32 baseY, int32 rx, int32 ry, int32 tries, int32& xOut, int32& yOut) const
+bool ROWOWMod::MapSearchFreeCellOfSpawn(ROWOWMapGrid const& mapGrid, Map* map, int32 baseX, int32 baseY, int32 rx, int32 ry, int32 tries, int32& xOut, int32& yOut,
+    ROWOWMapPart const* part) const
 {
     // map_search_freecell with no unit (flag 1): a random reachable cell within rx,ry of the base (below 0 the whole map, less map_edge_size), never
-    // the base itself nor within 5 cells of the map's edge
+    // the base itself nor within 5 cells of the map's edge.  A part of a stitched map is the map here: its own cells and edges
     if (rx == 0 && ry == 0)
     {
         xOut = baseX;
         yOut = baseY;
         return MapGetCellNoPass(map, mapGrid, baseX, baseY) == false; // No range? Return the target cell then....
     }
+    bool hasPart = part != nullptr && part->HasArea() == true;
+    int32 mapX = hasPart == true ? part->CellOffsetX : 0;
+    int32 mapY = hasPart == true ? part->CellOffsetY : 0;
+    int32 mapWidth = hasPart == true ? part->CellWidth : mapGrid.Width;
+    int32 mapHeight = hasPart == true ? part->CellHeight : mapGrid.Height;
     int32 edge = BattleConfig.MapEdgeSize;
     int32 edgeValid = std::min(edge, 5);
-    int32 edgeX = std::min(edge, (mapGrid.Width - 1) / 2); // A map too small for the edge has none
-    int32 edgeY = std::min(edge, (mapGrid.Height - 1) / 2);
+    int32 edgeX = std::min(edge, (mapWidth - 1) / 2); // A map too small for the edge has none
+    int32 edgeY = std::min(edge, (mapHeight - 1) / 2);
     while (tries-- > 0)
     {
-        int32 x = rx >= 0 ? irand(baseX - rx, baseX + rx) : irand(edgeX, mapGrid.Width - edgeX - 1);
-        int32 y = ry >= 0 ? irand(baseY - ry, baseY + ry) : irand(edgeY, mapGrid.Height - edgeY - 1);
+        int32 x = rx >= 0 ? irand(baseX - rx, baseX + rx) : mapX + irand(edgeX, mapWidth - edgeX - 1);
+        int32 y = ry >= 0 ? irand(baseY - ry, baseY + ry) : mapY + irand(edgeY, mapHeight - edgeY - 1);
         if (x == baseX && y == baseY)
             continue; // Avoid picking the same target tile.
 
         // Cells outside the map or within 4-5 cells of the map edge are considered invalid officially
-        if (x < edgeValid || x > mapGrid.Width - edgeValid || y < edgeValid || y > mapGrid.Height - edgeValid)
+        if (x - mapX < edgeValid || x - mapX > mapWidth - edgeValid || y - mapY < edgeValid || y - mapY > mapHeight - edgeValid)
             continue;
         if (MapGetCellNoPass(map, mapGrid, x, y) == false)
         {
@@ -1298,21 +1304,13 @@ bool ROWOWMod::MobSpawn(Creature* md)
     int32 xs = x < 0 ? 0 : line.XS; // The line of a monster with no center is anywhere on the map (-1, span 0)
     int32 ys = y < 0 ? 0 : line.YS;
 
-    // ...or, for a map stitched into a bigger one, anywhere on its part: the part's middle, spanning the part
-    int32 anywhereRX = -1;
-    int32 anywhereRY = -1;
-    if (line.AreaWidth > 0)
-    {
-        anywhereRX = line.AreaWidth / 2;
-        anywhereRY = line.AreaHeight / 2;
-        if (x < 0)
-        {
-            x = line.AreaX + anywhereRX;
-            y = line.AreaY + anywhereRY;
-            xs = anywhereRX + 1; // The search goes xs - 1 to each side
-            ys = anywhereRY + 1;
-        }
-    }
+    // A line of a map stitched into a bigger one has its part for its map: "anywhere on the map" is on the part, and the map's edges are the part's
+    ROWOWMapPart linePart;
+    linePart.CellOffsetX = line.AreaX;
+    linePart.CellOffsetY = line.AreaY;
+    linePart.CellWidth = line.AreaWidth;
+    linePart.CellHeight = line.AreaHeight;
+    ROWOWMapPart const* part = linePart.HasArea() == true ? &linePart : nullptr;
 
     // Search can be skipped for boss monster spawns if spawn location is fixed.  We can't skip normal monsters as they should pick a random location
     // if the cell is blocked (e.g. Icewall).  The center cell has a 1/(xs*ys) chance to be picked if free
@@ -1320,21 +1318,11 @@ bool ROWOWMod::MobSpawn(Creature* md)
     if ((line.IsBoss == false || (x == 0 && y == 0) || xs != 1 || ys != 1) && (xs + ys < 1 || urand(1, uint32(std::max(1, xs * ys))) != 1 || isCenterFree == false))
     {
         // Officially the area is split into 4 squares, 4 lines and 1 dot and for each of those there is one attempt.  We simplify this to trying
-        // 8 times in the whole area and then at the center cell even though that's not fully accurate
-        if (MapSearchFreeCellOfSpawn(*mapGrid, map, x, y, xs - 1, ys - 1, 8, x, y) == false)
+        // 8 times in the whole area and then at the center cell even though that's not fully accurate.  A failed search leaves x,y at the center
+        if (MapSearchFreeCellOfSpawn(*mapGrid, map, x, y, xs - 1, ys - 1, 8, x, y, part) == false)
         {
             // If area search failed and center cell not reachable, try to spawn the monster anywhere on the map (50 tries)
-            if (line.AreaWidth > 0)
-            {
-                x = line.AreaX + anywhereRX;
-                y = line.AreaY + anywhereRY;
-            }
-            else
-            {
-                x = spawn->CenterX;
-                y = spawn->CenterY;
-            }
-            if (isCenterFree == false && MapSearchFreeCellOfSpawn(*mapGrid, map, x, y, anywhereRX, anywhereRY, 50, x, y) == false)
+            if (isCenterFree == false && MapSearchFreeCellOfSpawn(*mapGrid, map, x, y, -1, -1, 50, x, y, part) == false)
             {
                 mob->SpawnTime = tick + uint64(BattleConfig.MobRespawnTime); // Retry again later
                 return false;

@@ -27,6 +27,8 @@
 #include <utility>
 #include <vector>
 
+struct ROWOWMapPart;
+
 // The RO NPC scripts (R7): rAthena's NPC script files (the converter's mod_rowow_npc_script, from WorldData\NpcScripts), read into NPCs
 // and functions once at startup.  An NPC that stands in the world is a creature row (the converter's town NPCs), tied to its NPC by
 // mod_rowow_creature_npc
@@ -102,8 +104,9 @@ struct ROWOWNpcEvent
 struct ROWOWPendingScriptMob
 {
     uint32 MapID = 0;
-    int32 X = 0;
+    int32 X = 0; // -1 for a random free cell (SpawnScriptMob)
     int32 Y = 0;
+    ROWOWMapPart const* Part = nullptr; // The part of a stitched map a random cell is of (startup data, read-only)
     uint32 MobID = 0;
     std::string Name; // The script's name for it ("--en--" and "--ja--" for mob_db's)
     std::string Event;

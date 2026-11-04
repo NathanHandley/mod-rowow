@@ -1609,8 +1609,11 @@ bool ROWOWMod::UnitWarpRandom(Unit* bl, Position& destOut)
 {
     // unit_warp(bl, -1, -1, -1, CLR_TELEPORT): to a random spot of its map (a stitched map's part it's in), unless the map forbids it.  A player's
     // teleport lands once its client answers, so where it goes is given back for those warped next to it
-    if (IsUnitWarpForbidden(bl) == true || MapSearchRandomSpot(bl->GetMap(), GetUnitMapKey(bl), destOut) == false)
+    uint32 mapKey = GetUnitMapKey(bl);
+    if (IsUnitWarpForbidden(bl) == true || MapSearchRandomSpot(bl->GetMap(), mapKey, destOut) == false)
         return false;
+    if (mapKey != bl->GetMapId() && bl->IsPlayer() == true && IsInROForm(bl->ToPlayer()) == true)
+        GetIdentity(bl->ToPlayer())->IsArrivalFloorCheckPending = true; // A part's spot is a cell's ground (GetCellPosition), as a warp's
     UnitRemoveMap(bl);
     bl->NearTeleportTo(destOut.GetPositionX(), destOut.GetPositionY(), destOut.GetPositionZ(), bl->GetOrientation());
     return true;

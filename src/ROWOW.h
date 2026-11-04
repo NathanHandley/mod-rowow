@@ -131,7 +131,7 @@ struct ROWOWMapPart
     int32 CellWidth = 0; // 0 when not known: then the whole big map stands for it
     int32 CellHeight = 0;
     uint32 FormerMapID = 0;
-    std::string Name; // Its own RO name (the shortest of its names: prt_fild08, not rAthena's prt_fild08a)
+    std::string Name; // Its own RO name (its row that isn't an alias: prt_fild08, not rAthena's prt_fild08a; an older conversion's shortest name)
 
     bool HasArea() const { return CellWidth > 0 && CellHeight > 0; }
     bool HasCell(int32 cellX, int32 cellY) const
@@ -1438,7 +1438,7 @@ struct ROWOWMobSpawnLine
     uint32 Delay2 = 0;
     bool IsBoss = false; // state.boss: a boss_monster line
     std::string Name; // The line's own name when it isn't mob_db's (npc_parse_mob: the job tests' "Orange Mushroom"), shown by MobSpawnReset
-    int32 AreaX = 0; // A line of a map stitched into a bigger one: its "anywhere on the map" is its part's cells (AreaWidth 0 for the whole map)
+    int32 AreaX = 0; // A line of a map stitched into a bigger one: its part is its map, "anywhere" and the edges (AreaWidth 0 for the whole map)
     int32 AreaY = 0;
     int32 AreaWidth = 0;
     int32 AreaHeight = 0;
@@ -2052,6 +2052,7 @@ struct ROWOWIdentity : public DataMap::Base
     bool IsNewIdentityPending = false; // The first entry, whose start items are given once in the world
     bool IsLeavingForReset = false; // .ro identity reset takes the form off, on an RO map too, where CompleteROFormChange would put it back on
     bool IsArrivalFloorCheckPending = false; // Arrived on an RO map: the next update checks it isn't left in the air (CheckArrivalFloor)
+    uint32 MapKey = 0; // The map key it was last on (GetMapKey), 0 for none yet: a change on the same WoW map is RO's map change (UpdateMapKey)
     uint32 LoginDeathTimer = 0; // Logged in after logging out dead: dies again where it lies when this runs out (UpdateLoginDeath)
 
     // While in the form: the character's own values, put back on leaving and saved in place of the form's
@@ -2266,6 +2267,7 @@ public:
     // The middle of an RO cell of an RO map, on the ground.  False when the map has no cell grid or no ground there
     bool GetCellPosition(uint32 mapID, int32 cellX, int32 cellY, ROWOWPosition& positionOut) const;
     void CheckArrivalFloor(Player* player); // After an arrival on an RO map: down on the floor if it's in the air above it
+    void UpdateMapKey(Player* player); // In the form, each update: into another part of a stitched map (or off one) is RO's map change, the core seeing none
     void UpdateLoginDeath(Player* player, uint32 diff); // An identity that logged out dead is dead again after its login (pc_authok's 0 HP)
     void CheckNoSaveArrival(Player* player); // After a login on a nosave map: to the save point
 
@@ -2418,7 +2420,7 @@ public:
     void SkillIdentify(Player* player, Item* item); // skill_identify
     void SendItemIdentifyList(Player* player); // clif_item_identify_list
     void TeleportToRandomSpot(Player* player); // A random spot on the map (AL_TELEPORT level 1), at one of its monsters' homes
-    bool MapSearchRandomSpot(Map* map, uint32 mapKey, Position& positionOut) const; // map_search_freecell over the whole map (the map key's part): a monster's home
+    bool MapSearchRandomSpot(Map* map, uint32 mapKey, Position& positionOut) const; // map_search_freecell over the whole map: a monster's home (a part's: a free cell of it)
     void TeleportToSavePoint(Player* player); // The identity's save point (AL_TELEPORT level 2 and up)
 
     // RO bonuses and cards (ROWOW_Bonus.cpp): the port of rAthena's pc_bonus..pc_bonus5 and the item part of status_calc_pc_sub, the
@@ -3010,7 +3012,9 @@ public:
     int64 MobSpawnTimeOf(Creature const* md, ROWOWMobSpawnLine const& line) const; // mob_setdelayspawn's time
     void MobSetDelaySpawn(Creature* md); // mob_setdelayspawn, at death
     void UpdateMobCorpse(Creature* md); // A dead monster's body going, from its update
-    bool MapSearchFreeCellOfSpawn(ROWOWMapGrid const& mapGrid, Map* map, int32 baseX, int32 baseY, int32 rx, int32 ry, int32 tries, int32& xOut, int32& yOut) const; // map_search_freecell, flag 1
+    // map_search_freecell, flag 1.  With a part of a stitched map, the part is the map: its cells only, its edges
+    bool MapSearchFreeCellOfSpawn(ROWOWMapGrid const& mapGrid, Map* map, int32 baseX, int32 baseY, int32 rx, int32 ry, int32 tries, int32& xOut, int32& yOut,
+        ROWOWMapPart const* part = nullptr) const;
     bool MobSpawn(Creature* md); // mob_spawn's placement: false holds the respawn
     bool MobCanRespawn(Creature* md); // CreatureAI::CanRespawn
     bool WriteMobDump(std::string const& filePath) const; // Each monster's modes and ranges and each spawn line, as the oracle's @oraclemobs writes them
@@ -3152,7 +3156,7 @@ public:
     void RegisterNpcScriptCommands(); // ROWOW_ScriptCommands.cpp
     void UpdateNpcScripts(uint32 diff); // The world update
     ROWOWNpc const* GetNpc(uint32 npcID) const;
-    ROWOWNpc const* GetNpcByName(std::string const& name, uint32 preferredMapID = 0) const; // By exname, or else by the shown name
+    ROWOWNpc const* GetNpcByName(std::string const& name, uint32 preferredMapKey = 0) const; // By exname, or else by the shown name (the map key's first)
     ROWOWNpc const* GetCreatureNpc(Creature const* creature) const; // The NPC a creature stands for, or null
     // Talking to the NPC (npc_click: its start, or a label), the dialog going to the RO NPC window (or the dialog given)
     bool StartNpcRun(Player* player, ROWOWNpc const* npc, std::string const& label = std::string(), ROWOWScriptDialog* dialog = nullptr);
@@ -3270,7 +3274,8 @@ public:
     std::vector<ROWOWNpcAnnouncement> PendingNpcAnnouncements; // Under NpcStateMutex
     std::unordered_map<ObjectGuid, ROWOWScriptMob> ScriptMobsByGUID; // Living script monsters, under NpcStateMutex
     std::vector<ROWOWScriptMobKill> PendingScriptMobKills; // Under NpcStateMutex
-    Creature* SpawnScriptMob(Map* map, uint32 mobID, int32 x, int32 y, std::string const& name, std::string const& event); // monster: on the map's thread (or with maps idle)
+    // monster: on the map's thread (or with maps idle).  A cell below 0 is a random free one of the map (with a part of a stitched map, of the part)
+    Creature* SpawnScriptMob(Map* map, uint32 mobID, int32 x, int32 y, std::string const& name, std::string const& event, ROWOWMapPart const* part = nullptr);
     bool OnScriptMobDeath(Creature* creature, Unit* killer); // The event its death runs, with the killer attached (false: it had none)
     std::vector<ROWOWPendingScriptMob> PendingScriptMobs; // Under NpcStateMutex: monsters for maps not loaded yet
     std::vector<ROWOWNpcMapWarp> PendingNpcMapWarps; // Under NpcStateMutex: mapwarp and areawarp, for the world update

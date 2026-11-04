@@ -1415,35 +1415,52 @@ void ROWOWMod::TeleportToRandomSpot(Player* player)
 {
     // RO's random teleport lands on a free cell anywhere on the map (on a stitched map, the part the player is in)
     Position position;
-    if (MapSearchRandomSpot(player->GetMap(), GetUnitMapKey(player), position) == true)
-        player->NearTeleportTo(position.GetPositionX(), position.GetPositionY(), position.GetPositionZ(), player->GetOrientation());
+    uint32 mapKey = GetUnitMapKey(player);
+    if (MapSearchRandomSpot(player->GetMap(), mapKey, position) == false)
+        return;
+    if (mapKey != player->GetMapId())
+        GetIdentity(player)->IsArrivalFloorCheckPending = true; // A part's spot is a cell's ground (GetCellPosition), as a warp's
+    player->NearTeleportTo(position.GetPositionX(), position.GetPositionY(), position.GetPositionZ(), player->GetOrientation());
 }
 
 bool ROWOWMod::MapSearchRandomSpot(Map* map, uint32 mapKey, Position& positionOut) const
 {
     // map_search_freecell over the whole map: one of the map's monsters' homes is a spot known to be walkable (a little above the ground, so
-    // arriving there never starts under it).  A part of a stitched map (a map key other than the map's) takes a home on the part: a few tries
+    // arriving there never starts under it).  On the unit's map's thread
     if (map == nullptr || map->Instanceable() == true)
         return false;
+
+    // A part of a stitched map (a map key other than the map's) is a map of its own, its monsters' homes a few among the whole map's: as
+    // map_search_freecell(-1, -1), a free cell of the part (xs * ys tries, 500 at most), on the server's cells' ground
+    if (mapKey != map->GetId())
+    {
+        auto partIter = MapPartsByMapKey.find(mapKey);
+        ROWOWMapGrid const* mapGrid = GetMapGrid(map->GetId());
+        if (partIter != MapPartsByMapKey.end() && partIter->second->MapID == map->GetId() && partIter->second->HasArea() == true && mapGrid != nullptr &&
+            mapGrid->HasCells() == true)
+        {
+            ROWOWMapPart const* part = partIter->second;
+            int32 x = 0, y = 0;
+            ROWOWPosition position;
+            if (MapSearchFreeCellOfSpawn(*mapGrid, map, -1, -1, -1, -1, std::min(part->CellWidth * part->CellHeight, 500), x, y, part) == false ||
+                GetCellPosition(map->GetId(), x, y, position) == false)
+                return false;
+            positionOut.Relocate(position.X, position.Y, position.Z);
+            return true;
+        }
+    }
     Map::CreatureBySpawnIdContainer const& creaturesBySpawnID = map->GetCreatureBySpawnIdStore();
     if (creaturesBySpawnID.empty() == true)
         return false;
-    ROWOWMapGrid const* mapGrid = mapKey != map->GetId() ? GetMapGrid(map->GetId()) : nullptr;
-    for (int32 tries = mapGrid != nullptr ? 50 : 1; tries > 0; tries--)
-    {
-        uint32 index = urand(0, uint32(creaturesBySpawnID.size() - 1));
-        Map::CreatureBySpawnIdContainer::const_iterator creatureIter = creaturesBySpawnID.begin();
-        std::advance(creatureIter, index);
-        Creature* creature = creatureIter->second;
-        if (creature == nullptr)
-            continue;
-        Position const& homePosition = creature->GetHomePosition();
-        if (mapGrid != nullptr && GetMapKey(map->GetId(), mapGrid->GetCellX(homePosition.GetPositionY()), mapGrid->GetCellY(homePosition.GetPositionX())) != mapKey)
-            continue;
-        positionOut.Relocate(homePosition.GetPositionX(), homePosition.GetPositionY(), homePosition.GetPositionZ() + 0.5f);
-        return true;
-    }
-    return false;
+    uint32 index = urand(0, uint32(creaturesBySpawnID.size() - 1));
+    Map::CreatureBySpawnIdContainer::const_iterator creatureIter = creaturesBySpawnID.begin();
+    std::advance(creatureIter, index);
+    Creature* creature = creatureIter->second;
+    if (creature == nullptr)
+        return false;
+    Position const& homePosition = creature->GetHomePosition();
+    positionOut.Relocate(homePosition.GetPositionX(), homePosition.GetPositionY(), homePosition.GetPositionZ() + 0.5f);
+    return true;
 }
 
 void ROWOWMod::TeleportToSavePoint(Player* player)

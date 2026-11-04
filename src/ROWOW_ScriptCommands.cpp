@@ -156,7 +156,7 @@ void ROWOWMod::RegisterNpcScriptCommands()
     {
         // An NPC named by an argument (its exname), or the run's own
         if (index < arguments.size())
-            return GetNpcByName(arguments[index].GetText(), context.AttachedPlayer != nullptr ? context.AttachedPlayer->GetMapId() : 0);
+            return GetNpcByName(arguments[index].GetText(), context.AttachedPlayer != nullptr ? GetUnitMapKey(context.AttachedPlayer) : 0); // The player's part's first
         return context.Npc;
     };
 
@@ -965,33 +965,68 @@ void ROWOWMod::RegisterNpcScriptCommands()
     auto spawnMobs = [this](ROWOWScriptContext& context, std::string const& mapName, int32 x1, int32 y1, int32 x2, int32 y2, std::string const& name,
         uint32 mobID, int64 amount, std::string const& event)
     {
-        // A part of a stitched map: its cells moved onto the stitched map, and its 0,0 (anywhere on the map) anywhere on the part
+        // The map, and the part of a stitched map its cells are of: by the part's name, or "this" on one (a script's cells are its own map's, the
+        // part's).  "this" is the attached player's map
+        Player* player = context.AttachedPlayer;
         ROWOWMapPart const* part = GetMapPart(mapName);
-        if (part != nullptr && x1 == 0 && y1 == 0 && x2 == 0 && y2 == 0 && part->HasArea() == true)
+        uint32 mapID = part != nullptr ? part->MapID : GetMapIDByMapName(mapName);
+        int32 playerX = 0, playerY = 0;
+        if (player != nullptr)
+            GetUnitCell(player, playerX, playerY);
+        if (mapID == 0 && player != nullptr && (mapName == "this" || mapName.empty() == true))
         {
-            x1 = -1;
-            y1 = -1;
+            mapID = player->GetMapId();
+            part = GetMapPartAt(mapID, playerX, playerY);
         }
-        uint32 mapID = ResolveMapArea(mapName, x1, y1, x2, y2);
-        if (mapID == 0 && context.AttachedPlayer != nullptr && (mapName == "this" || mapName.empty() == true))
-            mapID = context.AttachedPlayer->GetMapId();
         Map* map = nullptr;
-        if (context.AttachedPlayer != nullptr)
-            map = context.AttachedPlayer->GetMapId() == mapID ? context.AttachedPlayer->GetMap() : nullptr;
+        if (player != nullptr)
+            map = player->GetMapId() == mapID ? player->GetMap() : nullptr;
         else
             map = sMapMgr->FindBaseNonInstanceMap(mapID);
+        if (map == nullptr && (mapID == 0 || player != nullptr || IsROMap(mapID) == false))
+            return;
+
+        // mob_once_spawn_sub's cell: one below 0 is next to the attached player (map_search_freecell(bl, 1, 1), the player's own when none is free),
+        // and 0 or one off the map a random free cell of the map (SpawnScriptMob's -1; a part's: of the part).  The others are moved onto the map
+        ROWOWMapGrid const* mapGrid = GetMapGrid(mapID);
+        bool hasPartArea = part != nullptr && part->HasArea() == true;
+        int32 width = hasPartArea == true ? part->CellWidth : (mapGrid != nullptr ? mapGrid->Width : 0);
+        int32 height = hasPartArea == true ? part->CellHeight : (mapGrid != nullptr ? mapGrid->Height : 0);
+        auto getSpawnCell = [&](int32& x, int32& y)
+        {
+            x = x1 == x2 ? x1 : (std::min(x1, x2) < 0 ? -1 : int32(urand(uint32(std::min(x1, x2)), uint32(std::max(x1, x2)))));
+            y = y1 == y2 ? y1 : (std::min(y1, y2) < 0 ? -1 : int32(urand(uint32(std::min(y1, y2)), uint32(std::max(y1, y2)))));
+            if ((x < 0 || y < 0) && map != nullptr && player != nullptr && mapGrid != nullptr)
+            {
+                if (MapSearchFreeCellOfSpawn(*mapGrid, map, playerX, playerY, 1, 1, 9, x, y, GetMapPartAt(mapID, playerX, playerY)) == false)
+                {
+                    x = playerX;
+                    y = playerY;
+                }
+                return;
+            }
+            if (x <= 0 || y <= 0 || x >= width || y >= height)
+            {
+                x = -1;
+                y = -1;
+                return;
+            }
+            if (part != nullptr)
+            {
+                x += part->CellOffsetX;
+                y += part->CellOffsetY;
+            }
+        };
         if (map == nullptr)
         {
             // An RO map that isn't loaded (an OnInit's monster at startup) gets them once it is (the world update spawns them)
-            if (mapID == 0 || context.AttachedPlayer != nullptr || IsROMap(mapID) == false)
-                return;
             std::lock_guard<std::mutex> lock(NpcStateMutex);
             for (int64 spawnIndex = 0; spawnIndex < std::min<int64>(amount, 1000); spawnIndex++)
             {
                 ROWOWPendingScriptMob mob;
                 mob.MapID = mapID;
-                mob.X = x1 == x2 ? x1 : int32(urand(uint32(std::min(x1, x2)), uint32(std::max(x1, x2))));
-                mob.Y = y1 == y2 ? y1 : int32(urand(uint32(std::min(y1, y2)), uint32(std::max(y1, y2))));
+                getSpawnCell(mob.X, mob.Y);
+                mob.Part = part;
                 mob.MobID = mobID;
                 mob.Name = name;
                 mob.Event = event;
@@ -1001,9 +1036,9 @@ void ROWOWMod::RegisterNpcScriptCommands()
         }
         for (int64 spawnIndex = 0; spawnIndex < std::min<int64>(amount, 1000); spawnIndex++)
         {
-            int32 x = x1 == x2 ? x1 : int32(urand(uint32(std::min(x1, x2)), uint32(std::max(x1, x2))));
-            int32 y = y1 == y2 ? y1 : int32(urand(uint32(std::min(y1, y2)), uint32(std::max(y1, y2))));
-            SpawnScriptMob(map, mobID, x, y, name, event);
+            int32 x = 0, y = 0;
+            getSpawnCell(x, y);
+            SpawnScriptMob(map, mobID, x, y, name, event, part);
         }
     };
     engine->RegisterCommand("monster", [spawnMobs](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
@@ -1144,7 +1179,21 @@ void ROWOWMod::RegisterNpcScriptCommands()
         std::string mapName = GetTextArgument(arguments, 2);
         int32 x = int32(GetArgument(arguments, 3, 0));
         int32 y = int32(GetArgument(arguments, 4, 0));
-        uint32 mapID = mapName == "this" && context.AttachedPlayer != nullptr ? context.AttachedPlayer->GetMapId() : ResolveMapCell(mapName, x, y);
+        uint32 mapID = 0;
+        if (mapName == "this" && context.AttachedPlayer != nullptr)
+        {
+            // The player's map; on a stitched map the cells are its part's (a script's cells are its own map's)
+            mapID = context.AttachedPlayer->GetMapId();
+            int32 playerX = 0, playerY = 0;
+            GetUnitCell(context.AttachedPlayer, playerX, playerY);
+            if (ROWOWMapPart const* part = GetMapPartAt(mapID, playerX, playerY))
+            {
+                x += part->CellOffsetX;
+                y += part->CellOffsetY;
+            }
+        }
+        else
+            mapID = ResolveMapCell(mapName, x, y);
         Map* map = nullptr;
         if (context.AttachedPlayer != nullptr)
             map = context.AttachedPlayer->GetMapId() == mapID ? context.AttachedPlayer->GetMap() : nullptr;
@@ -2597,12 +2646,24 @@ void ROWOWMod::RegisterNpcScriptCommands()
     engine->SetReferenceArguments("sscanf", 0xFFFFFFFC);
 }
 
-Creature* ROWOWMod::SpawnScriptMob(Map* map, uint32 mobID, int32 x, int32 y, std::string const& name, std::string const& event)
+Creature* ROWOWMod::SpawnScriptMob(Map* map, uint32 mobID, int32 x, int32 y, std::string const& name, std::string const& event, ROWOWMapPart const* part)
 {
-    // mob_once_spawn: the monster on the cell (a random one of the map for 0,0), kept until killed or taken away, with the script's name
+    // mob_once_spawn: the monster on the cell (a random one of the map for -1: map_search_freecell(-1, -1), xs * ys tries, 500 at most; of a stitched
+    // map's part, of the part), kept until killed or taken away, with the script's name
     uint32 entry = GetMobCreatureEntry(mobID);
     if (map == nullptr || entry == 0)
         return nullptr;
+    if (x < 0 || y < 0)
+    {
+        ROWOWMapGrid const* mapGrid = GetMapGrid(map->GetId());
+        if (mapGrid == nullptr || mapGrid->HasCells() == false)
+            return nullptr;
+        if (part != nullptr && part->HasArea() == false)
+            part = nullptr;
+        int32 tries = std::min(part != nullptr ? part->CellWidth * part->CellHeight : mapGrid->Width * mapGrid->Height, 500);
+        if (MapSearchFreeCellOfSpawn(*mapGrid, map, -1, -1, -1, -1, tries, x, y, part) == false)
+            return nullptr;
+    }
     ROWOWPosition position;
     if (GetCellPosition(map->GetId(), x, y, position) == false)
         return nullptr;

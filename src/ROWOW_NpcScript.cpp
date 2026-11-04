@@ -616,18 +616,31 @@ ROWOWNpc const* ROWOWMod::GetNpc(uint32 npcID) const
     return NpcsByID[npcID - 1].get();
 }
 
-ROWOWNpc const* ROWOWMod::GetNpcByName(std::string const& name, uint32 preferredMapID) const
+ROWOWNpc const* ROWOWMod::GetNpcByName(std::string const& name, uint32 preferredMapKey) const
 {
+    // Of several with the name, one of the preferred map key (on a stitched map, the part's), else one of its WoW map, else the first
     std::string lowerName = ToLower(name);
     auto uniqueIter = NpcsByUniqueName.find(lowerName);
     if (uniqueIter != NpcsByUniqueName.end())
         return uniqueIter->second;
+    uint32 preferredMapID = GetMapIDOfMapKey(preferredMapKey);
+    auto getPreference = [this, preferredMapKey, preferredMapID](ROWOWNpc const* npc)
+    {
+        if (GetMapKey(npc->MapID, npc->X, npc->Y) == preferredMapKey)
+            return 2;
+        return npc->MapID == preferredMapID ? 1 : 0;
+    };
     ROWOWNpc const* found = nullptr;
+    int32 foundPreference = 0;
     auto range = NpcsByName.equal_range(lowerName);
     for (auto npcIter = range.first; npcIter != range.second; ++npcIter)
     {
-        if (found == nullptr || (npcIter->second->MapID == preferredMapID && found->MapID != preferredMapID))
+        int32 preference = getPreference(npcIter->second);
+        if (found == nullptr || preference > foundPreference)
+        {
             found = npcIter->second;
+            foundPreference = preference;
+        }
     }
     return found;
 }
@@ -1287,7 +1300,7 @@ void ROWOWMod::UpdateNpcScripts(uint32 diff)
         }
     }
     for (ROWOWPendingScriptMob const& mob : loadedMapMobs)
-        SpawnScriptMob(sMapMgr->FindBaseNonInstanceMap(mob.MapID), mob.MobID, mob.X, mob.Y, mob.Name, mob.Event);
+        SpawnScriptMob(sMapMgr->FindBaseNonInstanceMap(mob.MapID), mob.MobID, mob.X, mob.Y, mob.Name, mob.Event, mob.Part);
     if (loadedMapMobs.empty() == false)
         LOG_INFO("module.ROWOW", "ROWOWMod::UpdateNpcScripts spawned {} script monsters that waited for their map (first map {})", loadedMapMobs.size(),
             loadedMapMobs.front().MapID);
