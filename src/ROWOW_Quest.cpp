@@ -493,8 +493,8 @@ void ROWOWMod::QuestUpdateObjective(Player* sd, Creature* md)
 void ROWOWMod::QuestKillUpdate(Creature* md, Player* sd)
 {
     // mob_dead: the killer's party members within AREA_SIZE of the monster (map_foreachinallrange) count it, or the killer alone.  A WoW
-    // group is the RO party.  The monster's map thread: only players on its map are looked at
-    if (md == nullptr || sd == nullptr || sd->GetMap() != md->GetMap() || IsInROForm(sd) == false || GetROMobID(md) == 0)
+    // group is the RO party.  The monster's map thread: only players on its map (on a stitched map, its part) are looked at
+    if (md == nullptr || sd == nullptr || sd->GetMap() != md->GetMap() || IsOnSameROMap(sd, md) == false || IsInROForm(sd) == false || GetROMobID(md) == 0)
         return;
     Group* group = sd->GetGroup();
     if (group == nullptr)

@@ -104,8 +104,9 @@ public:
         if (victim != nullptr && player->HasInArc(2 * float(M_PI) / 3, victim) == false)
             player->SetOrientation(player->GetAngle(victim));
 
-        // clif_parse_ActionRequest: no attacking from a shop or a room (pc_cant_act)
-        if (ROWOW->PCCanMoveAt(player) == false)
+        // clif_parse_ActionRequest: no attacking from a shop or a room (pc_cant_act), nor what's on another map (on a stitched map, another part
+        // just over the gap: battle_check_range's path search never crosses it)
+        if (ROWOW->PCCanMoveAt(player) == false || (victim != nullptr && ROWOW->IsOnSameROMap(player, victim) == false))
         {
             player->AttackStop();
             return false;

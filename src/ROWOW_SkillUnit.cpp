@@ -417,6 +417,9 @@ int32 ROWOWMod::MapForEachInCellArea(Map* map, uint32 phaseMask, int32 x0, int32
     std::list<Unit*> units;
     ROWOWCellAreaSearcher searcher(phaseMask, units);
     Cell::VisitObjects(centerX, centerY, map, searcher, searchRadius);
+
+    // The square is on one RO map, the part of its middle on a stitched map
+    uint32 areaMapKey = GetMapKey(map->GetId(), (minX + maxX) / 2, (minY + maxY) / 2);
     int32 returnCount = 0;
     for (Unit* unit : units)
     {
@@ -424,7 +427,7 @@ int32 ROWOWMod::MapForEachInCellArea(Map* map, uint32 phaseMask, int32 x0, int32
             continue;
         int32 unitX = 0, unitY = 0;
         GetUnitCell(unit, unitX, unitY);
-        if (unitX < minX || unitX > maxX || unitY < minY || unitY > maxY)
+        if (unitX < minX || unitX > maxX || unitY < minY || unitY > maxY || GetMapKey(map->GetId(), unitX, unitY) != areaMapKey)
             continue;
         returnCount += func(unit);
     }
@@ -787,6 +790,7 @@ std::shared_ptr<ROWOWSkillUnitGroup> ROWOWMod::SkillUnitSetting(Unit* src, uint1
     ROWOWSkillUnitData* ud = GetSkillUnitData(src);
     float referenceZ = ud->SkillZ;
     limit = group->Limit;
+    uint32 groupMapKey = GetMapKey(map->GetId(), x, y); // The cells stay on the spot's RO map (on a stitched map, its part)
     for (int32 i = 0; i < int32(layout->Cells.size()); i++)
     {
         int32 ux = x + layout->Cells[i].first;
@@ -794,6 +798,8 @@ std::shared_ptr<ROWOWSkillUnitGroup> ROWOWMod::SkillUnitSetting(Unit* src, uint1
         int32 unitVal1 = skillLevel;
         int32 unitVal2 = 0;
         int32 alive = 1;
+        if (GetMapKey(map->GetId(), ux, uy) != groupMapKey)
+            continue;
 
         // don't place skill units on walls (except for songs/dances/encores): a cell with ground near the spot's height
         float cellX = 0, cellY = 0;

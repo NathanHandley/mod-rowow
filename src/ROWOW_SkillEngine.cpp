@@ -529,6 +529,9 @@ int32 ROWOWMod::MapForEachInArea(Unit* origin, int32 x0, int32 y0, int32 x1, int
     Acore::AnyUnitInObjectRangeCheck check(origin, searchRadius);
     Acore::UnitListSearcher<Acore::AnyUnitInObjectRangeCheck> searcher(origin, units, check);
     Cell::VisitObjects(origin, searcher, searchRadius);
+
+    // The square is on one RO map, the part of its middle on a stitched map (an RO area ends at its map's edge, never reaching the next part)
+    uint32 areaMapKey = GetMapKey(origin->GetMapId(), (x0 + x1) / 2, (y0 + y1) / 2);
     int32 returnCount = 0;
     for (Unit* unit : units)
     {
@@ -536,7 +539,8 @@ int32 ROWOWMod::MapForEachInArea(Unit* origin, int32 x0, int32 y0, int32 x1, int
             continue;
         int32 unitX = 0, unitY = 0;
         GetUnitCell(unit, unitX, unitY);
-        if (unitX < std::min(x0, x1) || unitX > std::max(x0, x1) || unitY < std::min(y0, y1) || unitY > std::max(y0, y1))
+        if (unitX < std::min(x0, x1) || unitX > std::max(x0, x1) || unitY < std::min(y0, y1) || unitY > std::max(y0, y1) ||
+            GetMapKey(origin->GetMapId(), unitX, unitY) != areaMapKey)
             continue;
         returnCount += func(unit);
     }
@@ -765,6 +769,21 @@ SpellCastResult ROWOWMod::UnitSkillUse(Unit* src, Unit* target, WorldLocation co
         return SPELL_FAILED_CASTER_DEAD; // Do not continue source is dead
     if (target == nullptr)
         target = src;
+
+    // The target and the ground spot are on the caster's map (on a stitched map, its part: another part over the gap is another RO map)
+    if (target != src && IsOnSameROMap(src, target) == false)
+        return SPELL_FAILED_OUT_OF_RANGE;
+    if (dest != nullptr)
+    {
+        ROWOWPosition destPosition;
+        destPosition.IsSet = true;
+        destPosition.MapID = src->GetMapId();
+        destPosition.X = dest->GetPositionX();
+        destPosition.Y = dest->GetPositionY();
+        destPosition.Z = dest->GetPositionZ();
+        if (GetPositionMapKey(destPosition) != GetUnitMapKey(src))
+            return SPELL_FAILED_OUT_OF_RANGE;
+    }
     Player* sd = src->ToPlayer();
     ROWOWSkillUnitData* ud = GetSkillUnitData(src);
     uint64 tick = GetTick();

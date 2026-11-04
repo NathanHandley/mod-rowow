@@ -890,20 +890,21 @@ void ROWOWMod::UpdatePlayerNpcScripts(Player* player, uint32 diff)
     int32 x = 0, y = 0;
     GetUnitCell(player, x, y);
     int32 range = BattleConfig.AreaSize + 1;
-    if (player->GetMapId() != run->Npc->MapID || std::abs(x - run->Npc->X) > range || std::abs(y - run->Npc->Y) > range)
+    if (player->GetMapId() != run->Npc->MapID || std::abs(x - run->Npc->X) > range || std::abs(y - run->Npc->Y) > range ||
+        GetMapKey(player->GetMapId(), x, y) != GetMapKey(run->Npc->MapID, run->Npc->X, run->Npc->Y))
         EndNpcRun(player);
 }
 
 bool ROWOWMod::IsInNpcClickRange(Player const* player, Creature const* creature) const
 {
-    // npc_checknear: on the same map and at most AREA_SIZE + 1 cells away on each axis, whatever the height between (RO's cells have none) and
-    // whatever stands in the way.  A class-less NPC is clicked from anywhere
+    // npc_checknear: on the same map (on a stitched map, the same part) and at most AREA_SIZE + 1 cells away on each axis, whatever the height
+    // between (RO's cells have none) and whatever stands in the way.  A class-less NPC is clicked from anywhere
     if (player->GetMapId() != creature->GetMapId())
         return false;
     ROWOWNpc const* npc = GetCreatureNpc(creature);
     if (npc != nullptr && npc->IsClassless() == true)
         return true;
-    return DistanceBL(player, creature) <= BattleConfig.AreaSize + 1;
+    return DistanceBL(player, creature) <= BattleConfig.AreaSize + 1 && IsOnSameROMap(player, creature) == true;
 }
 
 void ROWOWMod::CheckNpcTouchAreas(Player* player)

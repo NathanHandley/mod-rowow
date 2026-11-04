@@ -699,6 +699,16 @@ uint32 ROWOWMod::ResolveMapArea(std::string const& mapName, int32& x1, int32& y1
     y1 += part->CellOffsetY;
     x2 += part->CellOffsetX;
     y2 += part->CellOffsetY;
+    if (part->HasArea() == true)
+    {
+        // Kept to the part's cells, as rAthena keeps a box to its map's (one larger than the map would reach into the next part)
+        int32 maxX = part->CellOffsetX + part->CellWidth - 1;
+        int32 maxY = part->CellOffsetY + part->CellHeight - 1;
+        x1 = std::clamp(x1, part->CellOffsetX, maxX);
+        x2 = std::clamp(x2, part->CellOffsetX, maxX);
+        y1 = std::clamp(y1, part->CellOffsetY, maxY);
+        y2 = std::clamp(y2, part->CellOffsetY, maxY);
+    }
     return part->MapID;
 }
 
