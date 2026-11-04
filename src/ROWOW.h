@@ -2254,7 +2254,7 @@ public:
 
     // Map keys: an RO map's own ID, or for a cell of a stitched map the part it's in (ROWOWMapPart::GetMapKey), which keeps its own map flags, name and
     // map-level script commands.  HasMapFlag, NoPenaltyMapIDs, script monsters' maps and the users counts go by map key
-    ROWOWMapPart const* GetMapPartAt(uint32 mapID, int32 cellX, int32 cellY) const; // nullptr off every part (and on maps of their own)
+    ROWOWMapPart const* GetMapPartAt(uint32 mapID, int32 cellX, int32 cellY) const; // A gap cell is its nearer part's; nullptr off every part (and on maps of their own)
     uint32 GetMapKey(uint32 mapID, int32 cellX, int32 cellY) const;
     uint32 GetUnitMapKey(Unit const* unit) const;
     uint32 GetPositionMapKey(ROWOWPosition const& position) const;

@@ -718,7 +718,7 @@ void ROWOWMod::MoveSavedSpotsOffStitchedMaps()
     for (auto const& partByFormerMapID : partsByFormerMapID)
         formerMapIDsText += (formerMapIDsText.empty() == true ? "" : ",") + std::to_string(partByFormerMapID.first);
 
-    // The stitched map's position of a former map's spot (false when it's off the part)
+    // The stitched map's position of a former map's spot (one off the part goes to the nearest cell of it; false when there's no position there)
     auto getStitchedPosition = [this, &partsByFormerMapID](uint32 formerMapID, float x, float y, ROWOWPosition& positionOut)
     {
         ROWOWMapPart const* part = partsByFormerMapID.at(formerMapID);
@@ -809,14 +809,22 @@ std::unordered_map<std::string, std::unordered_set<uint32>> ROWOWMod::GetMapIDsB
 
 ROWOWMapPart const* ROWOWMod::GetMapPartAt(uint32 mapID, int32 cellX, int32 cellY) const
 {
-    // A stitched map has a few dozen parts at most, side by side with no overlap
+    // A stitched map has a few dozen parts at most, side by side with no overlap.  A cell in the 2-cell gap between two parts is the nearer one's
+    // (one cell off it), as the converter's sub-areas reach the middle of the gaps: the gaps aren't walkable in RO, but WoW movement isn't held to
+    // the cells, and a step over a gap shouldn't leave the part and come back (map-change steps twice)
     auto partsIter = MapPartsByMapID.find(mapID);
     if (partsIter == MapPartsByMapID.end())
         return nullptr;
+    ROWOWMapPart const* nearPart = nullptr;
     for (ROWOWMapPart const& part : partsIter->second)
+    {
         if (part.HasCell(cellX, cellY) == true)
             return &part;
-    return nullptr;
+        if (nearPart == nullptr && part.HasArea() == true && cellX >= part.CellOffsetX - 1 && cellY >= part.CellOffsetY - 1 &&
+            cellX <= part.CellOffsetX + part.CellWidth && cellY <= part.CellOffsetY + part.CellHeight)
+            nearPart = &part;
+    }
+    return nearPart;
 }
 
 uint32 ROWOWMod::GetMapKey(uint32 mapID, int32 cellX, int32 cellY) const
@@ -857,11 +865,12 @@ uint32 ROWOWMod::GetMapIDOfMapKey(uint32 mapKey) const
 
 std::string ROWOWMod::GetMapNameAt(uint32 mapID, int32& cellX, int32& cellY) const
 {
-    // strcharinfo(3) and getmapxy: a part's own name and cells (prt_fild08 170,370), the stitched map's own off every part
+    // strcharinfo(3) and getmapxy: a part's own name and cells (prt_fild08 170,370; a gap cell its part's edge cell), the stitched map's own off
+    // every part
     if (ROWOWMapPart const* part = GetMapPartAt(mapID, cellX, cellY))
     {
-        cellX -= part->CellOffsetX;
-        cellY -= part->CellOffsetY;
+        cellX = std::clamp(cellX - part->CellOffsetX, 0, part->CellWidth - 1);
+        cellY = std::clamp(cellY - part->CellOffsetY, 0, part->CellHeight - 1);
         return part->Name;
     }
     auto mapNameIter = MapNamesByMapID.find(mapID);

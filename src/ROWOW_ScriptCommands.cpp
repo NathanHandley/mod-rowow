@@ -2234,11 +2234,13 @@ void ROWOWMod::RegisterNpcScriptCommands()
         if (map == nullptr)
             return;
         std::vector<Player*> players;
-        map->DoForAllPlayers([this, x0, y0, x1, y1, &players](Player* player)
+        // A box still -1 is the whole map (a map that isn't a part: a part's whole map is its own box, from ResolveMapArea)
+        bool isWholeMap = x0 < 0;
+        map->DoForAllPlayers([this, x0, y0, x1, y1, isWholeMap, &players](Player* player)
         {
             int32 x = 0, y = 0;
             GetUnitCell(player, x, y);
-            if (IsInROForm(player) == true && x >= std::min(x0, x1) && x <= std::max(x0, x1) && y >= std::min(y0, y1) && y <= std::max(y0, y1))
+            if (IsInROForm(player) == true && (isWholeMap == true || (x >= std::min(x0, x1) && x <= std::max(x0, x1) && y >= std::min(y0, y1) && y <= std::max(y0, y1))))
                 players.push_back(player);
         });
         for (Player* player : players)
@@ -2365,10 +2367,11 @@ void ROWOWMod::RegisterNpcScriptCommands()
         if (arguments.size() >= 3)
         {
             bool isArea = arguments.size() >= 7;
-            int32 x0 = isArea == true ? int32(GetArgument(arguments, 3, 0)) : 0;
-            int32 y0 = isArea == true ? int32(GetArgument(arguments, 4, 0)) : 0;
-            int32 x1 = isArea == true ? int32(GetArgument(arguments, 5, 0)) : std::numeric_limits<int32>::max();
-            int32 y1 = isArea == true ? int32(GetArgument(arguments, 6, 0)) : std::numeric_limits<int32>::max();
+            // No box: -1, the whole map (a stitched map's part: its own cells)
+            int32 x0 = isArea == true ? int32(GetArgument(arguments, 3, 0)) : -1;
+            int32 y0 = isArea == true ? int32(GetArgument(arguments, 4, 0)) : -1;
+            int32 x1 = isArea == true ? int32(GetArgument(arguments, 5, 0)) : -1;
+            int32 y1 = isArea == true ? int32(GetArgument(arguments, 6, 0)) : -1;
             forEachPlayerInArea(context, GetTextArgument(arguments, 2), x0, y0, x1, y1, [this, &fileName](Player* player) { PlayScriptSoundToPlayer(player, fileName); });
             return ROWOWScriptValue::FromNumber(0);
         }
@@ -2387,7 +2390,19 @@ void ROWOWMod::RegisterNpcScriptCommands()
         float x = 0, y = 0;
         bool isOff = GetArgument(arguments, 0, 0) == 2;
         if (isOff == false)
-            GetCellWorldPosition(player->GetMapId(), int32(GetArgument(arguments, 1, 0)), int32(GetArgument(arguments, 2, 0)), x, y);
+        {
+            // The script's cells are its map's: on a stitched map, the part the player is in
+            int32 cellX = int32(GetArgument(arguments, 1, 0));
+            int32 cellY = int32(GetArgument(arguments, 2, 0));
+            int32 playerX = 0, playerY = 0;
+            GetUnitCell(player, playerX, playerY);
+            if (ROWOWMapPart const* part = GetMapPartAt(player->GetMapId(), playerX, playerY))
+            {
+                cellX += part->CellOffsetX;
+                cellY += part->CellOffsetY;
+            }
+            GetCellWorldPosition(player->GetMapId(), cellX, cellY, x, y);
+        }
         WorldPacket data(SMSG_GOSSIP_POI, 4 + 4 + 4 + 4 + 4 + 2);
         data << uint32(isOff == true ? 0 : 6);
         data << float(x);
