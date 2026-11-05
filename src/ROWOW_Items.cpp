@@ -179,6 +179,16 @@ namespace
     {
         return roItem.Type != ROWOW_ITEM_TYPE_WEAPON && roItem.Type != ROWOW_ITEM_TYPE_ARMOR && roItem.Type != ROWOW_ITEM_TYPE_PETARMOR;
     }
+
+    // The weapon type ammunition is checked against (ammo_check_weapon): the status's in the form; out of it, on the character window's Ragnarok page,
+    // the status isn't worked out, so the right hand's weapon's (a bow, an instrument, a gun: none of them dual wield types)
+    uint8 GetAmmoCheckWeaponType(ROWOWMod const* mod, Player* player, ROWOWIdentity const& identity)
+    {
+        if (identity.IsInForm == true)
+            return identity.Status.WeaponType;
+        ROWOWItem const* weapon = mod->GetROItem(mod->GetIdentityEquippedItem(player, ROWOW_EQUIP_POSITION_HAND_R));
+        return (weapon != nullptr && weapon->IsWeapon == true) ? weapon->WeaponType : ROWOW_WEAPON_TYPE_FIST;
+    }
 }
 
 void ROWOWMod::LoadItemScriptData()
@@ -736,7 +746,7 @@ uint8 ROWOWMod::PCIsEquip(Player* player, ROWOWIdentity const& identity, Item co
     {
         if (roItem->AmmoType == AMMO_TYPE_DAGGER && PCCheckSkill(player, ROWOW_SKILL_AS_VENOMKNIFE) == 0)
             return ROWOW_EQUIP_ACK_FAIL;
-        if (BattleConfig.AmmoCheckWeapon != 0 && IsAmmoForWeaponType(roItem->AmmoType, identity.Status.WeaponType) == false)
+        if (BattleConfig.AmmoCheckWeapon != 0 && IsAmmoForWeaponType(roItem->AmmoType, GetAmmoCheckWeaponType(this, player, identity)) == false)
             return ROWOW_EQUIP_ACK_FAIL;
     }
 
@@ -776,7 +786,7 @@ bool ROWOWMod::PCEquipItem(Player* player, Item* item, int32 reqPos)
     uint8 result = PCIsEquip(player, *identity, item);
     if (result != ROWOW_EQUIP_ACK_OK)
     {
-        if ((roItem->Locations & ROWOW_EQUIP_POSITION_AMMO) != 0 && IsAmmoForWeaponType(roItem->AmmoType, identity->Status.WeaponType) == false)
+        if ((roItem->Locations & ROWOW_EQUIP_POSITION_AMMO) != 0 && IsAmmoForWeaponType(roItem->AmmoType, GetAmmoCheckWeaponType(this, player, *identity)) == false)
             SendItemMessage(player, roItem->AmmoType == ROWOW_AMMO_TYPE_ARROW ? "You need a bow equipped to equip arrows." : "This ammunition doesn't fit the weapon equipped.");
         else
             SendItemMessage(player, result == ROWOW_EQUIP_ACK_FAIL_LEVEL ? "You can't equip this item at your current level." : "You can't put this item on.");
