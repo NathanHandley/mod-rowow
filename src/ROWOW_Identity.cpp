@@ -334,6 +334,7 @@ void ROWOWMod::LoadIdentityData()
     MapNamesByMapID.clear();
     MapPartsByMapName.clear();
     MapPartsByMapKey.clear();
+    MapPartIndexesByMapID.clear();
     MapPartsByMapID.clear();
     ItemTemplateIDsByItemID.clear();
     ItemTemplateIDs.clear();
@@ -521,6 +522,21 @@ void ROWOWMod::LoadIdentityData()
                         other.CellOffsetY, other.CellWidth, other.CellHeight, partsByMapID.first, part.Name);
                 }
             }
+        }
+
+        // ...found by block, each part grown a cell (a gap cell is its nearer part's)
+        for (auto const& partsByMapID : MapPartsByMapID)
+        {
+            if (partsByMapID.second.size() > std::numeric_limits<uint16>::max())
+            {
+                LOG_ERROR("module.ROWOW", "ROWOWMod::LoadIdentityData: stitched map {} has {} parts, too many to index, so they're looked up one by one",
+                    partsByMapID.first, partsByMapID.second.size());
+                continue;
+            }
+            std::vector<ROWOWCellRect> partRects;
+            for (ROWOWMapPart const& part : partsByMapID.second)
+                partRects.push_back({ part.CellOffsetX, part.CellOffsetY, part.HasArea() == true ? part.CellWidth : 0, part.HasArea() == true ? part.CellHeight : 0 });
+            MapPartIndexesByMapID[partsByMapID.first].Build(partRects, 1);
         }
         if (MapPartsByMapName.empty() == false)
             LOG_INFO("module.ROWOW", "ROWOWMod::LoadIdentityData: {} RO map names are {} parts of {} stitched maps", MapPartsByMapName.size(), partsByOffset.size(),
@@ -833,19 +849,41 @@ std::unordered_map<std::string, std::unordered_set<uint32>> ROWOWMod::GetMapIDsB
 
 ROWOWMapPart const* ROWOWMod::GetMapPartAt(uint32 mapID, int32 cellX, int32 cellY) const
 {
-    // A stitched map has a few dozen parts at most, side by side with no overlap.  A cell in the 2-cell gap between two parts is the nearer one's
-    // (one cell off it), as the converter's sub-areas reach the middle of the gaps: the gaps aren't walkable in RO, but WoW movement isn't held to
-    // the cells, and a step over a gap shouldn't leave the part and come back (map-change steps twice)
+    // A stitched map's parts are side by side with no overlap (Midgard has a couple of hundred, so they're found by block: the parts a cell's block
+    // lists, in their order).  A cell in the 2-cell gap between two parts is the nearer one's (one cell off it), as the converter's sub-areas reach
+    // the middle of the gaps: the gaps aren't walkable in RO, but WoW movement isn't held to the cells, and a step over a gap shouldn't leave the
+    // part and come back (map-change steps twice)
     auto partsIter = MapPartsByMapID.find(mapID);
     if (partsIter == MapPartsByMapID.end())
         return nullptr;
+    std::vector<ROWOWMapPart> const& parts = partsIter->second;
+    auto isNear = [cellX, cellY](ROWOWMapPart const& part)
+    {
+        return part.HasArea() == true && cellX >= part.CellOffsetX - 1 && cellY >= part.CellOffsetY - 1 && cellX <= part.CellOffsetX + part.CellWidth &&
+            cellY <= part.CellOffsetY + part.CellHeight;
+    };
     ROWOWMapPart const* nearPart = nullptr;
-    for (ROWOWMapPart const& part : partsIter->second)
+    auto indexIter = MapPartIndexesByMapID.find(mapID);
+    if (indexIter != MapPartIndexesByMapID.end() && indexIter->second.IsBuilt() == true)
+    {
+        uint16 const* candidate = nullptr;
+        uint16 const* candidateEnd = nullptr;
+        indexIter->second.GetCandidates(cellX, cellY, candidate, candidateEnd);
+        for (; candidate != candidateEnd; ++candidate)
+        {
+            ROWOWMapPart const& part = parts[*candidate];
+            if (part.HasCell(cellX, cellY) == true)
+                return &part;
+            if (nearPart == nullptr && isNear(part) == true)
+                nearPart = &part;
+        }
+        return nearPart;
+    }
+    for (ROWOWMapPart const& part : parts)
     {
         if (part.HasCell(cellX, cellY) == true)
             return &part;
-        if (nearPart == nullptr && part.HasArea() == true && cellX >= part.CellOffsetX - 1 && cellY >= part.CellOffsetY - 1 &&
-            cellX <= part.CellOffsetX + part.CellWidth && cellY <= part.CellOffsetY + part.CellHeight)
+        if (nearPart == nullptr && isNear(part) == true)
             nearPart = &part;
     }
     return nearPart;

@@ -141,7 +141,56 @@ struct ROWOWMapPart
     uint32 GetMapKey() const { return FormerMapID != 0 ? FormerMapID : MapID; } // The big map's own, when the map it was isn't known
 };
 
-// The RO cell grid of an RO map (from mod_rowow_map_grid).  RO's x runs against WoW's Y, and RO's y along WoW's X
+// A rectangle of cells: its corner cell and its size
+struct ROWOWCellRect
+{
+    int32 X = 0;
+    int32 Y = 0;
+    int32 Width = 0;
+    int32 Height = 0;
+};
+
+// Which of a set of cell rectangles may hold a cell, by square blocks of cells, so a stitched map's parts (Midgard has a couple of hundred, side by
+// side) aren't tried one by one for every cell looked up.  Each block lists, in their order, the rectangles that (grown by the margin given) reach
+// into it; a cell off every block gets the nearest block's, which only lists rectangles it's outside of.  Built once at startup, then read-only
+struct ROWOWCellRectIndex
+{
+    static constexpr int32 BLOCK_SHIFT = 6; // Blocks of 64 x 64 cells
+    int32 MinBlockX = 0;
+    int32 MinBlockY = 0;
+    int32 BlocksX = 0;
+    int32 BlocksY = 0;
+    std::vector<uint32> BlockStarts; // Each block's first entry, and one past the last block's last
+    std::vector<uint16> Entries; // Rectangle indexes
+
+    void Build(std::vector<ROWOWCellRect> const& rects, int32 margin); // A rectangle with no size is never listed
+    bool IsBuilt() const { return BlocksX > 0 && BlocksY > 0; }
+    void GetCandidates(int32 cellX, int32 cellY, uint16 const*& beginOut, uint16 const*& endOut) const
+    {
+        int32 blockX = std::clamp((cellX >> BLOCK_SHIFT) - MinBlockX, 0, BlocksX - 1);
+        int32 blockY = std::clamp((cellY >> BLOCK_SHIFT) - MinBlockY, 0, BlocksY - 1);
+        size_t blockIndex = size_t(blockY) * size_t(BlocksX) + size_t(blockX);
+        beginOut = Entries.data() + BlockStarts[blockIndex];
+        endOut = Entries.data() + BlockStarts[blockIndex + 1];
+    }
+};
+
+// A stitched map member's own cells in a stitched map's grid (mod_rowow_map_grid's row with its PartMapKey): its GAT at its offset there
+struct ROWOWMapGridPart
+{
+    uint32 MapKey = 0; // The part's map key (ROWOWMapPart::GetMapKey)
+    int32 OffsetX = 0;
+    int32 OffsetY = 0;
+    int32 Width = 0;
+    int32 Height = 0;
+    std::vector<uint8> Cells;
+    std::vector<int16> GroundHeights; // The WoW height on the stitched map, tenths of a yard
+
+    bool HasCell(int32 x, int32 y) const { return x >= OffsetX && y >= OffsetY && x < OffsetX + Width && y < OffsetY + Height; }
+};
+
+// The RO cell grid of an RO map (from mod_rowow_map_grid).  RO's x runs against WoW's Y, and RO's y along WoW's X.  A stitched map's is its members'
+// own grids (Parts) at their offsets, its gaps walls: a whole grid of Midgard's size (a couple of hundred maps far apart) would be mostly gap
 struct ROWOWMapGrid
 {
     float OriginX = 0; // WoW position of the corner of cell 0,0
@@ -151,16 +200,40 @@ struct ROWOWMapGrid
     int32 Height = 0;
     std::vector<uint8> Cells;
     std::vector<int16> GroundHeights;
+    std::vector<ROWOWMapGridPart> Parts; // A stitched map's (its own Cells are empty then)
+    ROWOWCellRectIndex PartIndex;
 
     int32 GetCellX(float worldY) const { return int32(std::floor((OriginY - worldY) / CellSize)); }
     int32 GetCellY(float worldX) const { return int32(std::floor((worldX - OriginX) / CellSize)); }
     float GetCellCenterWorldX(int32 cellY) const { return OriginX + (float(cellY) + 0.5f) * CellSize; }
     float GetCellCenterWorldY(int32 cellX) const { return OriginY - (float(cellX) + 0.5f) * CellSize; }
-    bool HasCells() const { return Cells.empty() == false; }
+    bool HasCells() const { return Cells.empty() == false || Parts.empty() == false; }
     bool IsCellOnMap(int32 x, int32 y) const { return x >= 0 && y >= 0 && x < Width && y < Height; }
-    uint8 GetCell(int32 x, int32 y) const // ROWOW_CELL_WALL for one off the map
+    ROWOWMapGridPart const* GetPartAt(int32 x, int32 y) const // The member grid holding a stitched map's cell, nullptr in a gap
+    {
+        if (PartIndex.IsBuilt() == false)
+            return nullptr;
+        uint16 const* candidate = nullptr;
+        uint16 const* candidateEnd = nullptr;
+        PartIndex.GetCandidates(x, y, candidate, candidateEnd);
+        for (; candidate != candidateEnd; ++candidate)
+            if (Parts[*candidate].HasCell(x, y) == true)
+                return &Parts[*candidate];
+        return nullptr;
+    }
+    uint8 GetCell(int32 x, int32 y) const // ROWOW_CELL_WALL for one off the map (and in a stitched map's gaps)
     {
         if (IsCellOnMap(x, y) == false)
+            return ROWOW_CELL_WALL;
+        if (Parts.empty() == false)
+        {
+            ROWOWMapGridPart const* part = GetPartAt(x, y);
+            if (part == nullptr)
+                return ROWOW_CELL_WALL;
+            int32 partCellIndex = (y - part->OffsetY) * part->Width + (x - part->OffsetX);
+            return (part->Cells[partCellIndex / 4] >> ((partCellIndex % 4) * 2)) & 3;
+        }
+        if (Cells.empty() == true)
             return ROWOW_CELL_WALL;
         int32 cellIndex = y * Width + x;
         return (Cells[cellIndex / 4] >> ((cellIndex % 4) * 2)) & 3;
@@ -175,7 +248,16 @@ struct ROWOWMapGrid
     {
         if (IsCellOnMap(x, y) == false)
             return 0;
-        return float(GroundHeights[y * Width + x]) * 0.1f;
+        if (Parts.empty() == false)
+        {
+            ROWOWMapGridPart const* part = GetPartAt(x, y);
+            if (part == nullptr)
+                return 0;
+            return float(part->GroundHeights[size_t(y - part->OffsetY) * size_t(part->Width) + size_t(x - part->OffsetX)]) * 0.1f;
+        }
+        if (GroundHeights.empty() == true)
+            return 0;
+        return float(GroundHeights[size_t(y) * size_t(Width) + size_t(x)]) * 0.1f;
     }
 };
 
@@ -2131,6 +2213,7 @@ public:
     std::unordered_map<std::string, ROWOWMapPart> MapPartsByMapName; // The names of maps stitched into a bigger one, lowercase (loaded at startup only)
     std::unordered_map<uint32, std::vector<ROWOWMapPart>> MapPartsByMapID; // Each stitched map's parts, one per part (startup only, then read-only)
     std::unordered_map<uint32, ROWOWMapPart const*> MapPartsByMapKey; // Into MapPartsByMapID
+    std::unordered_map<uint32, ROWOWCellRectIndex> MapPartIndexesByMapID; // Each stitched map's parts by block (GetMapPartAt), grown a cell for the gaps
     std::unordered_map<uint32, uint32> ItemTemplateIDsByItemID; // The item template of each converted RO item (item_db Id)
     std::unordered_set<uint32> ItemTemplateIDs; // Every RO item template
     std::unordered_map<uint64, uint32> IllusionSpellIDsByJobKey; // See GetIllusionJobKey
