@@ -357,10 +357,29 @@ public:
         if (ROWOW->IsEnabled == false)
             return;
 
-        // Every character has the world travel spells (new ones start with the first), which the spell book shows only in the RO world (World Return)
+        // Every character has the world travel spells (new ones start with the first), which the spell book shows only in the RO world (World Return).
+        // Added without learnSpell's learn packet: the client puts a spell it's told was learned on an empty action bar button (up to level 10), and
+        // these are never the character's own buttons (the form's bars are its identity's, and the way in is the Ragnarok page).  The client is told
+        // quietly after, by SendWorldTravelSpellsToClient
+        bool isTravelSpellOnButtons = false;
         for (uint32 spellID : { uint32(ROWOW_SPELL_WORLD_TRAVEL), uint32(ROWOW_SPELL_WORLD_RETURN), uint32(ROWOW_SPELL_FOLLOWER_ORDER) })
-            if (player->HasSpell(spellID) == false && sSpellMgr->GetSpellInfo(spellID) != nullptr)
-                player->learnSpell(spellID);
+        {
+            if (player->HasSpell(spellID) == false && sSpellMgr->GetSpellInfo(spellID) != nullptr && sScriptMgr->OnPlayerCanLearnSpell(player, spellID) == true)
+                if (player->addSpell(spellID, SPEC_MASK_ALL, true) == true)
+                    sScriptMgr->OnPlayerLearnSpell(player, spellID);
+            // One the client placed before (characters made before this) comes off the character's own buttons
+            for (uint8 button = 0; button < MAX_ACTION_BUTTONS; ++button)
+            {
+                ActionButton const* actionButton = player->GetActionButton(button);
+                if (actionButton != nullptr && actionButton->GetType() == ACTION_BUTTON_SPELL && actionButton->GetAction() == spellID)
+                {
+                    player->removeActionButton(button);
+                    isTravelSpellOnButtons = true;
+                }
+            }
+        }
+        if (isTravelSpellOnButtons == true && ROWOW->IsInROForm(player) == false)
+            player->SendActionButtons(1); // (In the form the client has the identity's buttons)
         ROWOW->SendWorldTravelSpellsToClient(player);
 
         // The pet loads after the character is placed on the map, so it's put away again here
