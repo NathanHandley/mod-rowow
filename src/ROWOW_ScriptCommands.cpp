@@ -697,8 +697,8 @@ void ROWOWMod::RegisterNpcScriptCommands()
         int64 flag = GetArgument(arguments, 2, ROWOW_ADDSKILL_TEMP);
         if (flag == ROWOW_ADDSKILL_PERMANENT || flag == ROWOW_ADDSKILL_PERMANENT_GRANTED)
         {
-            if (flag == ROWOW_ADDSKILL_PERMANENT_GRANTED)
-                SetIdentityVariable(*GetIdentity(player), fmt::format(GrantedSkillVariableFormat, skillID), 1);
+            // The skill's flag: SKILL_FLAG_PERM_GRANTED, or SKILL_FLAG_PERMANENT again (learned as any skill, its points counted and reset)
+            SetIdentityVariable(*GetIdentity(player), fmt::format(GrantedSkillVariableFormat, skillID), flag == ROWOW_ADDSKILL_PERMANENT_GRANTED ? 1 : 0);
             PCSkill(player, skillID, uint16(std::max<int64>(0, GetArgument(arguments, 1, 1))));
         }
         else if (flag == ROWOW_ADDSKILL_TEMP || flag == ROWOW_ADDSKILL_TEMP_ADDLEVEL)

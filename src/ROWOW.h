@@ -873,9 +873,10 @@ struct ROWOWBattleConfig
     int32 AreaSize = 14; // The cells around a unit it sees (area_size)
     int32 ItemUseInterval = 100;
     int32 AmmoUnequip = 1;
-    int32 SkillUpLimit = 1; // A job's skills can't be raised until the jobs before it used their skill points (pc_calc_skilltree_normalize_job)
-    int32 SkillFree = 0; // No skill prerequisites
+    int32 SkillUpLimit = 1; // player_skillup_limit: a job's skills can't be raised until the jobs before it used their skill points (pc_calc_skilltree_normalize_job)
+    int32 SkillFree = 0; // player_skillfree: no skill prerequisites
     int32 QuestSkillLearn = 0; // Quest skills can be learned with skill points
+    int32 QuestSkillReset = 0; // A skill reset takes the quest skills away too (without points; with quest_skill_learn they're reset as any skill)
     int32 CastRate = 100; // casting_rate
     int32 CastrateDexScale = 150; // The DEX at which casting is instant
     int32 DelayRate = 100;
@@ -2570,6 +2571,7 @@ public:
     void PCAddTempSkill(ROWOWIdentity& identity, uint16 skillID, int32 level, bool isAddLevel) const; // pc_skill's ADDSKILL_TEMP and ADDSKILL_TEMP_ADDLEVEL
     void PCRefreshItemSkills(Player* player, ROWOWIdentity& identity); // After a status calculation: the skills equipment grants, to its spells and window
     bool PCCheckSkillIsGranted(ROWOWIdentity const& identity, uint16 skillID) const; // pc_checkskill_flag > SKILL_FLAG_PERMANENT
+    bool IsSkillPermGranted(ROWOWIdentity const& identity, uint16 skillID) const; // SKILL_FLAG_PERM_GRANTED: learned off the tree, no skill points
     void PCJobChange(Player* player, uint16 jobID); // pc_jobchange
     int64 PCJobIDToMapID(int32 jobID) const; // pc_jobid2mapid: the job's class (MAPID, EAJ_), -1 for none
     int32 PCMapIDToJobID(uint64 mapID, bool isMale) const; // pc_mapid2jobid: -1 for none

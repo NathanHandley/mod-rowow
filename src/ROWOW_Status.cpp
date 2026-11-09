@@ -292,9 +292,10 @@ void ROWOWMod::LoadStatusData()
         readValue("sdelay_attack_enable", BattleConfig.SDelayAttackEnable);
         readValue("item_use_interval", BattleConfig.ItemUseInterval);
         readValue("ammo_unequip", BattleConfig.AmmoUnequip);
-        readValue("skillup_limit", BattleConfig.SkillUpLimit);
-        readValue("skillfree", BattleConfig.SkillFree);
+        readValue("player_skillup_limit", BattleConfig.SkillUpLimit);
+        readValue("player_skillfree", BattleConfig.SkillFree);
         readValue("quest_skill_learn", BattleConfig.QuestSkillLearn);
+        readValue("quest_skill_reset", BattleConfig.QuestSkillReset);
         readValue("casting_rate", BattleConfig.CastRate);
         readValue("castrate_dex_scale", BattleConfig.CastrateDexScale);
         readValue("delay_rate", BattleConfig.DelayRate);

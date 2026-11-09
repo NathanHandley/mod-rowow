@@ -696,12 +696,13 @@ uint16 ROWOWMod::SkillTreeGetMax(uint16 skillID, uint16 jobID) const
 
 uint32 ROWOWMod::PCCalcSkillPoint(ROWOWIdentity const& identity) const
 {
-    // pc_calc_skillpoint: the levels learned, without the quest skills (unless quest_skill_learn) and the wedding skills
+    // pc_calc_skillpoint: the levels learned, without the quest skills (unless quest_skill_learn), the wedding skills and the skills granted
+    // off the tree (SKILL_FLAG_PERM_GRANTED, no points spent on them).  skillup_limit opens each job's tree on this count
     uint32 skillPoints = 0;
     for (auto const& levelBySkillID : identity.SkillLevelsByID)
     {
         ROWOWSkill const* skill = GetSkill(levelBySkillID.first);
-        if (skill == nullptr || levelBySkillID.second == 0)
+        if (skill == nullptr || levelBySkillID.second == 0 || IsSkillPermGranted(identity, levelBySkillID.first) == true)
             continue;
         if ((skill->IsQuest == false || BattleConfig.QuestSkillLearn != 0) && (skill->IsWedding == false || skill->IsSpirit == true))
             skillPoints += levelBySkillID.second;
@@ -777,10 +778,9 @@ void ROWOWMod::PCCalcSkillTree(ROWOWIdentity& identity) const
         auto levelIter = identity.SkillLevelsByID.find(skillID);
         return levelIter != identity.SkillLevelsByID.end() ? levelIter->second : 0;
     };
-    // SKILL_FLAG_PERM_GRANTED: a skill a quest granted ignores the skill tree
+    // SKILL_FLAG_PERM_GRANTED: a skill a script granted ignores the skill tree
     for (auto const& levelBySkillID : identity.SkillLevelsByID)
-        if (ROWOWSkill const* skill = GetSkill(levelBySkillID.first); skill != nullptr && skill->IsQuest == true &&
-            GetIdentityVariable(identity, fmt::format(GrantedSkillVariableFormat, levelBySkillID.first)) != 0)
+        if (GetSkill(levelBySkillID.first) != nullptr && IsSkillPermGranted(identity, levelBySkillID.first) == true)
             identity.TreeSkillIDs.insert(levelBySkillID.first);
     bool isChanged = true;
     while (isChanged == true)
@@ -872,7 +872,8 @@ bool ROWOWMod::PCSkillUp(Player* player, uint16 skillID)
     auto levelIter = identity->SkillLevelsByID.find(skillID);
     uint16 level = levelIter != identity->SkillLevelsByID.end() ? levelIter->second : 0;
     if (identity->SkillPoints == 0 || identity->TreeSkillIDs.find(skillID) == identity->TreeSkillIDs.end() || level >= SkillTreeGetMax(skillID, identity->JobID) ||
-        identity->TempSkillLevelsByID.find(skillID) != identity->TempSkillLevelsByID.end() || PCCheckSkillIsGranted(*identity, skillID) == true)
+        identity->TempSkillLevelsByID.find(skillID) != identity->TempSkillLevelsByID.end() || PCCheckSkillIsGranted(*identity, skillID) == true ||
+        IsSkillPermGranted(*identity, skillID) == true) // Only a SKILL_FLAG_PERMANENT skill is raised with points
         return false;
     identity->SkillLevelsByID[skillID] = level + 1;
     identity->SkillPoints--;
@@ -909,6 +910,11 @@ void ROWOWMod::PCAddTempSkill(ROWOWIdentity& identity, uint16 skillID, int32 lev
 bool ROWOWMod::PCCheckSkillIsGranted(ROWOWIdentity const& identity, uint16 skillID) const
 {
     return identity.ItemSkillLevelsByID.find(skillID) != identity.ItemSkillLevelsByID.end();
+}
+
+bool ROWOWMod::IsSkillPermGranted(ROWOWIdentity const& identity, uint16 skillID) const
+{
+    return GetIdentityVariable(identity, fmt::format(GrantedSkillVariableFormat, skillID)) != 0;
 }
 
 void ROWOWMod::PCRefreshItemSkills(Player* player, ROWOWIdentity& identity)
@@ -1008,7 +1014,9 @@ int32 ROWOWMod::PCResetSkill(Player* player)
 {
     // pc_resetskill with flag 1 (a reset, not a count): the Peco and falcon go with Riding and Falconry Mastery, then every skill learned with
     // points is forgotten and its points come back.  Kept: wedding and spirit skills, Basic Skill past Novice, granted skills, and quest skills
-    // (quest_skill_learn and quest_skill_reset are off); Play Dead past Novice is forgotten without points
+    // (unless quest_skill_reset takes them without points, or quest_skill_learn resets them as any skill); Play Dead past Novice is forgotten
+    // without points.  The points come back as one pool: skillup_limit then opens the jobs' trees again in order as they're spent
+    // (PCCalcSkillTreeNormalizeJob), the first job's after the Novice's 9 and a second job's after the first job's
     ROWOWIdentity* identity = GetIdentity(player);
     if (identity->Exists == false)
         return 0;
@@ -1028,8 +1036,7 @@ int32 ROWOWMod::PCResetSkill(Player* player)
     {
         uint16 skillID = levelIter->first;
         ROWOWSkill const* skill = GetSkill(skillID);
-        if (skill == nullptr || skill->IsWedding == true || skill->IsSpirit == true || skill->IsQuest == true ||
-            (skillID == ROWOW_SKILL_NV_BASIC && isNovice == false))
+        if (skill == nullptr || skill->IsWedding == true || skill->IsSpirit == true)
         {
             ++levelIter;
             continue;
@@ -1037,6 +1044,20 @@ int32 ROWOWMod::PCResetSkill(Player* player)
         if (skillID == ROWOW_SKILL_NV_TRICKDEAD && isNovice == false)
         {
             levelIter = identity->SkillLevelsByID.erase(levelIter);
+            continue;
+        }
+        if ((skillID == ROWOW_SKILL_NV_BASIC && isNovice == false) || IsSkillPermGranted(*identity, skillID) == true)
+        {
+            ++levelIter;
+            continue;
+        }
+        if (skill->IsQuest == true && BattleConfig.QuestSkillLearn == 0)
+        {
+            // Only handle quest skills in a special way when you can't learn them manually
+            if (BattleConfig.QuestSkillReset != 0)
+                levelIter = identity->SkillLevelsByID.erase(levelIter);
+            else
+                ++levelIter;
             continue;
         }
         skillPoint += levelIter->second;
