@@ -87,6 +87,7 @@ namespace
         uint8 DestinationBag = NULL_BAG;
         uint8 DestinationSlot = NULL_SLOT; // None for a destroy, an equip slot found by the core, a bank place, or anywhere in a bag
         bool HasCarriedDestination = true;
+        bool HasRagnarokTabDestination = false; // Somewhere in the bank's Ragnarok tab the core finds
     };
 
     bool ReadItemMove(Player* player, WorldPacket const& packet, ROWOWItemMove& move)
@@ -137,9 +138,20 @@ namespace
                 packetCopy >> move.SourceBag >> move.SourceSlot;
                 return true;
             case CMSG_AUTOBANK_ITEM:
-            case CMSG_AUTOSTORE_BANK_ITEM:
+            {
+                // Into the bank tab its byte names (none for the character's own bank), as HandleAutoBankItemOpcode reads it
                 packetCopy >> move.SourceBag >> move.SourceSlot;
+                uint8 accountBank = 0;
+                if (packetCopy.rpos() < packetCopy.size())
+                    packetCopy >> accountBank;
                 move.HasCarriedDestination = false;
+                move.HasRagnarokTabDestination = accountBank == WORLD_BANK_RAGNAROK + 1;
+                return true;
+            }
+            case CMSG_AUTOSTORE_BANK_ITEM:
+                // From the bank into the bags, or from the bags into the character's own bank
+                packetCopy >> move.SourceBag >> move.SourceSlot;
+                move.HasCarriedDestination = Player::IsBankPos(move.SourceBag, move.SourceSlot);
                 return true;
             default:
                 return false;
@@ -173,8 +185,10 @@ namespace
     }
 
     // An item move with the form's carried set on the character: the Adventurer's Bags stay in the bag slots (IsStartBagMoveRefused), and on the
-    // Ragnarok page (out of the form) nothing moves between the set and the character's own things (its worn gear, keyring and bank).  True when it's
-    // refused, which the client is told so it lets go of the item
+    // Ragnarok page (out of the form) things move only within the set and between it and the bank's Ragnarok tab, the account's RO storage that every
+    // identity shares (Nathan 2026-11-09): nothing between the set and the character's own things (its worn gear, keyring, bank and Account tab).  The
+    // tab's own rule (StorageCanAddItem) keeps anything but RO items out of it, so only RO items cross.  True when it's refused, which the client is told
+    // so it lets go of the item
     bool IsItemMoveRefused(Player* player, WorldPacket const& packet)
     {
         ROWOWItemMove move;
@@ -182,11 +196,16 @@ namespace
             return false;
         uint8 sourceBag = move.SourceBag;
         uint8 sourceSlot = move.SourceSlot;
+        bool isSourceAllowed = IsCarriedSetPosition(sourceBag, sourceSlot) == true || ROWOW->StorageIsRagnarokTabPosition(player, sourceBag, sourceSlot) == true;
+        bool isDestinationAllowed = move.HasCarriedDestination == true || move.HasRagnarokTabDestination == true ||
+            (move.DestinationBag != NULL_BAG && ROWOW->StorageIsRagnarokTabPosition(player, move.DestinationBag, move.DestinationSlot) == true);
+        bool isBankMove = Player::IsBankPos(sourceBag, sourceSlot) == true || (move.DestinationBag != NULL_BAG && Player::IsBankPos(move.DestinationBag, move.DestinationSlot) == true) ||
+            packet.GetOpcode() == CMSG_AUTOBANK_ITEM || packet.GetOpcode() == CMSG_AUTOSTORE_BANK_ITEM;
         char const* refusal = nullptr;
         if (ROWOW->IsStartBagMoveRefused(player, sourceBag, sourceSlot, move.DestinationBag, move.DestinationSlot) == true)
             refusal = "The Adventurer's Bags can't be taken off.";
-        else if (ROWOW->IsInROForm(player) == false && (IsCarriedSetPosition(sourceBag, sourceSlot) == false || move.HasCarriedDestination == false))
-            refusal = "Only your Ragnarok Online character's things move here.";
+        else if (ROWOW->IsInROForm(player) == false && (isSourceAllowed == false || isDestinationAllowed == false))
+            refusal = isBankMove == true ? "Your Ragnarok Online character's bags only reach the bank's Ragnarok tab." : "Only your Ragnarok Online character's things move here.";
         else if (ROWOW->IsInROForm(player) == false && packet.GetOpcode() == CMSG_DESTROYITEM && player->GetItemByPos(sourceBag, sourceSlot) != nullptr &&
             ROWOW->GetIdentityEquipPosition(*ROWOW->GetIdentity(player), player->GetItemByPos(sourceBag, sourceSlot)->GetGUID().GetCounter()) != 0)
             refusal = "Take it off before destroying it."; // The form's own check is CanPacketReceive's, after this
@@ -198,14 +217,22 @@ namespace
         return true;
     }
 
-    // On the Ragnarok page (the form's carried set on the character, out of the form), what the character's own things are for: a vendor, the bank or
-    // mail, a trade, loot, a quest, casting or using an item, fighting.  These put the character's own set back first, then go on as they would
-    bool IsViewingEndedBy(uint16 opcode)
+    // On the Ragnarok page (the form's carried set on the character, out of the form), what the character's own things are for: a vendor, the mail, a
+    // trade, loot, a quest, casting or using an item, fighting.  These put the character's own set back first, then go on as they would.  A banker
+    // doesn't: the set stays out beside the bank, for its Ragnarok tab (IsItemMoveRefused keeps it to that tab).  What else a banker's gossip offers
+    // ends it by its own packet (a sale, a purchase, a trainer's spell)
+    bool IsViewingEndedBy(Player* player, WorldPacket const& packet)
     {
-        switch (opcode)
+        switch (packet.GetOpcode())
         {
             case CMSG_GOSSIP_HELLO:
-            case CMSG_BANKER_ACTIVATE:
+            {
+                WorldPacket packetCopy(packet);
+                ObjectGuid npcGUID;
+                packetCopy >> npcGUID;
+                Creature* npc = ObjectAccessor::GetCreature(*player, npcGUID);
+                return npc == nullptr || npc->HasNpcFlag(UNIT_NPC_FLAG_BANKER) == false;
+            }
             case CMSG_LIST_INVENTORY:
             case CMSG_SELL_ITEM:
             case CMSG_BUY_ITEM:
@@ -634,7 +661,7 @@ public:
         // own things are for puts them back on it first
         if (ROWOW->IsROSetCarried(player) == true && IsItemMoveRefused(player, packet) == true)
             return false;
-        if (ROWOW->IsInROForm(player) == false && IsViewingEndedBy(packet.GetOpcode()) == true)
+        if (ROWOW->IsInROForm(player) == false && IsViewingEndedBy(player, packet) == true)
             ROWOW->StopViewingROSet(player);
         if (ROWOW->IsInROForm(player) == false)
         {

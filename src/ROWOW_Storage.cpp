@@ -194,6 +194,19 @@ bool ROWOWMod::IsStorageBagMoveRefused(Player* player, uint8 sourceBag, uint8 so
     return isFixedBagAt(sourceBag, sourceSlot) == true || isFixedBagAt(destinationBag, destinationSlot) == true;
 }
 
+bool ROWOWMod::StorageIsRagnarokTabPosition(Player* player, uint8 bag, uint8 /*slot*/) const
+{
+    // The Ragnarok tab's item places: a slot of one of its two vaults, or of a bag in its bag slots while its page is in them (the bag slots themselves
+    // aren't, nor is anything of another tab).  The core finds whether the bank is in reach and whether the slot is there
+    if (Player::IsWorldBankEnabled(WORLD_BANK_RAGNAROK) == false)
+        return false;
+    if (Player::IsAccountBankVaultSlot(bag) == true)
+        return Player::GetVaultSlotWorld(bag) == WORLD_BANK_RAGNAROK;
+    if (bag < ACCOUNT_BANK_BAG_SLOT_START || bag >= ACCOUNT_BANK_BAG_SLOT_END || player->GetBankBagPage() != WORLD_BANK_RAGNAROK)
+        return false;
+    return true;
+}
+
 // Kafra storage's hooks: the guild bank windows asked for, the end of storage on leaving a map, what the bank tabs take, and no zeny in or
 // out of the guild bank
 class ROWOW_StorageWorldScript : public WorldScript
