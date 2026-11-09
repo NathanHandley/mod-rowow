@@ -19,8 +19,10 @@
 //  For more information, see LICENCE in the main folder
 
 #include "Chat.h"
+#include "DatabaseEnv.h"
 #include "Guild.h"
 #include "Item.h"
+#include "Log.h"
 #include "ObjectAccessor.h"
 #include "Player.h"
 #include "ScriptMgr.h"
@@ -33,7 +35,7 @@ using namespace std;
 // Kafra storage (R8.2, R12): RO's storage is account wide, and so is the Ragnarok tab of the bank window, which a Kafra opens (plan section 8
 // items 7 and 14, RONotes\world-bank-tabs.md).  The tab takes RO items only, in its item slots and in general bags of any game in its bag slots,
 // the core holds them (account_bank_item, world 1), its corner shows zeny, and any banker in any world reaches it.  Its bag slots are bought with
-// gold, out of the form, at a stock banker.  The Character and Account tabs are beside it, and the guild's bank when the guild has bought a tab, in the stock guild
+// gold, out of the form, at a stock banker, and each comes with an Adventurer's Bag that can't leave it (StorageFillBagSlots).  The Character and Account tabs are beside it, and the guild's bank when the guild has bought a tab, in the stock guild
 // bank window.  Neither needs a banker in reach: the player is its own banker, as AzerothCore's bank command (.character check bank) does for the
 // bank and the core's SendShowGuildBank (MergedWorlds) does for the guild bank.  The client opens the guild bank window on a list it didn't ask for
 // on an RO map (MergedWorldClient ro-guild-storage).  Zeny never moves into or out of the guild bank (plan section 8 item 5)
@@ -132,6 +134,66 @@ void ROWOWMod::OpenPendingGuildStorages()
     }
 }
 
+void ROWOWMod::StorageFillBagSlots(Player* player)
+{
+    // The Ragnarok tab's bag slots each hold an Adventurer's Bag, which stays there (Nathan 2026-11-09): a bought slot that's empty gets one, at login
+    // (slots bought before this, a bag taken out), and while the tab's bags are in the slots (a slot bought there, a bag of another game taken out of
+    // one).  A general bag of another game that was put in a slot before stays until it's taken out.  The account's bags, so they're written at once,
+    // as the slot's purchase is.  The player's own thread, with only its own items
+    if (StartBagItemTemplateID == 0 || player->IsAccountBankLoaded() == false || Player::IsWorldBankEnabled(WORLD_BANK_RAGNAROK) == false)
+        return;
+    uint8 slotCount = std::min<uint8>(player->GetAccountBankBagSlotCount(WORLD_BANK_RAGNAROK), MAX_ACCOUNT_BANK_BAG_SLOT_COUNT);
+    if (slotCount == 0)
+        return;
+    uint8 shownPage = player->GetBankBagPage();
+    if (shownPage != WORLD_BANK_RAGNAROK)
+        player->SetBankBagPage(WORLD_BANK_RAGNAROK);
+    uint32 bagsGiven = 0;
+    for (uint8 slot = ACCOUNT_BANK_BAG_SLOT_START; slot < ACCOUNT_BANK_BAG_SLOT_START + slotCount; slot++)
+    {
+        if (player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot) != nullptr)
+            continue;
+        Item* bag = Item::CreateItem(StartBagItemTemplateID, 1, player);
+        if (bag == nullptr)
+            break;
+        ItemPosCountVec bagDestination;
+        bagDestination.push_back(ItemPosCount((uint16(INVENTORY_SLOT_BAG_0) << 8) | slot, 1));
+        player->StoreItem(bagDestination, bag, true);
+        bagsGiven++;
+    }
+    if (shownPage != WORLD_BANK_RAGNAROK)
+        player->SetBankBagPage(shownPage);
+    if (bagsGiven == 0)
+        return;
+    CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
+    player->SaveInventoryAndGoldToDB(trans);
+    CharacterDatabase.CommitTransaction(trans);
+    LOG_INFO("module.ROWOW", "Storage of account {}: {} Adventurer's Bags put in the Ragnarok tab's bag slots ({} bought), by {}", player->GetSession()->GetAccountId(),
+        bagsGiven, slotCount, player->GetName());
+}
+
+bool ROWOWMod::StorageIsFixedBag(Player* player, Item const* item) const
+{
+    // The bag slots hold the Ragnarok tab's bags only while its page is in them
+    if (item == nullptr || StartBagItemTemplateID == 0 || item->GetEntry() != StartBagItemTemplateID || player->GetBankBagPage() != WORLD_BANK_RAGNAROK)
+        return false;
+    if (item->GetBagSlot() != INVENTORY_SLOT_BAG_0 || item->GetSlot() < ACCOUNT_BANK_BAG_SLOT_START || item->GetSlot() >= ACCOUNT_BANK_BAG_SLOT_END)
+        return false;
+    return player->GetItemByPos(INVENTORY_SLOT_BAG_0, item->GetSlot()) == item;
+}
+
+bool ROWOWMod::IsStorageBagMoveRefused(Player* player, uint8 sourceBag, uint8 sourceSlot, uint8 destinationBag, uint8 destinationSlot) const
+{
+    // A move, a swap, a destroy or a store elsewhere that would take the Ragnarok tab's Adventurer's Bag out of its slot, or put something in its place.
+    // What goes in or out of the bag itself names the bag as its bag, not as a slot, so it isn't refused here
+    auto isFixedBagAt = [player, this](uint8 bag, uint8 slot)
+    {
+        return bag == INVENTORY_SLOT_BAG_0 && slot >= ACCOUNT_BANK_BAG_SLOT_START && slot < ACCOUNT_BANK_BAG_SLOT_END &&
+            StorageIsFixedBag(player, player->GetItemByPos(bag, slot)) == true;
+    };
+    return isFixedBagAt(sourceBag, sourceSlot) == true || isFixedBagAt(destinationBag, destinationSlot) == true;
+}
+
 // Kafra storage's hooks: the guild bank windows asked for, the end of storage on leaving a map, what the bank tabs take, and no zeny in or
 // out of the guild bank
 class ROWOW_StorageWorldScript : public WorldScript
@@ -150,14 +212,27 @@ public:
 class ROWOW_StoragePlayerScript : public PlayerScript
 {
 public:
-    ROWOW_StoragePlayerScript() : PlayerScript("ROWOW_StoragePlayerScript", { PLAYERHOOK_ON_UPDATE, PLAYERHOOK_ON_MAP_CHANGED, PLAYERHOOK_CAN_BANK_ITEM, PLAYERHOOK_CAN_BUY_BANK_SLOT,
-        PLAYERHOOK_ON_BANK_CURRENCY_TEXT, PLAYERHOOK_CAN_GUILD_BANK_ITEM }) {}
+    ROWOW_StoragePlayerScript() : PlayerScript("ROWOW_StoragePlayerScript", { PLAYERHOOK_ON_LOGIN, PLAYERHOOK_ON_UPDATE, PLAYERHOOK_ON_MAP_CHANGED, PLAYERHOOK_CAN_BANK_ITEM,
+        PLAYERHOOK_CAN_BUY_BANK_SLOT, PLAYERHOOK_ON_BANK_CURRENCY_TEXT, PLAYERHOOK_CAN_GUILD_BANK_ITEM }) {}
+
+    void OnPlayerLogin(Player* player) override
+    {
+        // The account's Ragnarok tab, loaded with the character: its bought bag slots each get an Adventurer's Bag they lack
+        if (ROWOW->IsEnabled == false)
+            return;
+        ROWOW->StorageFillBagSlots(player);
+    }
 
     void OnPlayerUpdate(Player* player, uint32 /*p_time*/) override
     {
+        if (ROWOW->IsEnabled == false)
+            return;
+        // While the Ragnarok tab's bags are in the slots: a slot bought there, or a slot a bag of another game was taken out of, gets its bag
+        if (player->GetBankBagPage() == WORLD_BANK_RAGNAROK)
+            ROWOW->StorageFillBagSlots(player);
         // Zeny changes with the tab showing, a Kafra's fee or a shop's sale, and every path ends in the money or the identity, so this watches them.  The
         // player's own map thread, and it only writes to its own session and identity
-        if (ROWOW->IsEnabled == false || player->GetBankTabShowing() != WORLD_BANK_RAGNAROK + 1)
+        if (player->GetBankTabShowing() != WORLD_BANK_RAGNAROK + 1)
             return;
         if (ROWOW->StorageGetZeny(player) != ROWOW->GetIdentity(player)->StorageZenyShown)
             player->SendBankCurrencyText(WORLD_BANK_RAGNAROK);

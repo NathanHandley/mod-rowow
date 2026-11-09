@@ -3418,6 +3418,9 @@ public:
     void StorageClose(Player* player); // Leaving the map: the storage ends (storage_storageclose, storage_guild_storageclose)
     void OpenPendingGuildStorages(); // The world update, with the maps idle: the guild bank windows asked for
     std::set<ObjectGuid> PendingGuildStorageOpens; // Under NpcStateMutex
+    void StorageFillBagSlots(Player* player); // Each bought bag slot of the Ragnarok tab that's empty gets an Adventurer's Bag
+    bool StorageIsFixedBag(Player* player, Item const* item) const; // An Adventurer's Bag in a bag slot of the Ragnarok tab, which stays there
+    bool IsStorageBagMoveRefused(Player* player, uint8 sourceBag, uint8 sourceSlot, uint8 destinationBag, uint8 destinationSlot) const; // Either place holds one
     // Rooms (ROWOW_WaitingRoom.cpp, R8.3 and R11): rAthena's chat.cpp, the rooms NPCs own (the job tests' queues) and those players make.  The
     // rooms are under NpcStateMutex; a player's join and leave run in its thread or the world update, the rooms' events in the world update
     void RegisterWaitingRoomCommands(); // From RegisterNpcScriptCommands

@@ -78,73 +78,114 @@ namespace
         return bag >= INVENTORY_SLOT_BAG_START && bag < INVENTORY_SLOT_BAG_END;
     }
 
-    // An item move with the form's carried set on the character: the Adventurer's Bags stay in the bag slots (IsStartBagMoveRefused), and on the
-    // Ragnarok page (out of the form) nothing moves between the set and the character's own things (its worn gear, keyring and bank).  True when it's
-    // refused, which the client is told so it lets go of the item.  A short packet throws, as the handler's own read would
-    bool IsItemMoveRefused(Player* player, WorldPacket const& packet)
+    // An item move's two places, read from its packet as the handler reads them.  False for a packet that moves no item, or one whose item is gone.  A
+    // short packet throws, as the handler's own read would
+    struct ROWOWItemMove
     {
-        uint8 sourceBag = 0;
-        uint8 sourceSlot = 0;
-        uint8 destinationBag = NULL_BAG;
-        uint8 destinationSlot = NULL_SLOT; // None for a destroy, an equip slot found by the core, or a bank place
-        bool hasCarriedDestination = true;
+        uint8 SourceBag = 0;
+        uint8 SourceSlot = 0;
+        uint8 DestinationBag = NULL_BAG;
+        uint8 DestinationSlot = NULL_SLOT; // None for a destroy, an equip slot found by the core, a bank place, or anywhere in a bag
+        bool HasCarriedDestination = true;
+    };
+
+    bool ReadItemMove(Player* player, WorldPacket const& packet, ROWOWItemMove& move)
+    {
         WorldPacket packetCopy(packet);
         switch (packet.GetOpcode())
         {
             case CMSG_SWAP_INV_ITEM:
-                sourceBag = INVENTORY_SLOT_BAG_0;
-                destinationBag = INVENTORY_SLOT_BAG_0;
-                packetCopy >> destinationSlot >> sourceSlot;
-                hasCarriedDestination = IsCarriedSetPosition(destinationBag, destinationSlot);
-                break;
+                move.SourceBag = INVENTORY_SLOT_BAG_0;
+                move.DestinationBag = INVENTORY_SLOT_BAG_0;
+                packetCopy >> move.DestinationSlot >> move.SourceSlot;
+                move.HasCarriedDestination = IsCarriedSetPosition(move.DestinationBag, move.DestinationSlot);
+                return true;
             case CMSG_SWAP_ITEM:
-                packetCopy >> destinationBag >> destinationSlot >> sourceBag >> sourceSlot;
-                hasCarriedDestination = IsCarriedSetPosition(destinationBag, destinationSlot);
-                break;
+                packetCopy >> move.DestinationBag >> move.DestinationSlot >> move.SourceBag >> move.SourceSlot;
+                move.HasCarriedDestination = IsCarriedSetPosition(move.DestinationBag, move.DestinationSlot);
+                return true;
             case CMSG_SPLIT_ITEM:
-                packetCopy >> sourceBag >> sourceSlot >> destinationBag >> destinationSlot;
-                hasCarriedDestination = IsCarriedSetPosition(destinationBag, destinationSlot);
-                break;
+                packetCopy >> move.SourceBag >> move.SourceSlot >> move.DestinationBag >> move.DestinationSlot;
+                move.HasCarriedDestination = IsCarriedSetPosition(move.DestinationBag, move.DestinationSlot);
+                return true;
             case CMSG_AUTOSTORE_BAG_ITEM:
-                packetCopy >> sourceBag >> sourceSlot >> destinationBag;
-                hasCarriedDestination = IsCarriedSetPosition(destinationBag, NULL_SLOT);
-                break;
+                packetCopy >> move.SourceBag >> move.SourceSlot >> move.DestinationBag;
+                move.HasCarriedDestination = IsCarriedSetPosition(move.DestinationBag, NULL_SLOT);
+                return true;
             case CMSG_AUTOEQUIP_ITEM:
             {
                 // Only a bag goes from the set into the set's bag slots; anything else would go on the character's worn gear
-                packetCopy >> sourceBag >> sourceSlot;
-                Item* item = player->GetItemByPos(sourceBag, sourceSlot);
-                hasCarriedDestination = item != nullptr && item->ToBag() != nullptr;
-                break;
+                packetCopy >> move.SourceBag >> move.SourceSlot;
+                Item* item = player->GetItemByPos(move.SourceBag, move.SourceSlot);
+                move.HasCarriedDestination = item != nullptr && item->ToBag() != nullptr;
+                return true;
             }
             case CMSG_AUTOEQUIP_ITEM_SLOT:
             {
                 ObjectGuid itemGUID;
-                packetCopy >> itemGUID >> destinationSlot;
+                packetCopy >> itemGUID >> move.DestinationSlot;
                 Item* item = player->GetItemByGuid(itemGUID);
                 if (item == nullptr)
                     return false;
-                sourceBag = item->GetBagSlot();
-                sourceSlot = item->GetSlot();
-                destinationBag = INVENTORY_SLOT_BAG_0;
-                hasCarriedDestination = IsCarriedSetPosition(destinationBag, destinationSlot);
-                break;
+                move.SourceBag = item->GetBagSlot();
+                move.SourceSlot = item->GetSlot();
+                move.DestinationBag = INVENTORY_SLOT_BAG_0;
+                move.HasCarriedDestination = IsCarriedSetPosition(move.DestinationBag, move.DestinationSlot);
+                return true;
             }
             case CMSG_DESTROYITEM:
-                packetCopy >> sourceBag >> sourceSlot;
-                break;
+                packetCopy >> move.SourceBag >> move.SourceSlot;
+                return true;
             case CMSG_AUTOBANK_ITEM:
             case CMSG_AUTOSTORE_BANK_ITEM:
-                packetCopy >> sourceBag >> sourceSlot;
-                hasCarriedDestination = false;
-                break;
+                packetCopy >> move.SourceBag >> move.SourceSlot;
+                move.HasCarriedDestination = false;
+                return true;
             default:
                 return false;
         }
+    }
+
+    // Any character, in the form or out of it: the Ragnarok bank tab's Adventurer's Bags stay in its bag slots (Nathan 2026-11-09).  No move, swap,
+    // destroy or sale takes one out or puts anything in its place (IsStorageBagMoveRefused).  The account bank already turns away a bound bag, and a
+    // trade, the mail and the auction house a soulbound one.  True when it's refused, which the client is told so it lets go of the item.  The bank
+    // window doesn't send these (BankFrame.lua), so only a stale or forged packet is answered here
+    bool IsStorageBagMoveRefused(Player* player, WorldPacket const& packet)
+    {
+        if (packet.GetOpcode() == CMSG_SELL_ITEM)
+        {
+            WorldPacket packetCopy(packet);
+            ObjectGuid vendorGUID;
+            ObjectGuid itemGUID;
+            packetCopy >> vendorGUID >> itemGUID;
+            if (ROWOW->StorageIsFixedBag(player, player->GetItemByGuid(itemGUID)) == false)
+                return false;
+            player->SendSellError(SELL_ERR_CANT_SELL_ITEM, nullptr, itemGUID, 0);
+            return true;
+        }
+        ROWOWItemMove move;
+        if (ReadItemMove(player, packet, move) == false ||
+            ROWOW->IsStorageBagMoveRefused(player, move.SourceBag, move.SourceSlot, move.DestinationBag, move.DestinationSlot) == false)
+            return false;
+        ChatHandler(player->GetSession()).SendNotification("The Adventurer's Bags stay in the Ragnarok tab's bag slots.");
+        player->SendEquipError(EQUIP_ERR_NONE, player->GetItemByPos(move.SourceBag, move.SourceSlot), nullptr);
+        return true;
+    }
+
+    // An item move with the form's carried set on the character: the Adventurer's Bags stay in the bag slots (IsStartBagMoveRefused), and on the
+    // Ragnarok page (out of the form) nothing moves between the set and the character's own things (its worn gear, keyring and bank).  True when it's
+    // refused, which the client is told so it lets go of the item
+    bool IsItemMoveRefused(Player* player, WorldPacket const& packet)
+    {
+        ROWOWItemMove move;
+        if (ReadItemMove(player, packet, move) == false)
+            return false;
+        uint8 sourceBag = move.SourceBag;
+        uint8 sourceSlot = move.SourceSlot;
         char const* refusal = nullptr;
-        if (ROWOW->IsStartBagMoveRefused(player, sourceBag, sourceSlot, destinationBag, destinationSlot) == true)
+        if (ROWOW->IsStartBagMoveRefused(player, sourceBag, sourceSlot, move.DestinationBag, move.DestinationSlot) == true)
             refusal = "The Adventurer's Bags can't be taken off.";
-        else if (ROWOW->IsInROForm(player) == false && (IsCarriedSetPosition(sourceBag, sourceSlot) == false || hasCarriedDestination == false))
+        else if (ROWOW->IsInROForm(player) == false && (IsCarriedSetPosition(sourceBag, sourceSlot) == false || move.HasCarriedDestination == false))
             refusal = "Only your Ragnarok Online character's things move here.";
         else if (ROWOW->IsInROForm(player) == false && packet.GetOpcode() == CMSG_DESTROYITEM && player->GetItemByPos(sourceBag, sourceSlot) != nullptr &&
             ROWOW->GetIdentityEquipPosition(*ROWOW->GetIdentity(player), player->GetItemByPos(sourceBag, sourceSlot)->GetGUID().GetCounter()) != 0)
@@ -586,6 +627,9 @@ public:
         Player* player = session->GetPlayer();
         if (player == nullptr)
             return true;
+        // The Ragnarok bank tab's Adventurer's Bags, for every character
+        if (IsStorageBagMoveRefused(player, packet) == true)
+            return false;
         // The form's carried set (in the form, or out of it on the Ragnarok page): which item moves it takes.  On the page, anything else the character's
         // own things are for puts them back on it first
         if (ROWOW->IsROSetCarried(player) == true && IsItemMoveRefused(player, packet) == true)
