@@ -254,11 +254,17 @@ uint32 ROWOWMod::GetWorldIdentityRagnarokLookSpellID(Player* player)
 
 bool ROWOWMod::HasLearnedPecoRiding(Player* player)
 {
-    // "Has learned Peco riding" (Nathan 2026-11-10): the identity of the save slot in use has learned Riding (KN_RIDING, the one skill a Peco is
-    // mounted by: PCSetRiding; it is on the Knight's and the Crusader's trees and their transcendent and baby jobs').  Only that slot counts, also
-    // when the job sprite shown is a job picked from the history or another slot's: the other slots' skills aren't looked at
+    // "Has learned Peco riding" (Nathan 2026-11-10, second ruling): the identity of any of the character's save slots has learned Riding (KN_RIDING,
+    // the one skill a Peco is mounted by: PCSetRiding; it is on the Knight's and the Crusader's trees and their transcendent and baby jobs'),
+    // whatever job sprite is shown.  The slot in use is asked for the skill itself, so learning or losing it counts at once; a slot put away by
+    // what it had when it was last in use (ROWOWIdentitySlot::HasRiding: read with the slots, set when the slot is changed, cleared by a reset)
     ROWOWIdentity* identity = GetIdentity(player);
-    return identity->Exists == true && PCCheckSkill(*identity, ROWOW_SKILL_KN_RIDING) > 0;
+    if (identity->Exists == true && PCCheckSkill(*identity, ROWOW_SKILL_KN_RIDING) > 0)
+        return true;
+    for (uint8 slotIndex = 0; slotIndex < ROWOW_IDENTITY_SLOT_COUNT; slotIndex++)
+        if (slotIndex + 1 != identity->Slot && identity->Slots[slotIndex].Exists == true && identity->Slots[slotIndex].HasRiding == true)
+            return true;
+    return false;
 }
 
 uint32 ROWOWMod::GetMountAuraSpellID(Player const* player) const
@@ -270,7 +276,7 @@ uint32 ROWOWMod::GetMountAuraSpellID(Player const* player) const
 bool ROWOWMod::IsPecoShownForMount(Player* player, ROWOWJob const* shownJob)
 {
     // Out of Midgard, the Ragnarok identity on a WoW ground mount: a job sprite with a Peco body ("<job key>_riding": the Knight, Crusader, Lord
-    // Knight and Paladin, in both genders; a baby job shows its normal job's sprite), of a character whose save slot in use has learned Riding
+    // Knight and Paladin, in both genders; a baby job shows its normal job's sprite), of a character one of whose save slots has learned Riding
     // (HasLearnedPecoRiding), is shown riding its Peco, and the mount's own model isn't shown (RefreshWorldIdentityMount).  The character is on
     // its mount all the same: its speed, its aura, every rule of being mounted.
     // - Ground or flying is the mount's spell, not where the character is: a mount whose spell gives a flight speed is a flying mount on the

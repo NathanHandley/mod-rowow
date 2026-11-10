@@ -2011,6 +2011,7 @@ struct ROWOWIdentitySlot
     uint16 JobID = 0;
     uint32 JobLevel = 0;
     uint32 BaseLevel = 0; // (The Midgard achievements count every slot's: GetHighestBaseLevel)
+    bool HasRiding = false; // It has learned Riding (KN_RIDING), as of when it was last the slot in use; the slot in use reads its own skills (HasLearnedPecoRiding)
 };
 
 // The Midgard achievements (Nathan 2026-11-09): earned on the WoW character by the Base level of any of its identities (the converter's Ragnarok
@@ -2554,7 +2555,7 @@ public:
     uint8 GetWorldIdentity(Player* player, uint8 world); // The identity shown in the world: the one picked while it may be shown, else the world's own
     bool SetWorldIdentity(Player* player, uint8 world, uint8 worldIdentity, std::string& errorOut); // .identity
     uint32 GetWorldIdentityRagnarokLookSpellID(Player* player); // The Ragnarok identity's body: the RO illusion spell of the job sprite shown
-    bool HasLearnedPecoRiding(Player* player); // The identity of the save slot in use has learned Riding (whatever job sprite is shown)
+    bool HasLearnedPecoRiding(Player* player); // The identity of any of the save slots has learned Riding (whatever job sprite is shown)
     bool IsPecoShownForMount(Player* player, ROWOWJob const* shownJob); // Out of Midgard, on a ground mount: the job sprite shown rides its Peco in the mount's place
     uint32 GetMountAuraSpellID(Player const* player) const; // The spell of the mount aura the character is on (0 on none, and on a taxi)
     void RefreshWorldIdentityMount(Player* player, bool isPecoShown); // The WoW mount's model hidden while the Peco is shown in its place, and back after

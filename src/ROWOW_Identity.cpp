@@ -1211,6 +1211,19 @@ void ROWOWMod::LoadIdentitySlots(Player* player, ROWOWIdentity& identity)
             }
         } while (result->NextRow());
     }
+    // Which of them have learned Riding (HasLearnedPecoRiding: a Peco rider's sprite on a WoW ground mount, whichever slot is in use).  A row counts
+    // only for a job that has Riding on its tree, as the skill itself does (PCCheckSkill)
+    if (QueryResult result = CharacterDatabase.Query("SELECT `guid` FROM `mod_rowow_identity_skill` WHERE `guid` IN ({}) AND `skill_id` = {} AND `level` > 0", identityIDs,
+        ROWOW_SKILL_KN_RIDING))
+    {
+        do
+        {
+            ObjectGuid::LowType identityID = result->Fetch()[0].Get<uint32>();
+            for (ROWOWIdentitySlot& identitySlot : identity.Slots)
+                if (identitySlot.IdentityID == identityID && identitySlot.Exists == true && GetSkillTreeEntry(identitySlot.JobID, ROWOW_SKILL_KN_RIDING) != nullptr)
+                    identitySlot.HasRiding = true;
+        } while (result->NextRow());
+    }
     LoadIdentityLook(player, identity);
 }
 
@@ -2286,6 +2299,7 @@ bool ROWOWMod::SelectIdentitySlot(Player* player, uint8 slot)
     oldIdentitySlot.JobID = identity->JobID;
     oldIdentitySlot.JobLevel = identity->JobLevel;
     oldIdentitySlot.BaseLevel = identity->Exists == true ? identity->BaseLevel : 0;
+    oldIdentitySlot.HasRiding = identity->Exists == true && PCCheckSkill(*identity, ROWOW_SKILL_KN_RIDING) > 0;
     ROWOWIdentitySlot& newIdentitySlot = identity->Slots[slot - 1];
     if (newIdentitySlot.IdentityID == 0)
         newIdentitySlot.IdentityID = slot == 1 ? guid : ++LastIdentityID;

@@ -3337,6 +3337,7 @@ public:
         int32 spriteJobID = oldIdentity->SpriteJobID;
         bool isPecoMountLookEnabled = oldIdentity->IsPecoMountLookEnabled;
         slots[slot - 1].Exists = false;
+        slots[slot - 1].HasRiding = false;
         player->CustomData.Erase("ROWOWIdentity");
         ROWOWIdentity* identity = player->CustomData.GetDefault<ROWOWIdentity>("ROWOWIdentity");
         identity->IsLoaded = true;
