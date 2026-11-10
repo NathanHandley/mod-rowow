@@ -73,8 +73,10 @@ void ROWOWMod::LoadIllusionData()
             illusion.SpellID = fields[0].Get<uint32>();
             illusion.FormCreatureTemplateID = fields[1].Get<uint32>();
             illusion.IsMale = fields[2].Get<uint8>() != 0;
+            std::string jobKey = fields[3].Get<std::string>();
+            illusion.IsRiding = jobKey.size() > 7 && jobKey.compare(jobKey.size() - 7, 7, "_riding") == 0;
             IllusionsBySpellID[illusion.SpellID] = illusion;
-            IllusionSpellIDsByJobKey[GetIllusionJobKey(fields[3].Get<std::string>(), illusion.IsMale)] = illusion.SpellID;
+            IllusionSpellIDsByJobKey[GetIllusionJobKey(jobKey, illusion.IsMale)] = illusion.SpellID;
         } while (result->NextRow());
     }
     if (QueryResult result = WorldDatabase.Query("SELECT `SpellID`, `WeaponTypeID`, `ShieldTypeID`, `DisplayID` FROM `mod_rowow_illusion_display`"))
@@ -356,6 +358,35 @@ void ROWOWMod::RefreshIllusionHeadgear(Player* player, ROWOWIllusion const* illu
             }
         }
     }
+    else if (illusion != nullptr && (IsWorldIdentityLookAura(player, illusion->SpellID) == true || GetWorldIdentityState(player)->LookSpellIDBeingAdded == illusion->SpellID))
+    {
+        // The Ragnarok identity shown out of the RO world (Nathan 2026-11-09): its Ragnarok Online character's headgear, as the form shows it.  Its
+        // items are put away with the form's carried set (or on the character while the Ragnarok page shows them)
+        ROWOWIdentity* identity = GetIdentity(player);
+        for (bool isCostume : { false, true })
+        {
+            for (auto const& itemGUIDByEquipPosition : identity->ItemGUIDsByEquipPosition)
+            {
+                uint32 headgearPositions = isCostume == true ? (ROWOW_EQUIP_POSITION_COSTUME_HEAD_TOP | ROWOW_EQUIP_POSITION_COSTUME_HEAD_MID | ROWOW_EQUIP_POSITION_COSTUME_HEAD_LOW)
+                    : (ROWOW_EQUIP_POSITION_HEAD_TOP | ROWOW_EQUIP_POSITION_HEAD_MID | ROWOW_EQUIP_POSITION_HEAD_LOW);
+                if ((itemGUIDByEquipPosition.first & headgearPositions) == 0)
+                    continue;
+                Item* item = player->GetItemByGuid(ObjectGuid::Create<HighGuid::Item>(itemGUIDByEquipPosition.second));
+                for (ROWOWStowedItem const& stowedItem : identity->StowedItems)
+                    if (item == nullptr && stowedItem.StowedItem != nullptr && stowedItem.StowedItem->GetGUID().GetCounter() == itemGUIDByEquipPosition.second)
+                        item = stowedItem.StowedItem;
+                if (item == nullptr)
+                    continue;
+                auto itemVisualIter = ItemVisualsByItemID.find(item->GetEntry());
+                if (itemVisualIter == ItemVisualsByItemID.end() || itemVisualIter->second.VisualType < ROWOW_ITEM_VISUAL_TYPE_HEADGEAR_TOP
+                    || itemVisualIter->second.VisualType > ROWOW_ITEM_VISUAL_TYPE_HEADGEAR_LOW)
+                    continue;
+                auto spellIter = HeadgearSpellIDsByKey.find(GetHeadgearKey(itemVisualIter->second.ViewID, itemVisualIter->second.VisualType, illusion->IsMale));
+                if (spellIter != HeadgearSpellIDsByKey.end())
+                    wantedSpellIDs[itemVisualIter->second.VisualType - ROWOW_ITEM_VISUAL_TYPE_HEADGEAR_TOP] = spellIter->second;
+            }
+        }
+    }
     else if (illusion != nullptr)
     {
         uint8 headgearSlots[3] = { EQUIPMENT_SLOT_HEAD, EQUIPMENT_SLOT_NECK, EQUIPMENT_SLOT_SHOULDERS };
@@ -556,7 +587,8 @@ void ROWOWMod::RefreshIllusionOptionLooks(Player* player, ROWOWIllusion const* i
                 linkSpellID = spellIter->second;
         }
         ROWOWIdentity const* identity = GetIdentity(player);
-        ROWOWStatusChangeEntry const* cartSCE = GetSCE(player, ROWOW_SC_PUSH_CART);
+        // On a WoW mount the cart isn't shown (it hangs from the body, which sits on the mount's back, so it would trail in the air)
+        ROWOWStatusChangeEntry const* cartSCE = player->IsMounted() == false ? GetSCE(player, ROWOW_SC_PUSH_CART) : nullptr;
         if (cartSCE != nullptr)
         {
             auto spellIter = OptionLookSpellIDsByKey.find(GetOptionLookKey(ROWOW_OPTION_LOOK_CART, GetCartLook(cartSCE->Val1, identity->BaseLevel)));
@@ -656,15 +688,40 @@ bool ROWOWMod::ClifEmotion(Unit* unit, int32 type)
 
 bool ROWOWMod::SetIdentityHair(Player* player, uint32 style, uint32 color)
 {
-    // Kept with the identity (saved with it once it exists), shown at once on the illusion, and told to the addon's options
+    // The character's one head, every save slot's (Nathan 2026-11-09): kept with the character (at once when it has an identity, else with its first
+    // one), shown at once on the illusion, and told to the addon's options
     if (HeadSpellIDsByKey.find(GetHeadKey(style, color, player->getGender() == GENDER_MALE)) == HeadSpellIDsByKey.end())
         return false;
     ROWOWIdentity* identity = GetIdentity(player);
+    // Written only when it changed (or was never the shared head): the hair windows send it for every look tried
+    bool isChanged = identity->HairStyle != uint8(style) || identity->HairColor != uint8(color) || identity->IsHairShared == false;
     identity->HairStyle = uint8(style);
     identity->HairColor = uint8(color);
+    if (isChanged == true)
+        SaveSharedHair(player);
     RefreshIllusionDisplay(player);
     SendHairToClient(player);
     return true;
+}
+
+void ROWOWMod::SaveSharedHair(Player* player)
+{
+    // The head changed (.ro hair, a stylist's setlook): the character's row, which every save slot reads its head from, and the slots' own copies.
+    // Written now, not with the identity's save: the slot in use may have no identity to save.  With no identity in any slot there's no row yet (the
+    // first identity's save makes it, with this head unless its creation picks another), and style 0 (rAthena's allows it) can't be told from no head,
+    // so it stays the slot's own
+    ROWOWIdentity* identity = GetIdentity(player);
+    if (HasAnyIdentity(*identity) == false || identity->HairStyle == 0)
+        return;
+    identity->IsHairShared = true;
+    CharacterDatabase.Execute("UPDATE `mod_rowow_identity_character` SET `hair_style` = {}, `hair_color` = {} WHERE `guid` = {}", identity->HairStyle, identity->HairColor,
+        identity->CharacterGUID);
+    std::string identityIDs;
+    for (ROWOWIdentitySlot const& identitySlot : identity->Slots)
+        if (identitySlot.IdentityID != 0)
+            identityIDs += fmt::format("{}{}", identityIDs.empty() == true ? "" : ",", identitySlot.IdentityID);
+    if (identityIDs.empty() == false)
+        CharacterDatabase.Execute("UPDATE `mod_rowow_identity` SET `hair_style` = {}, `hair_color` = {} WHERE `guid` IN ({})", identity->HairStyle, identity->HairColor, identityIDs);
 }
 
 void ROWOWMod::SendHairToClient(Player* player)

@@ -953,6 +953,8 @@ void ROWOWMod::PCJobChange(Player* player, uint16 jobID)
     identity->JobID = jobID;
     identity->JobLevel = 1;
     identity->JobExp = 0;
+    RecordJobHistory(player, *identity, jobID); // A job sprite the character may pick from now (Options > Interface > Ragnarok)
+    SendSpriteJobsToClient(player);
     if (identity->BaseLevel > job->MaxBaseLevel)
     {
         identity->BaseLevel = job->MaxBaseLevel;
@@ -1162,6 +1164,24 @@ std::vector<uint16> ROWOWMod::GetSkillTreeJobIDs(uint16 jobID) const
     }
     if (jobID != noviceJobID)
         jobIDs.push_back(jobID);
+    return jobIDs;
+}
+
+std::vector<uint16> ROWOWMod::GetJobHistoryJobIDs(uint16 jobID) const
+{
+    // The jobs passed through to reach a job, for the character's job history: the skill tree's (Crusader: Novice, Swordman, Crusader; Baby_Knight:
+    // Baby, Baby_Swordman, Baby_Knight), and for a transcendent job its normal job's before the rebirth too (Lord_Knight: Novice, Swordman, Knight,
+    // Novice_High, Swordman_High, Lord_Knight; a Novice_High or a transcendent first job was some second job, which isn't known: its Novice and
+    // first job only)
+    std::vector<uint16> jobIDs;
+    ROWOWJob const* job = GetJob(jobID);
+    if (job == nullptr)
+        return jobIDs;
+    if (job->IsUpper == true && GetNormalJobID(jobID) != jobID && GetJob(GetNormalJobID(jobID)) != nullptr)
+        jobIDs = GetSkillTreeJobIDs(GetNormalJobID(jobID));
+    for (uint16 skillTreeJobID : GetSkillTreeJobIDs(jobID))
+        if (std::find(jobIDs.begin(), jobIDs.end(), skillTreeJobID) == jobIDs.end())
+            jobIDs.push_back(skillTreeJobID);
     return jobIDs;
 }
 

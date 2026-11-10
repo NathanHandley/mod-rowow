@@ -42,6 +42,8 @@
 #include <unordered_set>
 #include <vector>
 
+class Aura;
+class Corpse;
 class ChatHandler;
 class Creature;
 class Field;
@@ -73,6 +75,7 @@ struct ROWOWIllusion
     uint32 SpellID = 0;
     uint32 FormCreatureTemplateID = 0;
     bool IsMale = true;
+    bool IsRiding = false; // The job's body on its Peco (its job key ends in "_riding")
     std::unordered_map<uint32, uint32> DisplayIDsByKey; // See GetIllusionDisplayKey.  Weapon and shield type 0 are none
     std::unordered_map<uint32, uint32> WeaponTypeIDsByItemSubclass; // The RO weapon type shown for each WoW weapon subclass
     std::unordered_set<uint32> ShieldTypeIDs; // The RO shield types this job has
@@ -2007,6 +2010,64 @@ struct ROWOWIdentitySlot
     bool Exists = false; // ... and what the page's slot list shows of its identity (the slot in use reads the identity itself)
     uint16 JobID = 0;
     uint32 JobLevel = 0;
+    uint32 BaseLevel = 0; // (The Midgard achievements count every slot's: GetHighestBaseLevel)
+};
+
+// The Midgard achievements (Nathan 2026-11-09): earned on the WoW character by the Base level of any of its identities (the converter's Ragnarok
+// AchievementData.csv has the rows, in Other Worlds > Ragnarok; they have no criteria, so only GrantMidgardAchievements gives them).  Each unlocks
+// something of the character's identities across the worlds, which HasMidgardPathfinder, HasMidgardWayfarer and HasMidgardWorldwalker tell
+#define ROWOW_ACHIEVEMENT_MIDGARD_PATHFINDER              5300 // The Ragnarok identity may be shown outside the RO world
+#define ROWOW_ACHIEVEMENT_MIDGARD_WAYFARER                5301 // A non-Ragnarok identity may be shown in the RO world
+#define ROWOW_ACHIEVEMENT_MIDGARD_WORLDWALKER             5302 // The character's own (Azeroth and Norrath) abilities may be used in the RO world
+#define ROWOW_ACHIEVEMENT_MIDGARD_PATHFINDER_BASE_LEVEL   10
+#define ROWOW_ACHIEVEMENT_MIDGARD_WAYFARER_BASE_LEVEL     30
+#define ROWOW_ACHIEVEMENT_MIDGARD_WORLDWALKER_BASE_LEVEL  90
+
+// Identity per world (Nathan 2026-11-09; ROWOW_WorldIdentity.cpp): the three worlds, the three identities a character can show in each, and why one
+// can't be picked (the lock letters the client is sent in ROWOWIDENT)
+enum ROWOWWorld : uint8
+{
+    ROWOW_WORLD_AZEROTH = 0, // Every map that is neither of the others
+    ROWOW_WORLD_NORRATH = 1, // mod-everquest's maps
+    ROWOW_WORLD_MIDGARD = 2, // The RO maps
+    ROWOW_WORLD_COUNT   = 3
+};
+enum ROWOWWorldIdentityType : uint8
+{
+    ROWOW_WORLD_IDENTITY_WARCRAFT  = 0,
+    ROWOW_WORLD_IDENTITY_EVERQUEST = 1,
+    ROWOW_WORLD_IDENTITY_RAGNAROK  = 2,
+    ROWOW_WORLD_IDENTITY_COUNT     = 3
+};
+#define ROWOW_WORLD_IDENTITY_LOCK_NONE              '0'
+#define ROWOW_WORLD_IDENTITY_LOCK_PATHFINDER        'P'     // Needs Midgard Pathfinder (the Ragnarok identity out of Midgard)
+#define ROWOW_WORLD_IDENTITY_LOCK_WAYFARER          'W'     // Needs Midgard Wayfarer (another identity in Midgard)
+#define ROWOW_WORLD_IDENTITY_LOCK_NO_RO_CHARACTER   'C'     // No Ragnarok Online character in any save slot
+#define ROWOW_WORLD_IDENTITY_LOCK_NO_EVERQUEST      'E'     // The character has no EverQuest look
+#define ROWOW_WORLD_IDENTITY_LOCK_BATTLEGROUND      'B'     // In a battleground or arena: the Warcraft identity is shown there, and can't be changed
+#define ROWOW_WORLD_IDENTITY_LOCK_COMBAT            'F'     // In combat: no identity can be changed
+#define ROWOW_WORLD_IDENTITY_CHECK_TIME_IN_MS       1000    // How often a character's look is checked against its identity (UpdateWorldIdentity)
+// The mount display of a character shown riding its Peco in place of its WoW mount (RefreshWorldIdentityMount): a display no client or server has, so
+// it stays mounted for both (the field isn't 0) with no mount model made
+#define ROWOW_MOUNT_DISPLAY_ID_NONE                 0x7FFFFFF0
+
+// A character's identity for each world (mod_rowow_world_identity), kept on the player while logged in, apart from its RO identity (which is its
+// save slot's).  Only the player's own thread touches it
+struct ROWOWWorldIdentityState : public DataMap::Base
+{
+    bool IsLoaded = false;
+    uint8 Chosen[ROWOW_WORLD_COUNT] = { ROWOW_WORLD_IDENTITY_WARCRAFT, ROWOW_WORLD_IDENTITY_EVERQUEST, ROWOW_WORLD_IDENTITY_RAGNAROK }; // What was picked (the world's own until then)
+    uint32 CheckTimer = ROWOW_WORLD_IDENTITY_CHECK_TIME_IN_MS; // Starts due
+    std::string SentMessage; // The last ROWOWIDENT the client was sent: sent again only when it changes
+    bool IsWorldwalkerOpen = false; // In the RO form with Midgard Worldwalker: the character's own spells were left known (EnterROForm, OpenWorldwalker)
+    bool IsOnMount = false; // Was on a WoW mount at the last update: the look is made right at once when it changes (UpdateWorldIdentity)
+    uint32 MountSpellID = 0; // ... and the spell of that mount's aura (one mount cast over another never leaves the character off a mount)
+    uint32 HiddenMountDisplayID = 0; // The mount's own display while the Peco is shown in its place (RefreshWorldIdentityMount): put back when it no longer is
+    uint32 LookIllusionSpellID = 0; // The looks the character had on at the last refresh (0 for none): one that has gone since (a profile swap, a
+    uint32 LookEverQuestSpellID = 0; // dispel) is put back at once, not at the next check (UpdateWorldIdentity)
+    bool HasByHandLook = false; // A look put on by hand was over the identity's at the last refresh: the identity's is made right as soon as it ends
+    bool IsArrivalCheckPending = false; // The character arrived on a map wearing its look (RefreshWorldIdentityLook's isArriving): checked again in its first update there
+    uint32 LookSpellIDBeingAdded = 0; // The look AddWorldIdentityAura is putting on right now: its aura isn't client hidden yet while the core applies it
 };
 
 // A player's RO identity (mod_rowow_identity and the tables beside it), kept on the player while logged in.  Only the player's own
@@ -2038,6 +2099,14 @@ struct ROWOWIdentity : public DataMap::Base
     ROWOWPosition ReturnPosition; // Where the character entered the RO world from, which the world travel spell returns to
     uint8 HairStyle = 1;
     uint8 HairColor = 0;
+    // The character's look, shared by its save slots (Nathan 2026-11-09; mod_rowow_identity_character and mod_rowow_identity_job_history, kept through
+    // a slot change and an identity reset).  One head: HairStyle and HairColor above are the character's once one of its slots has an identity
+    // (IsHairShared; before that they're what a new identity starts with), and the job sprite shown is the job of the slot in use, or one picked from
+    // the jobs the character's identities are or have been (see GetIdentityLookJob)
+    bool IsHairShared = false;
+    std::set<uint16> JobHistoryJobIDs; // Every job reached in any slot, with the jobs leading to it (RecordJobHistory)
+    int32 SpriteJobID = -1; // The job whose sprite is shown (Options > Interface > Ragnarok, .ro spritejob): -1 the job of the slot in use
+    bool IsPecoMountLookEnabled = true; // Out of Midgard, on a ground mount, a Peco rider's sprite shows its Peco in the mount's place (Options > Interface > Ragnarok, .ro pecomount; IsPecoShownForMount)
     std::map<uint8, uint32> ActionsByButton; // The RO form's own action bars (packed action and type, as SMSG_ACTION_BUTTONS sends them)
     bool AreActionsChanged = false;
     std::map<uint32, ObjectGuid::LowType> ItemGUIDsByEquipPosition; // The RO equipment worn (in the bags, as RO's inventory holds it)
@@ -2314,6 +2383,28 @@ public:
     void RefreshIllusionHead(Player* player, ROWOWIllusion const* illusion);
     bool SetIdentityHair(Player* player, uint32 style, uint32 color); // False if there's no head for it
     void SendHairToClient(Player* player);
+    void SaveSharedHair(Player* player); // The head changed: its character's row now (every save slot's head), when it has one
+
+    // The RO look of a player (Nathan 2026-11-09), for whatever shows its Ragnarok identity, in the RO form or out of it: the job whose sprite is shown
+    // (the one picked in Options > Interface > Ragnarok when the character may show it, else the job of the save slot in use; nullptr with no identity
+    // in the slot in use and none picked), that job's illusion (mod_rowow_illusion's JobKey and its spell, in the character's gender; the Peco's
+    // "_riding" one only when the job shown has one), and the head every slot shares (GetIdentityLookHeadSpellID, a hidden aura RefreshIllusionHead keeps)
+    ROWOWJob const* GetIdentityLookJob(Player* player);
+    std::string GetIdentityLookJobKey(Player* player); // "" with none
+    uint32 GetIdentityLookIllusionSpellID(Player* player, bool isRiding); // 0 with none
+    uint32 GetIdentityLookHeadSpellID(Player* player); // 0 with none
+    bool HasJobIllusion(ROWOWJob const* job, bool isMale) const; // The job has a sprite in the gender (a Bard's has no female one)
+
+    // The job history and the sprite picked.  The client's options page hears both under the ROWOWSPRITE prefix (see SendSpriteJobsToClient)
+    std::vector<uint16> GetJobHistoryJobIDs(uint16 jobID) const; // The jobs passed through to reach a job, itself included
+    void RecordJobHistory(Player* player, ROWOWIdentity& identity, uint16 jobID); // A job reached: it and the jobs leading to it, written at once
+    void LoadIdentityLook(Player* player, ROWOWIdentity& identity); // The history (with what the slots' jobs lack) at load
+    std::vector<uint16> GetSpriteJobIDs(Player* player); // What may be picked: one job for each sprite the history has, in the character's gender
+    bool HasAnyIdentity(ROWOWIdentity const& identity) const; // An identity in any save slot
+    bool HasOtherIdentity(ROWOWIdentity const& identity) const; // An identity in a save slot other than the one in use
+    bool SetSpriteJob(Player* player, int32 jobID); // .ro spritejob: -1 for the job of the slot in use; false when it isn't one to pick
+    bool SetPecoMountLook(Player* player, bool isEnabled); // .ro pecomount: the Peco shown in a ground mount's place out of Midgard, or the mount as it is
+    void SendSpriteJobsToClient(Player* player);
 
     // R9.6: the post-renewal looks' garments (robes, wings) and hat effects in the RO form, each a hidden aura (the garment's model attached
     // at the body anchor, the hat effect's looping effect), kept by RefreshIllusionDisplay like the headgear.  None without the converter's
@@ -2406,6 +2497,15 @@ public:
     void SendIdentitySlotsToClient(Player* player);
     std::string GetIdentitySlotDefaultName(uint8 slot) const { return fmt::format("Slot {}", slot); }
 
+    // The Midgard achievements (see ROWOW_ACHIEVEMENT_MIDGARD_*).  The three Has functions are the gates of what each unlocks: whether the character
+    // has earned the achievement, nothing else (false too while the achievement isn't in the server's Achievement.dbc)
+    bool HasMidgardPathfinder(Player const* player) const; // Base level 10: may show the Ragnarok identity outside the RO world
+    bool HasMidgardWayfarer(Player const* player) const; // Base level 30: may show a non-Ragnarok identity in the RO world
+    bool HasMidgardWorldwalker(Player const* player) const; // Base level 90: may use its own (Azeroth and Norrath) abilities in the RO world
+    uint32 GetHighestBaseLevel(Player* player); // The highest Base level of the character's identities, every save slot's (0 with none)
+    void GrantMidgardAchievements(Player* player, uint32 baseLevel); // Those of a Base level reached that the character hasn't got yet
+    void CheckMidgardAchievements(Player* player); // ... by the highest of its identities (login and arriving in the RO world)
+
     // The carried sets (the backpack, the bag slots and the bags' items): the character's own and the form's.  The side the character is on has its set
     // on it and the other is put away, each item kept as it is (its row and GUID) with its place to go back to (see UpdateCarriedSet)
     void UpdateCarriedSet(Player* player, ROWOWIdentity& identity); // The set of the side the character is on now onto it, the other put away
@@ -2420,7 +2520,9 @@ public:
     void StopViewingROSet(Player* player); // The page is closed, or something else needs the character's own set: it's back
     void SendRagnarokPageToClient(Player* player, char const* blockedText = nullptr);
     void UpdatePageAreaName(ROWOWIdentity& identity) const; // The page's MAP line (world thread only)
-    bool CreateIdentity(Player* player, uint32 hairStyle, uint32 hairColor); // The page's character creation (.ro create): a new Novice, with its start items
+    // The page's character creation (.ro create): a new Novice, with its start items.  The hair is picked for the character's first identity only: with
+    // one in another save slot the new one has their head, whatever is passed
+    bool CreateIdentity(Player* player, uint32 hairStyle, uint32 hairColor);
     void StartWorldTravel(Player* player); // The page's Enter button (.ro enter): the world travel spell's 8 second cast into the RO world
     bool IsWorldTravelRequested(Player* player) const; // Out of the RO world, the world travel spell is only the Enter button's
     void SendWorldTravelSpellsToClient(Player* player) const; // The book shows World Return in the RO world, and neither travel spell out of it
@@ -2436,6 +2538,36 @@ public:
     void RefreshROFormValues(Player* player, ROWOWIdentity& identity); // The level, exp bar, status and maximums
     void RefreshROFormLook(Player* player); // The job's look
     void RemoveROFormAuras(Player* player); // The job's look, its head and headgear
+
+    // Identity per world (ROWOW_WorldIdentity.cpp, and ROWOW_WorldIdentityEverQuest.cpp for the two that read mod-everquest)
+    uint8 GetWorldOfMap(uint32 mapID) const; // ROWOW_WORLD_*
+    bool IsNorrathMap(uint32 mapID) const; // One of mod-everquest's maps (false without it)
+    uint32 GetEverQuestIdentityLookSpellID(Player* player) const; // The spell whose aura is the character's EverQuest look, 0 for none (the seam for the EQWOW-SoL merge)
+    ROWOWWorldIdentityState* GetWorldIdentityState(Player* player);
+    char GetWorldIdentityLock(Player* player, uint8 world, uint8 worldIdentity); // ROWOW_WORLD_IDENTITY_LOCK_*: why it can't be shown there now
+    char GetWorldIdentityChangeLock(Player* player, uint8 world, uint8 worldIdentity); // ... and why it can't be picked now: in combat, in a battleground, or that
+    char const* GetWorldIdentityLockText(char lock) const;
+    bool IsWorldIdentityHeldBack(Player const* player) const; // In a battleground or arena: the Warcraft identity is shown whatever was picked
+    bool HasByHandLook(Player const* player) const; // A transform no identity put on (a guise spell, a polymorph): it shows over the identity's look
+    void OnEverQuestIdentityLookHidden(Player* player); // The identity's EverQuest look was put on: mod-everquest's faction reactions made right again
+    void RefreshEverQuestIdentityLookDisplay(Player* player); // The EverQuest look's display taken back from whatever set another under it (the core, at every arrival)
+    uint8 GetWorldIdentity(Player* player, uint8 world); // The identity shown in the world: the one picked while it may be shown, else the world's own
+    bool SetWorldIdentity(Player* player, uint8 world, uint8 worldIdentity, std::string& errorOut); // .identity
+    uint32 GetWorldIdentityRagnarokLookSpellID(Player* player); // The Ragnarok identity's body: the RO illusion spell of the job sprite shown
+    bool HasLearnedPecoRiding(Player* player); // The identity of the save slot in use has learned Riding (whatever job sprite is shown)
+    bool IsPecoShownForMount(Player* player, ROWOWJob const* shownJob); // Out of Midgard, on a ground mount: the job sprite shown rides its Peco in the mount's place
+    uint32 GetMountAuraSpellID(Player const* player) const; // The spell of the mount aura the character is on (0 on none, and on a taxi)
+    void RefreshWorldIdentityMount(Player* player, bool isPecoShown); // The WoW mount's model hidden while the Peco is shown in its place, and back after
+    bool IsWorldIdentityLookAura(Player const* player, uint32 spellID) const; // An aura an identity put on (client hidden)
+    void RefreshWorldIdentityLook(Player* player, bool isArriving = false); // The look of the identity for the world the character is in, put on (and any other it put on taken off); isArriving: on its way onto a map, before any client is sent the character
+    Aura* AddWorldIdentityAura(Player* player, uint32 spellID); // A look's aura: client hidden, on a dead character too
+    void UpdateWorldIdentity(Player* player, uint32 diffInMS); // Once a second: the look, Worldwalker, and the client told of any change
+    void SendWorldIdentityToClient(Player* player, bool isForced); // ROWOWIDENT
+    void DeleteWorldIdentityRows(ObjectGuid::LowType guid, CharacterDatabaseTransaction trans);
+    void DressSpriteCorpse(Corpse* corpse); // A new corpse lying as an RO job sprite: its head and headgear named in its item fields, for the client
+    // Midgard Worldwalker's effect: in the RO form the character's own (Azeroth and Norrath) spells stay known, their passives stay on and they may be cast
+    bool IsWorldwalkerOpen(Player const* player) const;
+    void OpenWorldwalker(Player* player); // For a character already in the form (it just earned the achievement): its hidden spells and passives back
     void InitNewIdentity(ROWOWIdentity& identity) const; // A level 1 Novice (rAthena's new character), saving at the start point
     void GiveNewIdentityStartItems(Player* player, ROWOWIdentity& identity); // Its general bags, then its start items, worn where they go
     void GiveStartBags(Player* player); // A new identity's general bags: in the empty bag slots, then the bags, then by mail

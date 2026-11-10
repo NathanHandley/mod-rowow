@@ -1730,6 +1730,8 @@ void ROWOWMod::RegisterNpcScriptCommands()
         }
         if ((look == 1 || look == 6) && context.AttachedPlayer != nullptr)
         {
+            if (GetIdentity(context.AttachedPlayer) == context.Identity)
+                SaveSharedHair(context.AttachedPlayer); // The head of every save slot (Nathan 2026-11-09)
             RefreshIllusionDisplay(context.AttachedPlayer);
             SendHairToClient(context.AttachedPlayer);
         }

@@ -1351,6 +1351,7 @@ bool ROWOWMod::PCCheckBaseLevelUp(Player* player)
     PCLevelUpAngel(player);
     CastLevelUpEffect(player, ROWOW_SPELL_BASE_LEVEL_UP);
     PetOwnerLevelUp(player);
+    GrantMidgardAchievements(player, identity->BaseLevel);
     return true;
 }
 

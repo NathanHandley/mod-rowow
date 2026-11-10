@@ -50,6 +50,44 @@ namespace
         ChatHandler(player->GetSession()).SendSysMessage("You can't do that as your Ragnarok Online self.");
     }
 
+    bool IsSpellRefusedWithWorldwalker(Player const* player, SpellInfo const* spellInfo)
+    {
+        // Midgard Worldwalker opens the character's own (Azeroth and Norrath) spells in the RO world, but not the ones that would break its rules: a
+        // stance or shapeshift form (it would take the form's SP for its own power, rage or energy, and put its model over the identity's look), a
+        // teleport, a leap, blink or charge (RO has its own ways to travel, and its maps their own rules for them: noteleport, nowarp, noreturn,
+        // nomemo), a resurrection (an RO death is RO's), and anything at all where the map allows no skills (noskill)
+        if (spellInfo->HasAura(SPELL_AURA_MOD_SHAPESHIFT) == true)
+            return true;
+        if (ROWOW->HasMapFlag(player, "noskill") == true)
+            return true;
+        for (uint8 effectIndex = 0; effectIndex < MAX_SPELL_EFFECTS; effectIndex++)
+        {
+            switch (spellInfo->Effects[effectIndex].Effect)
+            {
+                case SPELL_EFFECT_TELEPORT_UNITS:
+                case SPELL_EFFECT_TELEPORT_UNITS_FACE_CASTER:
+                case SPELL_EFFECT_BIND:
+                case SPELL_EFFECT_STUCK:
+                case SPELL_EFFECT_SUMMON_PLAYER:
+                case SPELL_EFFECT_LEAP:
+                case SPELL_EFFECT_LEAP_BACK:
+                case SPELL_EFFECT_JUMP:
+                case SPELL_EFFECT_JUMP_DEST:
+                case SPELL_EFFECT_CHARGE:
+                case SPELL_EFFECT_CHARGE_DEST:
+                case SPELL_EFFECT_PULL_TOWARDS:
+                case SPELL_EFFECT_PULL_TOWARDS_DEST:
+                case SPELL_EFFECT_RESURRECT:
+                case SPELL_EFFECT_RESURRECT_NEW:
+                case SPELL_EFFECT_SELF_RESURRECT:
+                    return true;
+                default:
+                    break;
+            }
+        }
+        return false;
+    }
+
     bool IsAuctionSaleRestricted(Player* player, WorldPacket const& packet)
     {
         // CMSG_AUCTION_SELL_ITEM: the auctioneer, the item count, then each item's GUID and count.  A short packet throws as the handler's
@@ -307,6 +345,10 @@ public:
         else if (identity->IsInForm == true)
             ROWOW->LeaveROForm(player);
         ROWOW->SendWorldTravelSpellsToClient(player); // The client was just sent every spell, the travel spells too
+        // The look of the character's identity for the world it arrives in, before any client is sent the character: a look isn't saved, so a
+        // login loads the character in its own body, and another world may show another identity.  Put on only after the arrival, the character
+        // was seen in its own body first and its model was loaded twice (it was gone for a moment while the second loaded; Nathan 2026-11-10)
+        ROWOW->RefreshWorldIdentityLook(player, true);
     }
 
     void OnPlayerMapChanged(Player* player) override
@@ -336,6 +378,7 @@ public:
 
         ROWOW->UpdateNaturalRegen(player, p_time);
         ROWOW->UpdateStatusChanges(player);
+        ROWOW->UpdateWorldIdentity(player, p_time); // In every world: the look of the character's identity for it
         if (ROWOW->IsEnabled == false || ROWOW->IsInROForm(player) == false)
             return;
         // The character's pet stays put away in the form, whatever summoned it again (the core on arrival or at login)
@@ -449,6 +492,9 @@ public:
         if (isTravelSpellOnButtons == true && ROWOW->IsInROForm(player) == false)
             player->SendActionButtons(1); // (In the form the client has the identity's buttons)
         ROWOW->SendWorldTravelSpellsToClient(player);
+
+        // The Midgard achievements of a character whose identities (any save slot's) are already past their levels
+        ROWOW->CheckMidgardAchievements(player);
 
         // The pet loads after the character is placed on the map, so it's put away again here
         if (ROWOW->IsInROForm(player) == true)
@@ -638,8 +684,22 @@ public:
         // Only RO items work in the form, and the carriers of RO companion pets
         if (item == nullptr || ROWOW->IsInROForm(player) == false || ROWOW->IsROItemTemplate(item->GetEntry()) == true || ROWOW->IsROCompanionPetCarrier(item->GetTemplate()) == true)
             return true;
+        // ... and with Midgard Worldwalker the character's own (what it still wears: its bags are put away).  What its spell may not do in the RO
+        // world is refused as the cast is checked (ROWOW_IdentityAllSpellScript::OnSpellCheckCast)
+        if (ROWOW->IsWorldwalkerOpen(player) == true)
+            return true;
         SendNotInROFormMessage(player);
         return false;
+    }
+
+    bool OnPlayerBeforeCriteriaProgress(Player* player, AchievementCriteriaEntry const* criteria) override
+    {
+        // The form's level is the identity's Base level, not the character's: it must not count for the character's "Level 10" to "Level 80"
+        // achievements (mod-everquest re-checks the level criteria at every login and class change, and a login in the form at Base level 90 gave a
+        // level 1 character all of them).  The character's own level is checked again out of the form
+        if (ROWOW->IsEnabled == false || criteria == nullptr || criteria->requiredType != ACHIEVEMENT_CRITERIA_TYPE_REACH_LEVEL)
+            return true;
+        return ROWOW->IsInROForm(player) == false;
     }
 };
 
@@ -656,9 +716,29 @@ public:
         Player* player = session->GetPlayer();
         if (player == nullptr)
             return true;
+        // The client's interface has just loaded (a login, a reload) or come out of a loading screen: its raid frame asks for the raid info at each
+        // PLAYER_ENTERING_WORLD.  The identities and the job sprites are told then, without being asked for: the same interface runs on servers
+        // without mod-rowow, where a command it sent to ask would be said aloud, so it sends none (MergedWorldsIdentity.lua,
+        // MergedWorldsInterfaceOptionsPanels.lua)
+        // Told also in the middle of a teleport within the map (the arrival floor check's, at a login in Midgard, is under way when the request
+        // comes): held back then, the client was never told, and its Ragnarok options page stayed unlisted until the next reload (Nathan 2026-11-10)
+        if (packet.GetOpcode() == CMSG_REQUEST_RAID_INFO && player->IsInWorld() == true)
+        {
+            ROWOW->SendWorldIdentityToClient(player, true);
+            ROWOW->SendSpriteJobsToClient(player);
+        }
         // The Ragnarok bank tab's Adventurer's Bags, for every character
         if (IsStorageBagMoveRefused(player, packet) == true)
             return false;
+        // An identity's look isn't a buff to cancel (it has no icon to click; this is for a macro or a made-up packet)
+        if (packet.GetOpcode() == CMSG_CANCEL_AURA)
+        {
+            WorldPacket packetCopy(packet);
+            uint32 spellID = 0;
+            packetCopy >> spellID;
+            if (ROWOW->IsWorldIdentityLookAura(player, spellID) == true)
+                return false;
+        }
         // The form's carried set (in the form, or out of it on the Ragnarok page): which item moves it takes.  On the page, anything else the character's
         // own things are for puts them back on it first
         if (ROWOW->IsROSetCarried(player) == true && IsItemMoveRefused(player, packet) == true)
@@ -909,19 +989,53 @@ public:
 class ROWOW_IdentityAllSpellScript : public AllSpellScript
 {
 public:
-    ROWOW_IdentityAllSpellScript() : AllSpellScript("ROWOW_IdentityAllSpellScript", { ALLSPELLHOOK_ON_SPELL_CHECK_CAST }) {}
+    ROWOW_IdentityAllSpellScript() : AllSpellScript("ROWOW_IdentityAllSpellScript", { ALLSPELLHOOK_ON_SPELL_CHECK_CAST, ALLSPELLHOOK_CAN_PREPARE }) {}
+
+    bool CanPrepare(Spell* spell, SpellCastTargets const* targets, AuraEffect const* /*triggeredByAura*/) override
+    {
+        // A look cast by hand that is the very look the character's identity has on (its own guise over its EverQuest identity): the cast would only
+        // refresh the identity's hidden aura, and show no buff and count for nothing.  The identity's goes as the cast starts (a form is cast at once,
+        // by the spell that gives it), so the cast puts on its own, which shows and acts as it does on any character; the identity's look comes
+        // back when that ends (RefreshWorldIdentityLook)
+        SpellInfo const* spellInfo = spell != nullptr ? spell->GetSpellInfo() : nullptr;
+        if (ROWOW->IsEnabled == false || spellInfo == nullptr || spellInfo->HasAura(SPELL_AURA_TRANSFORM) == false)
+            return true;
+        Unit* target = targets != nullptr ? targets->GetUnitTarget() : nullptr;
+        if (target == nullptr && spell->GetCaster() != nullptr)
+            target = spell->GetCaster()->ToUnit(); // A spell that takes no target (cast on the character itself) has none
+        if (target != nullptr && target->IsPlayer() == true && ROWOW->IsWorldIdentityLookAura(target->ToPlayer(), spellInfo->Id) == true
+            && (ROWOW->IsInROForm(target->ToPlayer()) == false || ROWOW->IllusionsBySpellID.find(spellInfo->Id) == ROWOW->IllusionsBySpellID.end()))
+            target->RemoveAurasDueToSpell(spellInfo->Id); // (In the RO form every RO illusion is the form's own)
+        return true;
+    }
 
     void OnSpellCheckCast(Spell* spell, bool /*strict*/, SpellCastResult& res) override
     {
         // The character's spells are hidden from the form, and refused if cast anyway (a macro, an old action button).  Item and
         // triggered casts go through their own checks
-        if (res != SPELL_CAST_OK || spell == nullptr || spell->IsTriggered() == true || spell->m_CastItem != nullptr)
+        if (res != SPELL_CAST_OK || spell == nullptr || spell->IsTriggered() == true)
             return;
         WorldObject* caster = spell->GetCaster();
         if (caster == nullptr || caster->IsPlayer() == false || ROWOW->IsInROForm(caster->ToPlayer()) == false)
             return;
+        if (spell->m_CastItem != nullptr)
+        {
+            // ... but for what Midgard Worldwalker never opens, from the character's own items too (a hearthstone, a rocket boot)
+            if (ROWOW->IsWorldwalkerOpen(caster->ToPlayer()) == true && ROWOW->IsROItemTemplate(spell->m_CastItem->GetEntry()) == false
+                && ROWOW->IsROCompanionPetCarrier(spell->m_CastItem->GetTemplate()) == false
+                && IsSpellRefusedWithWorldwalker(caster->ToPlayer(), spell->GetSpellInfo()) == true)
+                res = SPELL_FAILED_NOT_HERE;
+            return;
+        }
         if (ROWOW->IsSpellKeptInROForm(spell->GetSpellInfo()) == true || ROWOW->IsIdentitySkillSpell(caster->ToPlayer(), spell->GetSpellInfo()->Id) == true)
             return;
+        // Midgard Worldwalker: the character's own spells too, but for the ones the RO world has no place for (IsSpellRefusedWithWorldwalker)
+        if (ROWOW->IsWorldwalkerOpen(caster->ToPlayer()) == true)
+        {
+            if (IsSpellRefusedWithWorldwalker(caster->ToPlayer(), spell->GetSpellInfo()) == true)
+                res = SPELL_FAILED_NOT_HERE;
+            return;
+        }
         // A skill item (Abracadabra's pick) is cast at its own level without being learned (SkillCastAbraSkill)
         uint16 skillID = 0;
         uint16 skillLevel = 0;
@@ -1031,6 +1145,8 @@ public:
             { "hair",     HandleROHairCommand,   SEC_PLAYER,     Console::No },
             { "view",     HandleROViewCommand,   SEC_PLAYER,     Console::No },
             { "create",   HandleROCreateCommand, SEC_PLAYER,     Console::No },
+            { "spritejob", HandleROSpriteJobCommand, SEC_PLAYER, Console::No },
+            { "pecomount", HandleROPecoMountCommand, SEC_PLAYER, Console::No },
             { "enter",    HandleROEnterCommand,  SEC_PLAYER,     Console::No },
             { "slot",     HandleROSlotCommand,   SEC_PLAYER,     Console::No },
             { "slotname", HandleROSlotNameCommand, SEC_PLAYER,   Console::No },
@@ -2977,18 +3093,75 @@ public:
         return true;
     }
 
-    static bool HandleROCreateCommand(ChatHandler* handler, uint32 style, uint32 color)
+    // ".ro create <style> <color>" for the character's first identity; ".ro create" beside one in another save slot, whose head it has (a style and
+    // color passed then are left aside: one head for every slot, Nathan 2026-11-09)
+    static bool HandleROCreateCommand(ChatHandler* handler, Optional<uint32> style, Optional<uint32> color)
     {
         Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
         if (player == nullptr)
             return false;
-        if (ROWOW->CreateIdentity(player, style, color) == false)
+        if (ROWOW->CreateIdentity(player, style.value_or(0), color.value_or(0)) == false)
         {
             handler->SendSysMessage("Your Ragnarok Online character can't be made right now.");
             ROWOW->SendRagnarokPageToClient(player);
             return false;
         }
         return true;
+    }
+
+    // Options > Interface > Ragnarok's job sprite (Nathan 2026-11-09): ".ro spritejob" asks for the list (the page, once the interface has loaded),
+    // ".ro spritejob -1" shows the job of the save slot in use, ".ro spritejob <job ID>" a job the character's RO characters are or have been.  The
+    // answer is the list and the choice, under the ROWOWSPRITE prefix
+    static bool HandleROSpriteJobCommand(ChatHandler* handler, Optional<int32> jobID)
+    {
+        Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
+        if (player == nullptr)
+            return false;
+        if (jobID.has_value() == false)
+        {
+            ROWOW->SendSpriteJobsToClient(player);
+            return true;
+        }
+        if (player->IsInCombat() == true)
+        {
+            handler->SendSysMessage("You can't change your job sprite while you are in combat.");
+            ROWOW->SendSpriteJobsToClient(player); // The page shows what's kept again
+            return true;
+        }
+        if (ROWOW->SetSpriteJob(player, *jobID) == false)
+        {
+            handler->SendSysMessage("None of your Ragnarok Online characters has been that job, or it has no sprite for your character.");
+            ROWOW->SendSpriteJobsToClient(player); // The page shows what's kept again
+            return true; // Answered above (false would add the command's usage lines)
+        }
+        return true;
+    }
+
+    // Options > Interface > Ragnarok's "Show Peco on Ground Mounts" (Nathan 2026-11-10): ".ro pecomount 1" shows a Peco rider's job sprite on its
+    // Peco in a ground mount's place out of Midgard (the default), ".ro pecomount 0" shows the mount with the sprite sitting on it.  The answer is
+    // the ROWOWSPRITE message, which carries the choice
+    static bool HandleROPecoMountCommand(ChatHandler* handler, Optional<uint32> isEnabled)
+    {
+        Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
+        if (player == nullptr)
+            return false;
+        if (isEnabled.has_value() == false)
+        {
+            ROWOW->SendSpriteJobsToClient(player);
+            return true;
+        }
+        if (player->IsInCombat() == true)
+        {
+            handler->SendSysMessage("You can't change your Peco mount look while you are in combat.");
+            ROWOW->SendSpriteJobsToClient(player); // The page shows what's kept again
+            return true;
+        }
+        if (ROWOW->SetPecoMountLook(player, *isEnabled != 0) == false)
+        {
+            handler->SendSysMessage("You have no Ragnarok Online character yet.");
+            ROWOW->SendSpriteJobsToClient(player); // The page shows what's kept again
+        }
+        return true; // Answered above (false would add the command's usage lines)
     }
 
     static bool HandleROEnterCommand(ChatHandler* handler)
@@ -3144,7 +3317,8 @@ public:
         // One transaction saves the character as it is now, then deletes the identity's rows and its put away set's items.  It's queued (a save can't be
         // committed directly), so the new identity isn't read from the database, where the old rows may still be: it starts as a new one does, with the
         // account's variables as the old one had them
-        // Only the save slot in use is reset: the new identity keeps its slot, and the zeny the slots share
+        // Only the save slot in use is reset: the new identity keeps its slot, and what the slots share (the zeny, the head, the job history, which
+        // keeps the reset one's jobs, and the job sprite picked)
         ROWOWIdentity* oldIdentity = ROWOW->GetIdentity(player);
         CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
         player->SaveToDB(trans, false, false);
@@ -3156,6 +3330,12 @@ public:
         ObjectGuid::LowType identityID = oldIdentity->IdentityID;
         uint32 zeny = oldIdentity->Zeny;
         bool isZenyShared = oldIdentity->IsZenyShared;
+        uint8 hairStyle = oldIdentity->HairStyle;
+        uint8 hairColor = oldIdentity->HairColor;
+        bool isHairShared = oldIdentity->IsHairShared;
+        std::set<uint16> jobHistoryJobIDs = oldIdentity->JobHistoryJobIDs;
+        int32 spriteJobID = oldIdentity->SpriteJobID;
+        bool isPecoMountLookEnabled = oldIdentity->IsPecoMountLookEnabled;
         slots[slot - 1].Exists = false;
         player->CustomData.Erase("ROWOWIdentity");
         ROWOWIdentity* identity = player->CustomData.GetDefault<ROWOWIdentity>("ROWOWIdentity");
@@ -3166,9 +3346,16 @@ public:
         identity->IdentityID = identityID;
         identity->Zeny = zeny;
         identity->IsZenyShared = isZenyShared;
+        identity->HairStyle = hairStyle;
+        identity->HairColor = hairColor;
+        identity->IsHairShared = isHairShared;
+        identity->JobHistoryJobIDs = jobHistoryJobIDs;
+        identity->SpriteJobID = spriteJobID;
+        identity->IsPecoMountLookEnabled = isPecoMountLookEnabled;
         identity->AccountVariables = accountVariables;
         if (wasInForm == true)
             ROWOW->EnterROForm(player);
+        ROWOW->SendSpriteJobsToClient(player); // With no identity left in any slot, the options page's job sprite is off
         handler->PSendSysMessage("Reset {}'s Ragnarok Online identity.", player->GetName());
         return true;
     }
@@ -3221,6 +3408,9 @@ public:
             identity->JobExp = 0;
         }
         ROWOW->RefreshROForm(player);
+        ROWOW->GrantMidgardAchievements(player, identity->BaseLevel);
+        if (player->IsGameMaster() == true && identity->BaseLevel >= ROWOW_ACHIEVEMENT_MIDGARD_PATHFINDER_BASE_LEVEL)
+            handler->SendSysMessage("In GM mode no Midgard achievement is earned: they come at the next login or arrival in the RO world out of GM mode.");
         handler->PSendSysMessage("{} is now base level {} and job level {}.", player->GetName(), identity->BaseLevel, identity->JobLevel);
         return true;
     }

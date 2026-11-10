@@ -177,6 +177,8 @@ namespace
             Aura const* aura = appliedAura.second->GetBase();
             if (aura->IsPassive() == true || appliedAura.second->IsPositive() == false || keepTest(aura->GetId()) == true)
                 continue;
+            if (aura->IsClientHidden() == true) // An identity's look (RefreshWorldIdentityLook keeps it right), not a buff
+                continue;
             spellIDsToRemove.push_back(aura->GetId());
         }
         for (uint32 spellID : spellIDsToRemove)
@@ -1055,6 +1057,71 @@ ROWOWIdentity* ROWOWMod::GetIdentity(Player* player)
     return identity;
 }
 
+bool ROWOWMod::HasMidgardPathfinder(Player const* player) const
+{
+    return player != nullptr && player->HasAchieved(ROWOW_ACHIEVEMENT_MIDGARD_PATHFINDER) == true;
+}
+
+bool ROWOWMod::HasMidgardWayfarer(Player const* player) const
+{
+    return player != nullptr && player->HasAchieved(ROWOW_ACHIEVEMENT_MIDGARD_WAYFARER) == true;
+}
+
+bool ROWOWMod::HasMidgardWorldwalker(Player const* player) const
+{
+    return player != nullptr && player->HasAchieved(ROWOW_ACHIEVEMENT_MIDGARD_WORLDWALKER) == true;
+}
+
+uint32 ROWOWMod::GetHighestBaseLevel(Player* player)
+{
+    // The identity in use, and the slot list's line of each one put away (read at load, and kept when a slot is put away: SelectIdentitySlot)
+    ROWOWIdentity* identity = GetIdentity(player);
+    uint32 highestBaseLevel = identity->Exists == true ? identity->BaseLevel : 0;
+    for (uint8 slotIndex = 0; slotIndex < ROWOW_IDENTITY_SLOT_COUNT; slotIndex++)
+    {
+        ROWOWIdentitySlot const& identitySlot = identity->Slots[slotIndex];
+        if (slotIndex + 1 == identity->Slot || identitySlot.Exists == false)
+            continue;
+        highestBaseLevel = std::max(highestBaseLevel, identitySlot.BaseLevel);
+    }
+    return highestBaseLevel;
+}
+
+void ROWOWMod::GrantMidgardAchievements(Player* player, uint32 baseLevel)
+{
+    if (IsEnabled == false || player == nullptr)
+        return;
+    // The core refuses achievements in GM mode (with a chat message), so they're left for the next check out of it (a login or an arrival in the RO world)
+    if (player->IsGameMaster() == true)
+        return;
+    static const std::pair<uint32, uint32> achievementIDsAndBaseLevels[] =
+    {
+        { ROWOW_ACHIEVEMENT_MIDGARD_PATHFINDER, ROWOW_ACHIEVEMENT_MIDGARD_PATHFINDER_BASE_LEVEL },
+        { ROWOW_ACHIEVEMENT_MIDGARD_WAYFARER, ROWOW_ACHIEVEMENT_MIDGARD_WAYFARER_BASE_LEVEL },
+        { ROWOW_ACHIEVEMENT_MIDGARD_WORLDWALKER, ROWOW_ACHIEVEMENT_MIDGARD_WORLDWALKER_BASE_LEVEL },
+    };
+    for (auto const& achievementIDAndBaseLevel : achievementIDsAndBaseLevels)
+    {
+        if (baseLevel < achievementIDAndBaseLevel.second || player->HasAchieved(achievementIDAndBaseLevel.first) == true)
+            continue;
+        AchievementEntry const* achievementEntry = sAchievementStore.LookupEntry(achievementIDAndBaseLevel.first);
+        if (achievementEntry == nullptr)
+        {
+            LOG_ERROR("module.ROWOW", "ROWOWMod::GrantMidgardAchievements error, no achievement with ID {} exists (base level {} of {})", achievementIDAndBaseLevel.first,
+                baseLevel, player->GetName());
+            continue;
+        }
+        player->CompletedAchievement(achievementEntry);
+    }
+}
+
+void ROWOWMod::CheckMidgardAchievements(Player* player)
+{
+    if (IsEnabled == false || player == nullptr)
+        return;
+    GrantMidgardAchievements(player, GetHighestBaseLevel(player));
+}
+
 void ROWOWMod::LoadLastIdentityID()
 {
     // The slots' identity IDs go on from the highest given (startup, before any session)
@@ -1076,12 +1143,24 @@ void ROWOWMod::LoadIdentitySlots(Player* player, ROWOWIdentity& identity)
     identity.Slots[0].IdentityID = guid;
     identity.Slot = 1;
     identity.IsZenyShared = false;
-    if (QueryResult result = CharacterDatabase.Query("SELECT `slot`, `zeny` FROM `mod_rowow_identity_character` WHERE `guid` = {}", guid))
+    identity.IsHairShared = false;
+    identity.SpriteJobID = -1;
+    identity.IsPecoMountLookEnabled = true;
+    if (QueryResult result = CharacterDatabase.Query("SELECT `slot`, `zeny`, `hair_style`, `hair_color`, `sprite_job`, `peco_mount_look` FROM `mod_rowow_identity_character` WHERE `guid` = {}", guid))
     {
         Field* fields = result->Fetch();
         identity.Slot = uint8(std::clamp<uint32>(fields[0].Get<uint8>(), 1, ROWOW_IDENTITY_SLOT_COUNT));
         identity.Zeny = fields[1].Get<uint32>();
         identity.IsZenyShared = true;
+        // The head its slots share (style 0: none yet, the slot in use has its own row's then, as before the shared head)
+        if (fields[2].Get<uint8>() != 0)
+        {
+            identity.HairStyle = fields[2].Get<uint8>();
+            identity.HairColor = fields[3].Get<uint8>();
+            identity.IsHairShared = true;
+        }
+        identity.SpriteJobID = fields[4].Get<int16>();
+        identity.IsPecoMountLookEnabled = fields[5].Get<uint8>() != 0;
     }
     if (QueryResult result = CharacterDatabase.Query("SELECT `slot`, `identity`, `name` FROM `mod_rowow_identity_slot` WHERE `guid` = {}", guid))
     {
@@ -1109,7 +1188,7 @@ void ROWOWMod::LoadIdentitySlots(Player* player, ROWOWIdentity& identity)
     for (ROWOWIdentitySlot const& identitySlot : identity.Slots)
         if (identitySlot.IdentityID != 0)
             identityIDs += fmt::format("{}{}", identityIDs.empty() == true ? "" : ",", identitySlot.IdentityID);
-    if (QueryResult result = CharacterDatabase.Query("SELECT `guid`, `job`, `job_level`, `zeny` FROM `mod_rowow_identity` WHERE `guid` IN ({})", identityIDs))
+    if (QueryResult result = CharacterDatabase.Query("SELECT `guid`, `job`, `job_level`, `zeny`, `base_level` FROM `mod_rowow_identity` WHERE `guid` IN ({})", identityIDs))
     {
         do
         {
@@ -1122,6 +1201,7 @@ void ROWOWMod::LoadIdentitySlots(Player* player, ROWOWIdentity& identity)
                 identitySlot.Exists = true;
                 identitySlot.JobID = fields[1].Get<uint16>();
                 identitySlot.JobLevel = fields[2].Get<uint8>();
+                identitySlot.BaseLevel = fields[4].Get<uint8>();
             }
             // From before the shared zeny: the identity's own is the shared zeny
             if (identity.IsZenyShared == false && identityID == identity.IdentityID)
@@ -1131,6 +1211,189 @@ void ROWOWMod::LoadIdentitySlots(Player* player, ROWOWIdentity& identity)
             }
         } while (result->NextRow());
     }
+    LoadIdentityLook(player, identity);
+}
+
+void ROWOWMod::LoadIdentityLook(Player* player, ROWOWIdentity& identity)
+{
+    // The jobs the character's identities are or have been.  What the slots' jobs and the jobs leading to them lack is added (and written) now: the
+    // identities from before the history, and a job set straight in the database
+    identity.JobHistoryJobIDs.clear();
+    if (QueryResult result = CharacterDatabase.Query("SELECT `job` FROM `mod_rowow_identity_job_history` WHERE `guid` = {}", identity.CharacterGUID))
+    {
+        do
+            identity.JobHistoryJobIDs.insert(result->Fetch()[0].Get<uint16>());
+        while (result->NextRow());
+    }
+    for (ROWOWIdentitySlot const& identitySlot : identity.Slots)
+        if (identitySlot.Exists == true)
+            RecordJobHistory(player, identity, identitySlot.JobID);
+}
+
+void ROWOWMod::RecordJobHistory(Player* /*player*/, ROWOWIdentity& identity, uint16 jobID)
+{
+    // Kept for the character, whichever slot reached the job, and never taken back (a reset slot's jobs stay).  Written at once, on its own: the
+    // identity's save may be long after, and an identity reset has no save of the old one's
+    for (uint16 historyJobID : GetJobHistoryJobIDs(jobID))
+        if (identity.JobHistoryJobIDs.insert(historyJobID).second == true)
+            CharacterDatabase.Execute("INSERT IGNORE INTO `mod_rowow_identity_job_history` (`guid`, `job`) VALUES ({}, {})", identity.CharacterGUID, historyJobID);
+}
+
+bool ROWOWMod::HasAnyIdentity(ROWOWIdentity const& identity) const
+{
+    return identity.Exists == true || HasOtherIdentity(identity) == true;
+}
+
+bool ROWOWMod::HasOtherIdentity(ROWOWIdentity const& identity) const
+{
+    // The slot list's lines of the slots put away (the slot in use reads the identity itself)
+    for (uint8 slotIndex = 0; slotIndex < ROWOW_IDENTITY_SLOT_COUNT; slotIndex++)
+        if (slotIndex + 1 != identity.Slot && identity.Slots[slotIndex].Exists == true)
+            return true;
+    return false;
+}
+
+bool ROWOWMod::HasJobIllusion(ROWOWJob const* job, bool isMale) const
+{
+    return job != nullptr && IllusionSpellIDsByJobKey.find(GetIllusionJobKey(job->IllusionJobKey, isMale)) != IllusionSpellIDsByJobKey.end();
+}
+
+ROWOWJob const* ROWOWMod::GetIdentityLookJob(Player* player)
+{
+    // The job picked, while it's one the character has been and has a sprite in its gender (a gender change may leave it without one); else the job of
+    // the slot in use.  A picked job is shown whatever slot is in use, one with no identity yet too
+    ROWOWIdentity* identity = GetIdentity(player);
+    if (identity->SpriteJobID >= 0 && identity->JobHistoryJobIDs.find(uint16(identity->SpriteJobID)) != identity->JobHistoryJobIDs.end())
+    {
+        ROWOWJob const* spriteJob = GetJob(uint16(identity->SpriteJobID));
+        if (HasJobIllusion(spriteJob, player->getGender() == GENDER_MALE) == true)
+            return spriteJob;
+    }
+    return identity->Exists == true ? GetJob(identity->JobID) : nullptr;
+}
+
+std::string ROWOWMod::GetIdentityLookJobKey(Player* player)
+{
+    ROWOWJob const* job = GetIdentityLookJob(player);
+    return job != nullptr ? job->IllusionJobKey : std::string();
+}
+
+uint32 ROWOWMod::GetIdentityLookIllusionSpellID(Player* player, bool isRiding)
+{
+    // The look's job in the character's gender: riding its Peco, the job's mounted body (R9.5; the converter's job key with "_riding") when the job
+    // shown has one (a Knight shown as a Swordman rides unseen: the Swordman on foot)
+    ROWOWJob const* job = GetIdentityLookJob(player);
+    if (job == nullptr)
+        return 0;
+    bool isMale = player->getGender() == GENDER_MALE;
+    auto illusionSpellIDIter = IllusionSpellIDsByJobKey.end();
+    if (isRiding == true)
+        illusionSpellIDIter = IllusionSpellIDsByJobKey.find(GetIllusionJobKey(job->IllusionJobKey + "_riding", isMale));
+    if (illusionSpellIDIter == IllusionSpellIDsByJobKey.end())
+        illusionSpellIDIter = IllusionSpellIDsByJobKey.find(GetIllusionJobKey(job->IllusionJobKey, isMale));
+    return illusionSpellIDIter != IllusionSpellIDsByJobKey.end() ? illusionSpellIDIter->second : 0;
+}
+
+uint32 ROWOWMod::GetIdentityLookHeadSpellID(Player* player)
+{
+    ROWOWIdentity const* identity = GetIdentity(player);
+    return GetHeadSpellID(identity->HairStyle, identity->HairColor, player->getGender() == GENDER_MALE);
+}
+
+std::vector<uint16> ROWOWMod::GetSpriteJobIDs(Player* player)
+{
+    // One job for each sprite the history's jobs have in the character's gender, lowest job ID first: a Novice High and a Baby look as the Novice does,
+    // so the three are one entry (named by the lowest, the normal job when it's there)
+    ROWOWIdentity* identity = GetIdentity(player);
+    bool isMale = player->getGender() == GENDER_MALE;
+    std::vector<uint16> spriteJobIDs;
+    std::unordered_set<std::string> jobKeys;
+    for (uint16 jobID : identity->JobHistoryJobIDs)
+    {
+        ROWOWJob const* job = GetJob(jobID);
+        if (HasJobIllusion(job, isMale) == false || jobKeys.insert(job->IllusionJobKey).second == false)
+            continue;
+        spriteJobIDs.push_back(jobID);
+    }
+    return spriteJobIDs;
+}
+
+bool ROWOWMod::SetSpriteJob(Player* player, int32 jobID)
+{
+    // Options > Interface > Ragnarok (.ro spritejob): -1 for the job of the slot in use, else a job of the history, kept as the job its sprite is listed
+    // under.  With no identity in any slot there's nothing to show it on, so only -1 is taken
+    ROWOWIdentity* identity = GetIdentity(player);
+    if (IsEnabled == false)
+        return false;
+    int32 spriteJobID = -1;
+    if (jobID >= 0)
+    {
+        ROWOWJob const* job = jobID <= std::numeric_limits<uint16>::max() ? GetJob(uint16(jobID)) : nullptr;
+        if (job == nullptr || HasAnyIdentity(*identity) == false || identity->JobHistoryJobIDs.find(uint16(jobID)) == identity->JobHistoryJobIDs.end())
+            return false;
+        for (uint16 listedJobID : GetSpriteJobIDs(player))
+            if (GetJob(listedJobID)->IllusionJobKey == job->IllusionJobKey)
+                spriteJobID = listedJobID;
+        if (spriteJobID < 0) // No sprite in the character's gender
+            return false;
+    }
+    if (spriteJobID != identity->SpriteJobID)
+    {
+        identity->SpriteJobID = spriteJobID;
+        // Its row is there once a slot has had an identity (every save writes it too)
+        CharacterDatabase.Execute("UPDATE `mod_rowow_identity_character` SET `sprite_job` = {} WHERE `guid` = {}", spriteJobID, identity->CharacterGUID);
+        if (player->IsInWorld() == true)
+            RefreshROFormLook(player); // In the form, or out of it showing the Ragnarok identity (RefreshWorldIdentityLook)
+        if (identity->IsInForm == false && identity->IsPageShown == true)
+            SendRagnarokPageToClient(player);
+    }
+    SendSpriteJobsToClient(player);
+    return true;
+}
+
+bool ROWOWMod::SetPecoMountLook(Player* player, bool isEnabled)
+{
+    // Options > Interface > Ragnarok (.ro pecomount, Nathan 2026-11-10): whether, out of Midgard, a Peco rider's job sprite on a ground mount shows
+    // its Peco in the mount's place (IsPecoShownForMount; the default), or sits on the mount as any other sprite does.  The character's own choice,
+    // kept with its look (what the others see changes with it), and nothing of Midgard's: there the Peco is the RO character's own option
+    ROWOWIdentity* identity = GetIdentity(player);
+    if (IsEnabled == false || HasAnyIdentity(*identity) == false)
+        return false;
+    if (isEnabled != identity->IsPecoMountLookEnabled)
+    {
+        identity->IsPecoMountLookEnabled = isEnabled;
+        // Its row is there once a slot has had an identity (every save writes it too)
+        CharacterDatabase.Execute("UPDATE `mod_rowow_identity_character` SET `peco_mount_look` = {} WHERE `guid` = {}", isEnabled == true ? 1 : 0, identity->CharacterGUID);
+        if (player->IsInWorld() == true)
+            RefreshWorldIdentityLook(player); // On a mount now: the Peco or the mount at once
+    }
+    SendSpriteJobsToClient(player);
+    return true;
+}
+
+void ROWOWMod::SendSpriteJobsToClient(Player* player)
+{
+    // ROWOWSPRITE: "<1 with an identity in any save slot, else 0><tab><the job picked, -1 for the job of the slot in use><tab><1 while the Peco is
+    // shown in a ground mount's place out of Midgard, 0 with the mount shown as it is>", then for each job that may be picked "<tab><job ID>:<job
+    // name>" (the name with spaces for rAthena's underscores).  A job picked that can't be shown now is told as -1.  Sent when asked for (.ro
+    // spritejob), each time the client's interface has loaded (ROWOW_IdentityServerScript), on every arrival (CompleteROFormChange) and whenever
+    // it changes
+    ROWOWIdentity* identity = GetIdentity(player);
+    std::vector<uint16> spriteJobIDs = GetSpriteJobIDs(player);
+    int32 spriteJobID = -1;
+    for (uint16 jobID : spriteJobIDs)
+        if (int32(jobID) == identity->SpriteJobID)
+            spriteJobID = identity->SpriteJobID;
+    std::string addonMessage = fmt::format("ROWOWSPRITE\t{}\t{}\t{}", HasAnyIdentity(*identity) == true ? 1 : 0, spriteJobID, identity->IsPecoMountLookEnabled == true ? 1 : 0);
+    for (uint16 jobID : spriteJobIDs)
+    {
+        std::string jobName = GetJob(jobID)->Name;
+        std::replace(jobName.begin(), jobName.end(), '_', ' ');
+        addonMessage += fmt::format("\t{}:{}", jobID, jobName);
+    }
+    WorldPacket data;
+    ChatHandler::BuildChatPacket(data, CHAT_MSG_SYSTEM, LANG_ADDON, nullptr, nullptr, addonMessage);
+    player->SendDirectMessage(&data);
 }
 
 void ROWOWMod::LoadIdentityRows(Player* player, ROWOWIdentity& slotIdentity)
@@ -1168,8 +1431,11 @@ void ROWOWMod::LoadIdentityRows(Player* player, ROWOWIdentity& slotIdentity)
     ReadPosition(fields, 16, identity->SavePoint);
     ReadPosition(fields, 21, identity->LastPosition);
     ReadPosition(fields, 26, identity->ReturnPosition);
-    identity->HairStyle = fields[31].Get<uint8>();
-    identity->HairColor = fields[32].Get<uint8>();
+    if (identity->IsHairShared == false) // From before the slots' shared head: its own row's, the character's from its next save
+    {
+        identity->HairStyle = fields[31].Get<uint8>();
+        identity->HairColor = fields[32].Get<uint8>();
+    }
     identity->WasInFormAtLoad = fields[33].Get<uint8>() != 0;
     identity->Option = fields[34].Get<uint32>();
     identity->Fame = fields[35].Get<int32>();
@@ -1241,6 +1507,8 @@ void ROWOWMod::DeleteCharacterIdentityRows(ObjectGuid::LowType guid, CharacterDa
         DeleteIdentityRows(identityID, trans);
     trans->Append("DELETE FROM `mod_rowow_identity_slot` WHERE `guid` = {}", guid);
     trans->Append("DELETE FROM `mod_rowow_identity_character` WHERE `guid` = {}", guid);
+    trans->Append("DELETE FROM `mod_rowow_identity_job_history` WHERE `guid` = {}", guid);
+    DeleteWorldIdentityRows(guid, trans);
 }
 
 void ROWOWMod::DeleteIdentityRows(ObjectGuid::LowType guid, CharacterDatabaseTransaction trans)
@@ -1289,8 +1557,11 @@ void ROWOWMod::SaveIdentity(Player* player, CharacterDatabaseTransaction trans, 
 
     // The identity's rows are its slot's; the slot picked and the zeny go to the character's row, which the other slots share
     uint32 guid = identity->IdentityID;
-    trans->Append("REPLACE INTO `mod_rowow_identity_character` (`guid`, `slot`, `zeny`) VALUES ({}, {}, {})", player->GetGUID().GetCounter(), identity->Slot, identity->Zeny);
+    // ... with the head and the job sprite picked, which they share too
+    trans->Append("REPLACE INTO `mod_rowow_identity_character` (`guid`, `slot`, `zeny`, `hair_style`, `hair_color`, `sprite_job`, `peco_mount_look`) VALUES ({}, {}, {}, {}, {}, {}, {})",
+        player->GetGUID().GetCounter(), identity->Slot, identity->Zeny, identity->HairStyle, identity->HairColor, identity->SpriteJobID, identity->IsPecoMountLookEnabled == true ? 1 : 0);
     identity->IsZenyShared = true;
+    identity->IsHairShared = identity->HairStyle != 0;
     ROWOWPosition const& savePoint = identity->SavePoint;
     ROWOWPosition const& lastPosition = identity->LastPosition;
     ROWOWPosition const& returnPosition = identity->ReturnPosition;
@@ -1396,6 +1667,8 @@ void ROWOWMod::EnterROForm(Player* player)
     {
         InitNewIdentity(*identity);
         identity->IsNewIdentityPending = true;
+        RecordJobHistory(player, *identity, identity->JobID);
+        SendSpriteJobsToClient(player);
     }
 
     // The world travel spell's way back on the form's action bars is World Return (identities from before it had the travel spell itself)
@@ -1435,10 +1708,16 @@ void ROWOWMod::EnterROForm(Player* player)
     UpdateCarriedSet(player, *identity);
 
     // The client forgets the character's spells (the server keeps them, and refuses them while in the form), keeping the form's
+    // With Midgard Worldwalker (Nathan 2026-11-09) none are forgotten: the character's own spells stay known in the form, their passives stay on
+    // (CompleteROFormChange suspends the hidden spells' only) and they may be cast (IsWorldwalkerOpen)
     identity->HiddenSpellIDs.clear();
+    bool isWorldwalkerOpen = HasMidgardWorldwalker(player);
+    GetWorldIdentityState(player)->IsWorldwalkerOpen = isWorldwalkerOpen;
     uint8 activeSpec = player->GetActiveSpec();
     for (auto const& spellByID : player->GetSpellMap())
     {
+        if (isWorldwalkerOpen == true)
+            break;
         if (spellByID.second->State == PLAYERSPELL_REMOVED || spellByID.second->Active == false || spellByID.second->IsInSpec(activeSpec) == false)
             continue;
         if (IsSpellKeptInROForm(sSpellMgr->GetSpellInfo(spellByID.first)) == true)
@@ -1447,6 +1726,8 @@ void ROWOWMod::EnterROForm(Player* player)
     }
     for (auto const& talentBySpellID : player->GetTalentMap())
     {
+        if (isWorldwalkerOpen == true)
+            break;
         if (talentBySpellID.second->State == PLAYERSPELL_REMOVED || (talentBySpellID.second->specMask & player->GetActiveSpecMask()) == 0 || talentBySpellID.second->inSpellBook == true)
             continue;
         identity->HiddenSpellIDs.push_back(talentBySpellID.first);
@@ -1507,7 +1788,9 @@ void ROWOWMod::CompleteROFormChange(Player* player)
             uint32 formSP = player->GetPower(POWER_MANA);
             StowCharacterPet(player, *identity);
             player->UnsummonAllTotems();
-            RemovePositiveAuras(player, [](uint32 /*spellID*/) { return false; });
+            // (An identity's look is client hidden, which this leaves on; its sprite's head and headgear are kept too: RefreshROFormLook below
+            // takes off what the form doesn't show)
+            RemovePositiveAuras(player, [this](uint32 spellID) { return HeadSpellIDs.find(spellID) != HeadSpellIDs.end() || HeadgearSpellIDs.find(spellID) != HeadgearSpellIDs.end(); });
             identity->SuspendedPassiveSpellIDs.clear();
             for (uint32 spellID : identity->HiddenSpellIDs)
             {
@@ -1539,6 +1822,9 @@ void ROWOWMod::CompleteROFormChange(Player* player)
             ChatHandler(player->GetSession()).PSendSysMessage("You are a Ragnarok Online {}, base level {} and job level {}.", job != nullptr ? job->Name : "?",
                 identity->BaseLevel, identity->JobLevel);
 
+            // The Midgard achievements of an identity already past their levels (any save slot's)
+            CheckMidgardAchievements(player);
+
             // The statuses kept from the last time in the RO world (RO's login), once the character's own buffs are gone
             RestoreStatusChanges(player, *identity);
         }
@@ -1557,7 +1843,7 @@ void ROWOWMod::CompleteROFormChange(Player* player)
         for (uint8 powerIndex = 0; powerIndex < MAX_POWERS; powerIndex++)
             powers[powerIndex] = identity->IsFormDeparturePending == true ? identity->WoWPowers[powerIndex] : player->GetPower(Powers(powerIndex));
         if (identity->IsFormDeparturePending == true)
-            RemovePositiveAuras(player, [](uint32 /*spellID*/) { return false; });
+            RemovePositiveAuras(player, [this](uint32 spellID) { return HeadSpellIDs.find(spellID) != HeadSpellIDs.end() || HeadgearSpellIDs.find(spellID) != HeadgearSpellIDs.end(); });
         RemoveROFormAuras(player);
         if (identity->IsFormDeparturePending == true)
         {
@@ -1587,6 +1873,10 @@ void ROWOWMod::CompleteROFormChange(Player* player)
     identity->WasInFormAtLoad = false;
     if (isFormChanged == true)
         SendFormActionButtons(player, *identity); // In the world now, so the client takes every button (the arrival's left the other side's on the empty ones)
+    // The identity for the world arrived in (out of the form too: the Ragnarok or EverQuest identity in Azeroth and Norrath), and the client told of it
+    RefreshWorldIdentityLook(player);
+    SendWorldIdentityToClient(player, true);
+    SendSpriteJobsToClient(player); // With the identities: an interface that loaded while the character was between maps wasn't told (ROWOW_IdentityServerScript)
     SendROFormStateToClient(player);
     SendWorldTravelSpellsToClient(player);
     SendROStatusToClient(player);
@@ -1845,13 +2135,16 @@ void ROWOWMod::StopViewingROSet(Player* player)
 
 void ROWOWMod::SendRagnarokPageToClient(Player* player, char const* blockedText)
 {
-    // ROWOWPAGE: "N" with no identity yet, "B<tab><why>" when the bags can't be opened now, else "V" (its carried set is on the character) or "C" (put
-    // away), then "<tab><illusion job key><tab><job name><tab><base level><tab><job level><tab><zeny><tab><base exp><tab><HP><tab><SP><tab><STR>,<AGI>,
+    // ROWOWPAGE: "N" with no identity yet in any save slot (the page then has the hair picked), "M<tab><hair style><tab><hair color>" with none in the
+    // slot in use but one in another (a new one here has their head: no hair to pick), "B<tab><why>" when the bags can't be opened now, else "V" (its carried set is on the character) or "C" (put
+    // away), then "<tab><illusion job key of the job sprite shown: GetIdentityLookJob><tab><job name><tab><base level><tab><job level><tab><zeny><tab><base exp><tab><HP><tab><SP><tab><STR>,<AGI>,
     // <VIT>,<INT>,<DEX>,<LUK><tab><area>" (the HP and SP as saved: past any maximum for a new identity, which is full).  The save slots' list comes first
     ROWOWIdentity* identity = GetIdentity(player);
     SendIdentitySlotsToClient(player);
     std::string addonMessage;
-    if (identity->Exists == false)
+    if (identity->Exists == false && HasOtherIdentity(*identity) == true)
+        addonMessage = fmt::format("ROWOWPAGE\tM\t{}\t{}", identity->HairStyle, identity->HairColor);
+    else if (identity->Exists == false)
         addonMessage = "ROWOWPAGE\tN";
     else if (blockedText != nullptr)
         addonMessage = fmt::format("ROWOWPAGE\tB\t{}", blockedText);
@@ -1859,7 +2152,7 @@ void ROWOWMod::SendRagnarokPageToClient(Player* player, char const* blockedText)
     {
         ROWOWJob const* job = GetJob(identity->JobID);
         addonMessage = fmt::format("ROWOWPAGE\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{},{},{},{},{},{}\t{}", identity->IsViewingROSet == true ? "V" : "C",
-            job != nullptr ? job->IllusionJobKey : "", job != nullptr ? job->Name : "?", identity->BaseLevel, identity->JobLevel, identity->Zeny, identity->BaseExp,
+            GetIdentityLookJobKey(player), job != nullptr ? job->Name : "?", identity->BaseLevel, identity->JobLevel, identity->Zeny, identity->BaseExp,
             identity->HP, identity->SP, identity->Stats[0], identity->Stats[1], identity->Stats[2], identity->Stats[3], identity->Stats[4], identity->Stats[5],
             identity->PageAreaName);
     }
@@ -1888,20 +2181,28 @@ bool ROWOWMod::CreateIdentity(Player* player, uint32 hairStyle, uint32 hairColor
     ROWOWIdentity* identity = GetIdentity(player);
     if (IsEnabled == false || identity->Exists == true || identity->IsInForm == true || IsROMap(player->GetMapId()) == true)
         return false;
-    if (HeadSpellIDsByKey.find(GetHeadKey(hairStyle, hairColor, player->getGender() == GENDER_MALE)) == HeadSpellIDsByKey.end())
+    // One head for every save slot (Nathan 2026-11-09): the hair is picked for the character's first identity only, and one made beside others has theirs
+    bool isHairPicked = HasOtherIdentity(*identity) == false;
+    if (isHairPicked == true && HeadSpellIDsByKey.find(GetHeadKey(hairStyle, hairColor, player->getGender() == GENDER_MALE)) == HeadSpellIDsByKey.end())
         return false;
     if (player->IsInCombat() == true || player->IsAlive() == false || player->IsBeingTeleported() == true)
         return false;
     InitNewIdentity(*identity);
     identity->IsNewIdentityPending = true;
-    identity->HairStyle = uint8(hairStyle);
-    identity->HairColor = uint8(hairColor);
+    if (isHairPicked == true)
+    {
+        identity->HairStyle = uint8(hairStyle);
+        identity->HairColor = uint8(hairColor);
+    }
+    RecordJobHistory(player, *identity, identity->JobID);
     identity->IsViewingROSet = true;
     UpdateCarriedSet(player, *identity);
     GiveNewIdentityStartItems(player, *identity);
     player->SaveToDB(false, false);
     UpdatePageAreaName(*identity);
-    LOG_INFO("module.ROWOW", "{} made a Ragnarok Online character on the Ragnarok page (hair {} {})", player->GetName(), hairStyle, hairColor);
+    LOG_INFO("module.ROWOW", "{} made a Ragnarok Online character on the Ragnarok page (hair {} {}, {})", player->GetName(), identity->HairStyle, identity->HairColor,
+        isHairPicked == true ? "picked" : "its other save slots'");
+    SendSpriteJobsToClient(player);
     SendRagnarokPageToClient(player);
     SendEquipmentToClient(player, *identity, true);
     SendItemCardsToClient(player, *identity, true);
@@ -1984,6 +2285,7 @@ bool ROWOWMod::SelectIdentitySlot(Player* player, uint8 slot)
     oldIdentitySlot.Exists = identity->Exists;
     oldIdentitySlot.JobID = identity->JobID;
     oldIdentitySlot.JobLevel = identity->JobLevel;
+    oldIdentitySlot.BaseLevel = identity->Exists == true ? identity->BaseLevel : 0;
     ROWOWIdentitySlot& newIdentitySlot = identity->Slots[slot - 1];
     if (newIdentitySlot.IdentityID == 0)
         newIdentitySlot.IdentityID = slot == 1 ? guid : ++LastIdentityID;
@@ -2009,7 +2311,12 @@ bool ROWOWMod::SelectIdentitySlot(Player* player, uint8 slot)
         trans->Append("REPLACE INTO `mod_rowow_identity_slot` (`guid`, `slot`, `identity`, `name`) VALUES ({}, {}, {}, '{}')", guid, slotIndex + 1, identitySlot.IdentityID, name);
         identitySlot.IsStored = true;
     }
-    trans->Append("REPLACE INTO `mod_rowow_identity_character` (`guid`, `slot`, `zeny`) VALUES ({}, {}, {})", guid, slot, identity->Zeny);
+    // The head goes with the character once a slot has had an identity (this one, saved above, when no row had it yet)
+    bool isHairShared = identity->IsHairShared == true || (identity->Exists == true && identity->HairStyle != 0);
+    uint8 hairStyle = identity->HairStyle;
+    uint8 hairColor = identity->HairColor;
+    trans->Append("REPLACE INTO `mod_rowow_identity_character` (`guid`, `slot`, `zeny`, `hair_style`, `hair_color`, `sprite_job`, `peco_mount_look`) VALUES ({}, {}, {}, {}, {}, {}, {})",
+        guid, slot, identity->Zeny, isHairShared == true ? hairStyle : 0, isHairShared == true ? hairColor : 0, identity->SpriteJobID, identity->IsPecoMountLookEnabled == true ? 1 : 0);
     CharacterDatabase.CommitTransaction(trans);
 
     // The slot's identity in this one's place
@@ -2017,6 +2324,9 @@ bool ROWOWMod::SelectIdentitySlot(Player* player, uint8 slot)
     ROWOWScriptVariables accountVariables = identity->AccountVariables;
     uint32 zeny = identity->Zeny;
     uint32 mapKey = identity->MapKey;
+    std::set<uint16> jobHistoryJobIDs = identity->JobHistoryJobIDs;
+    int32 spriteJobID = identity->SpriteJobID;
+    bool isPecoMountLookEnabled = identity->IsPecoMountLookEnabled;
     player->CustomData.Erase("ROWOWIdentity");
     identity = player->CustomData.GetDefault<ROWOWIdentity>("ROWOWIdentity");
     identity->IsLoaded = true;
@@ -2027,6 +2337,16 @@ bool ROWOWMod::SelectIdentitySlot(Player* player, uint8 slot)
     identity->Zeny = zeny;
     identity->IsZenyShared = true;
     identity->MapKey = mapKey;
+    // The look the slots share: the head (the slot's own rows keep only a copy), the job history and the job sprite picked
+    if (isHairShared == true)
+    {
+        identity->HairStyle = hairStyle;
+        identity->HairColor = hairColor;
+        identity->IsHairShared = true;
+    }
+    identity->JobHistoryJobIDs = jobHistoryJobIDs;
+    identity->SpriteJobID = spriteJobID;
+    identity->IsPecoMountLookEnabled = isPecoMountLookEnabled;
     LoadIdentityRows(player, *identity);
     identity->AccountVariables = accountVariables; // Its rows may not have the save above yet
     LOG_INFO("module.ROWOW", "{} changed Ragnarok Online save slot {} for {} ({}, identity {})", player->GetName(), oldSlot, slot,
@@ -2039,6 +2359,7 @@ bool ROWOWMod::SelectIdentitySlot(Player* player, uint8 slot)
     else
         SendRagnarokPageToClient(player);
     SendROStatusToClient(player);
+    SendHairToClient(player);
     return true;
 }
 
@@ -2238,42 +2559,25 @@ void ROWOWMod::RefreshROForm(Player* player)
 
 void ROWOWMod::RefreshROFormLook(Player* player)
 {
-    // The job's look, in the character's gender: riding its Peco, the job's mounted body (R9.5; the converter's job key with "_riding")
-    ROWOWIdentity* identity = GetIdentity(player);
-    ROWOWJob const* job = GetJob(identity->JobID);
-    uint32 wantedIllusionSpellID = 0;
-    if (job != nullptr)
-    {
-        bool isMale = player->getGender() == GENDER_MALE;
-        auto illusionSpellIDIter = IllusionSpellIDsByJobKey.end();
-        if (PCIsRiding(player) == true)
-            illusionSpellIDIter = IllusionSpellIDsByJobKey.find(GetIllusionJobKey(job->IllusionJobKey + "_riding", isMale));
-        if (illusionSpellIDIter == IllusionSpellIDsByJobKey.end())
-            illusionSpellIDIter = IllusionSpellIDsByJobKey.find(GetIllusionJobKey(job->IllusionJobKey, isMale));
-        if (illusionSpellIDIter != IllusionSpellIDsByJobKey.end())
-            wantedIllusionSpellID = illusionSpellIDIter->second;
-    }
-    std::vector<uint32> illusionSpellIDsToRemove;
-    for (auto const& illusionBySpellID : IllusionsBySpellID)
-        if (illusionBySpellID.first != wantedIllusionSpellID && player->HasAura(illusionBySpellID.first) == true)
-            illusionSpellIDsToRemove.push_back(illusionBySpellID.first);
-    for (uint32 spellID : illusionSpellIDsToRemove)
-        player->RemoveAurasDueToSpell(spellID);
-    if (wantedIllusionSpellID != 0 && player->HasAura(wantedIllusionSpellID) == false)
-        player->AddAura(wantedIllusionSpellID, player);
-    RefreshIllusionDisplay(player);
+    // The look's job (the job sprite picked, else the slot's own job: GetIdentityLookJob), in the character's gender: riding its Peco, the job's mounted
+    // body (R9.5; the converter's job key with "_riding")
+    // ... while the character's identity for the world is the Ragnarok one: with another (Midgard Wayfarer) the form keeps everything but the body
+    // shown.  RefreshWorldIdentityLook does all of it, as a client hidden aura (no buff icon, nothing to click off)
+    RefreshWorldIdentityLook(player);
 }
 
 void ROWOWMod::RemoveROFormAuras(Player* player)
 {
+    // What the form alone shows comes off.  The job sprite an identity put on (a client hidden aura), its head and its headgear are left to
+    // RefreshWorldIdentityLook, which CompleteROFormChange calls after this: a character that shows its Ragnarok identity in the world it has
+    // arrived in already wears them (they were made right before it arrived), and taking them off here only to put them back made its model
+    // load again; any other identity's refresh takes them off
     std::vector<uint32> illusionSpellIDs;
     for (auto const& illusionBySpellID : IllusionsBySpellID)
-        if (player->HasAura(illusionBySpellID.first) == true)
+        if (player->HasAura(illusionBySpellID.first) == true && IsWorldIdentityLookAura(player, illusionBySpellID.first) == false)
             illusionSpellIDs.push_back(illusionBySpellID.first);
     for (uint32 spellID : illusionSpellIDs)
         player->RemoveAurasDueToSpell(spellID);
-    RefreshIllusionHead(player, nullptr);
-    RefreshIllusionHeadgear(player, nullptr);
     RefreshIllusionOptionLooks(player, nullptr);
     RefreshIllusionGarment(player, nullptr);
     RefreshIllusionHatEffects(player, nullptr);
@@ -2338,6 +2642,7 @@ void ROWOWMod::LeaveROForm(Player* player)
         player->SendInitialActionButtons();
     }
     identity->HiddenSpellIDs.clear();
+    GetWorldIdentityState(player)->IsWorldwalkerOpen = false;
 
     identity->IsFormDeparturePending = true;
     identity->IsFormArrivalPending = false;
@@ -2351,6 +2656,37 @@ void ROWOWMod::SendROFormStateToClient(Player* player) const
     WorldPacket data;
     ChatHandler::BuildChatPacket(data, CHAT_MSG_SYSTEM, LANG_ADDON, nullptr, nullptr, addonMessage);
     player->SendDirectMessage(&data);
+}
+
+void ROWOWMod::OpenWorldwalker(Player* player)
+{
+    // Midgard Worldwalker earned in the form: what the arrival hid and suspended comes back, as leaving the form brings it back (LeaveROForm,
+    // CompleteROFormChange), and from now the form is as one that arrived with the achievement
+    ROWOWIdentity* identity = GetIdentity(player);
+    ROWOWWorldIdentityState* state = GetWorldIdentityState(player);
+    if (identity->IsInForm == false || state->IsWorldwalkerOpen == true)
+        return;
+    state->IsWorldwalkerOpen = true;
+    for (uint32 spellID : identity->HiddenSpellIDs)
+        SendQuietSpellChange(player, spellID, true);
+    identity->HiddenSpellIDs.clear();
+    uint32 formHealth = player->GetHealth();
+    uint32 formSP = player->GetPower(POWER_MANA);
+    for (uint32 spellID : identity->SuspendedPassiveSpellIDs)
+    {
+        SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(spellID);
+        if (spellInfo != nullptr && (player->HasSpell(spellID) == true || player->HasTalent(spellID, player->GetActiveSpec()) == true) &&
+            player->IsNeedCastPassiveSpellAtLearn(spellInfo) == true && player->HasAura(spellID) == false)
+            player->CastSpell(player, spellID, true);
+    }
+    identity->SuspendedPassiveSpellIDs.clear();
+    // The passives coming back change maximums the form overrides: the form's HP and SP stay what they were
+    if (player->IsAlive() == true)
+    {
+        player->SetHealth(std::min(formHealth, player->GetMaxHealth()));
+        player->SetPower(POWER_MANA, std::min(formSP, player->GetMaxPower(POWER_MANA)));
+    }
+    ChatHandler(player->GetSession()).SendSysMessage("Midgard Worldwalker: your own abilities are open to you in Midgard.");
 }
 
 bool ROWOWMod::GetWorldTravelDestination(Player* player, ROWOWPosition& destinationOut)
