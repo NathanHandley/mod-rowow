@@ -281,7 +281,7 @@ void ROWOWMod::SendCartToClient(Player* player, ROWOWIdentity& identity, bool is
 void ROWOWMod::LoadIdentityCart(Player* player, ROWOWIdentity& identity) const
 {
     if (QueryResult cartResult = CharacterDatabase.Query("SELECT `slot`, `item_template`, `count`, `enchantments`, `creator` FROM `mod_rowow_identity_cart` WHERE `guid` = {}",
-        player->GetGUID().GetCounter()))
+        identity.IdentityID))
     {
         do
         {
@@ -302,11 +302,11 @@ void ROWOWMod::LoadIdentityCart(Player* player, ROWOWIdentity& identity) const
     StatusCalcCartWeight(player, identity);
 }
 
-void ROWOWMod::SaveIdentityCart(Player* player, ROWOWIdentity& identity, CharacterDatabaseTransaction trans) const
+void ROWOWMod::SaveIdentityCart(Player* /*player*/, ROWOWIdentity& identity, CharacterDatabaseTransaction trans) const
 {
     if (identity.AreCartItemsChanged == false)
         return;
-    uint32 guid = player->GetGUID().GetCounter();
+    uint32 guid = identity.IdentityID;
     trans->Append("DELETE FROM `mod_rowow_identity_cart` WHERE `guid` = {}", guid);
     for (int32 slot = 0; slot < ROWOW_MAX_CART; slot++)
     {

@@ -52,6 +52,7 @@ public:
         ROWOW->LoadIllusionData();
         ROWOW->LoadMapGridData();
         ROWOW->LoadIdentityData();
+        ROWOW->LoadLastIdentityID();
         ROWOW->LoadStatusData();
         ROWOW->LoadBattleData();
         ROWOW->LoadMobSpawnData();

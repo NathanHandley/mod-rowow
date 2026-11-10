@@ -554,11 +554,11 @@ void ROWOWMod::SaveIdentityPet(Player* /*player*/, ROWOWIdentity& identity, Char
         SavePet(identity.Pet->Pet, trans);
 }
 
-void ROWOWMod::LoadIdentityPet(Player* player, ROWOWIdentity& identity)
+void ROWOWMod::LoadIdentityPet(Player* /*player*/, ROWOWIdentity& identity)
 {
     // sd->status.pet_id and intif_request_petdata: the pet that's out, which comes back with its master
     QueryResult result = CharacterDatabase.Query("SELECT `PetID`, `OwnerGUID`, `MobID`, `Name`, `Level`, `EggID`, `EquipID`, `Intimate`, `Hungry`, `IsRenamed`, `IsIncubate` FROM `mod_rowow_pet` "
-        "WHERE `OwnerGUID` = {} AND `IsIncubate` = 0", player->GetGUID().GetCounter());
+        "WHERE `OwnerGUID` = {} AND `IsIncubate` = 0", identity.IdentityID);
     if (result == nullptr)
         return;
     ROWOWPet pet;
@@ -623,7 +623,7 @@ bool ROWOWMod::PetCreateEgg(Player* sd, ROWOWPetDB const& db)
     CharacterDatabase.EscapeString(name);
     CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
     trans->Append("INSERT INTO `mod_rowow_pet` (`PetID`, `OwnerGUID`, `MobID`, `Name`, `Level`, `EggID`, `EquipID`, `Intimate`, `Hungry`, `IsRenamed`, `IsIncubate`) VALUES ({}, {}, {}, '{}', {}, {}, 0, {}, {}, 0, 1)",
-        petID, sd->GetGUID().GetCounter(), db.MobID, name, uint32(mobTable->GetInt(size_t(mobRowIndex), mobTable->GetColumnIndex("Level"), 1)), db.EggID, db.Intimate, ROWOW_PET_HUNGRY_STUFFED);
+        petID, GetIdentity(sd)->IdentityID, db.MobID, name, uint32(mobTable->GetInt(size_t(mobRowIndex), mobTable->GetColumnIndex("Level"), 1)), db.EggID, db.Intimate, ROWOW_PET_HUNGRY_STUFFED);
     sd->SaveInventoryAndGoldToDB(trans);
     CharacterDatabase.CommitTransaction(trans);
     return true;
@@ -679,7 +679,7 @@ void ROWOWMod::PetSelectEgg(Player* sd, ObjectGuid::LowType itemGUID)
         return;
     }
     pet.IsIncubate = false;
-    pet.OwnerGUID = sd->GetGUID().GetCounter();
+    pet.OwnerGUID = identity->IdentityID; // char_id: the identity's
     uint32 count = 1;
     sd->DestroyItemCount(egg, count, true);
     PetDataInit(*identity, pet);

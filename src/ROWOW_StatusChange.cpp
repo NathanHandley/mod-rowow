@@ -3160,7 +3160,7 @@ void ROWOWMod::SaveIdentityStatusChanges(Player* player, ROWOWIdentity& identity
         StoreIdentityStatusChanges(player, identity);
     else if (identity.AreStatusChangesChanged == false)
         return;
-    uint32 guid = player->GetGUID().GetCounter();
+    uint32 guid = identity.IdentityID;
     trans->Append("DELETE FROM `mod_rowow_identity_status` WHERE `guid` = {}", guid);
     for (ROWOWSavedStatusChange const& saved : identity.SavedStatusChanges)
         trans->Append("INSERT INTO `mod_rowow_identity_status` (`guid`, `type`, `tick`, `val1`, `val2`, `val3`, `val4`) VALUES ({}, {}, {}, {}, {}, {}, {})", guid,

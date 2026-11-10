@@ -84,8 +84,10 @@ void ROWOWMod::LoadFameLists(ObjectGuid::LowType skippedGUID)
         for (ROWOWJobMapID const& jobMapID : ROWOWJobMapIDs)
             if ((uint64(jobMapID.MapID) & ROWOW_MAPID_SECONDMASK) == GetFameMapID(fameType))
                 jobIDs += fmt::format("{}{}", jobIDs.empty() == true ? "" : ",", jobMapID.JobID);
-        QueryResult result = CharacterDatabase.Query("SELECT i.`guid`, i.`fame`, c.`name` FROM `mod_rowow_identity` i JOIN `characters` c ON c.`guid` = i.`guid` "
-            "WHERE i.`fame` > 0 AND i.`job` IN ({}) AND i.`guid` <> {} ORDER BY i.`fame` DESC LIMIT {}", jobIDs, skippedGUID, ROWOW_MAX_FAME_LIST);
+        // An identity in another save slot than the first is keyed by its own ID: its character is its slot's (the lists name the character, as forged items do)
+        QueryResult result = CharacterDatabase.Query("SELECT c.`guid`, i.`fame`, c.`name` FROM `mod_rowow_identity` i LEFT JOIN `mod_rowow_identity_slot` s ON s.`identity` = i.`guid` "
+            "JOIN `characters` c ON c.`guid` = COALESCE(s.`guid`, i.`guid`) WHERE i.`fame` > 0 AND i.`job` IN ({}) AND c.`guid` <> {} ORDER BY i.`fame` DESC LIMIT {}",
+            jobIDs, skippedGUID, ROWOW_MAX_FAME_LIST);
         if (!result)
             continue;
         do

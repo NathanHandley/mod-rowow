@@ -552,13 +552,13 @@ void ROWOWMod::SendQuestsToClient(Player* player)
     SendQuestMessage(player, "E");
 }
 
-void ROWOWMod::LoadIdentityQuests(Player* player, ROWOWIdentity& identity)
+void ROWOWMod::LoadIdentityQuests(Player* /*player*/, ROWOWIdentity& identity)
 {
     // The active and inactive quests first, then the completed ones (as rAthena keeps quest_log)
     identity.Quests.clear();
     std::vector<ROWOWQuestEntry> completedQuests;
     if (QueryResult result = CharacterDatabase.Query("SELECT `quest_id`, `state`, `time`, `count1`, `count2`, `count3` FROM `mod_rowow_identity_quest` WHERE `guid` = {} "
-        "ORDER BY `slot`", player->GetGUID().GetCounter()))
+        "ORDER BY `slot`", identity.IdentityID))
     {
         do
         {
@@ -580,11 +580,11 @@ void ROWOWMod::LoadIdentityQuests(Player* player, ROWOWIdentity& identity)
     identity.AreQuestsChanged = false;
 }
 
-void ROWOWMod::SaveIdentityQuests(Player* player, ROWOWIdentity& identity, CharacterDatabaseTransaction trans)
+void ROWOWMod::SaveIdentityQuests(Player* /*player*/, ROWOWIdentity& identity, CharacterDatabaseTransaction trans)
 {
     if (identity.AreQuestsChanged == false)
         return;
-    uint32 guid = player->GetGUID().GetCounter();
+    uint32 guid = identity.IdentityID;
     trans->Append("DELETE FROM `mod_rowow_identity_quest` WHERE `guid` = {}", guid);
     for (size_t slot = 0; slot < identity.Quests.size(); slot++)
     {

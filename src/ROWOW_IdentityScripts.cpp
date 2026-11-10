@@ -464,10 +464,12 @@ public:
         // (in account storage, with another character, in a mail or the guild bank): it goes only with no such egg.  Fame's lists had the character's name
         if (ROWOW->IsEnabled == false)
             return;
-        ROWOW->DeleteIdentityRows(guid, trans);
-        trans->Append("DELETE `pet` FROM `mod_rowow_pet` `pet` WHERE `pet`.`OwnerGUID` = {} AND NOT EXISTS (SELECT 1 FROM `item_instance` `egg` WHERE (`egg`.`owner_guid` <> {} OR "
-            "`egg`.`guid` IN (SELECT `item` FROM `account_bank_item`)) AND SUBSTRING_INDEX(SUBSTRING_INDEX(`egg`.`enchantments`, ' ', {}), ' ', -1) COLLATE utf8mb4_bin = CAST(`pet`.`PetID` + {} AS CHAR) COLLATE utf8mb4_bin)",
-            guid, guid, uint32(ROWOW_ITEM_PET_ENCHANTMENT_SLOT) * 3 + 1, ROWOW_ITEM_PET_ENCHANTMENT_START);
+        // A pet's OwnerGUID is the identity that last hatched it (any of the character's save slots'), before the slots' rows go
+        trans->Append("DELETE `pet` FROM `mod_rowow_pet` `pet` WHERE (`pet`.`OwnerGUID` = {} OR `pet`.`OwnerGUID` IN (SELECT `identity` FROM `mod_rowow_identity_slot` WHERE `guid` = {})) AND "
+            "NOT EXISTS (SELECT 1 FROM `item_instance` `egg` WHERE (`egg`.`owner_guid` <> {} OR `egg`.`guid` IN (SELECT `item` FROM `account_bank_item`)) AND "
+            "SUBSTRING_INDEX(SUBSTRING_INDEX(`egg`.`enchantments`, ' ', {}), ' ', -1) COLLATE utf8mb4_bin = CAST(`pet`.`PetID` + {} AS CHAR) COLLATE utf8mb4_bin)",
+            guid, guid, guid, uint32(ROWOW_ITEM_PET_ENCHANTMENT_SLOT) * 3 + 1, ROWOW_ITEM_PET_ENCHANTMENT_START);
+        ROWOW->DeleteCharacterIdentityRows(guid, trans);
         ROWOW->LoadFameLists(guid);
     }
 
@@ -1030,6 +1032,8 @@ public:
             { "view",     HandleROViewCommand,   SEC_PLAYER,     Console::No },
             { "create",   HandleROCreateCommand, SEC_PLAYER,     Console::No },
             { "enter",    HandleROEnterCommand,  SEC_PLAYER,     Console::No },
+            { "slot",     HandleROSlotCommand,   SEC_PLAYER,     Console::No },
+            { "slotname", HandleROSlotNameCommand, SEC_PLAYER,   Console::No },
             { "statup",   HandleROStatUpCommand, SEC_PLAYER,     Console::No },
             { "partyoption", HandleROPartyOptionCommand, SEC_PLAYER, Console::No },
             { "pet",      HandleROPetCommand,    SEC_PLAYER,     Console::No },
@@ -2995,6 +2999,27 @@ public:
         return true;
     }
 
+    // The page's save slot drop-down (Nathan 2026-11-09): the slot picked (1 to 3), and the rename of the slot in use
+    static bool HandleROSlotCommand(ChatHandler* handler, uint32 slot)
+    {
+        Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
+        if (player == nullptr || slot < 1 || slot > ROWOW_IDENTITY_SLOT_COUNT)
+            return false;
+        ROWOW->SelectIdentitySlot(player, uint8(slot));
+        return true;
+    }
+
+    static bool HandleROSlotNameCommand(ChatHandler* handler, Tail name)
+    {
+        Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
+        if (player == nullptr)
+            return false;
+        std::string error;
+        if (ROWOW->RenameIdentitySlot(player, std::string(name), error) == false)
+            handler->SendNotification(std::string_view(error));
+        return true;
+    }
+
     static bool HandleROHairCommand(ChatHandler* handler, uint32 style, uint32 color)
     {
         // Options > Video > Ragnarok (the RO_Identity addon): the identity's hair style and color, as a stylist sets them (R9.1)
@@ -3118,15 +3143,28 @@ public:
         // One transaction saves the character as it is now, then deletes the identity's rows and its put away set's items.  It's queued (a save can't be
         // committed directly), so the new identity isn't read from the database, where the old rows may still be: it starts as a new one does, with the
         // account's variables as the old one had them
+        // Only the save slot in use is reset: the new identity keeps its slot, and the zeny the slots share
+        ROWOWIdentity* oldIdentity = ROWOW->GetIdentity(player);
         CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
         player->SaveToDB(trans, false, false);
-        ROWOW->DeleteIdentityRows(player->GetGUID().GetCounter(), trans);
+        ROWOW->DeleteIdentityRows(oldIdentity->IdentityID, trans);
         CharacterDatabase.CommitTransaction(trans); // Before the new identity's save, which is queued after it
-        ROWOWScriptVariables accountVariables = ROWOW->GetIdentity(player)->AccountVariables;
+        ROWOWScriptVariables accountVariables = oldIdentity->AccountVariables;
+        std::array<ROWOWIdentitySlot, ROWOW_IDENTITY_SLOT_COUNT> slots = oldIdentity->Slots;
+        uint8 slot = oldIdentity->Slot;
+        ObjectGuid::LowType identityID = oldIdentity->IdentityID;
+        uint32 zeny = oldIdentity->Zeny;
+        bool isZenyShared = oldIdentity->IsZenyShared;
+        slots[slot - 1].Exists = false;
         player->CustomData.Erase("ROWOWIdentity");
         ROWOWIdentity* identity = player->CustomData.GetDefault<ROWOWIdentity>("ROWOWIdentity");
         identity->IsLoaded = true;
         identity->CharacterGUID = player->GetGUID().GetCounter();
+        identity->Slots = slots;
+        identity->Slot = slot;
+        identity->IdentityID = identityID;
+        identity->Zeny = zeny;
+        identity->IsZenyShared = isZenyShared;
         identity->AccountVariables = accountVariables;
         if (wasInForm == true)
             ROWOW->EnterROForm(player);

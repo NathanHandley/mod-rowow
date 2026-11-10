@@ -251,7 +251,7 @@ bool ROWOWMod::HomCall(Player* sd)
     hd.Vaporize = ROWOW_HOM_ST_ACTIVE;
     FollowerSpawn(sd, hd);
     CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
-    HomSave(hd, sd->GetGUID().GetCounter(), trans);
+    HomSave(hd, GetIdentity(sd)->IdentityID, trans);
     CharacterDatabase.CommitTransaction(trans);
     ClifHomInfo(sd);
     return true;
@@ -275,7 +275,7 @@ bool ROWOWMod::HomVaporize(Player* sd, int32 flag)
     StatusChangeClear(md, 1);
     FollowerUnspawn(sd, *hd);
     CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
-    HomSave(*hd, sd->GetGUID().GetCounter(), trans);
+    HomSave(*hd, GetIdentity(sd)->IdentityID, trans);
     CharacterDatabase.CommitTransaction(trans);
     ClifHomInfo(sd);
     return true;
@@ -300,7 +300,7 @@ void ROWOWMod::HomDelete(Player* sd)
     if (identity->Homunculus == nullptr)
         return;
     FollowerUnspawn(sd, *identity->Homunculus);
-    CharacterDatabase.Execute("DELETE FROM `mod_rowow_homunculus` WHERE `CharacterGUID` = {}", sd->GetGUID().GetCounter());
+    CharacterDatabase.Execute("DELETE FROM `mod_rowow_homunculus` WHERE `CharacterGUID` = {}", identity->IdentityID);
     identity->Homunculus.reset();
     ClifHomInfo(sd);
 }
@@ -446,7 +446,7 @@ bool ROWOWMod::HomEvolution(Player* sd, ROWOWHomunData& hd)
     FollowerSpawn(sd, hd);
     ClifHomInfo(sd);
     CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
-    HomSave(hd, sd->GetGUID().GetCounter(), trans);
+    HomSave(hd, GetIdentity(sd)->IdentityID, trans);
     CharacterDatabase.CommitTransaction(trans);
     return true;
 }
@@ -680,7 +680,7 @@ void ROWOWMod::HomCreate(Player* sd, ROWOWHomunData& hd, ROWOWHomunculusDB const
     hd.SP = hd.BaseStatus.MaxSP;
     FollowerSpawn(sd, hd);
     CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
-    HomSave(hd, sd->GetGUID().GetCounter(), trans);
+    HomSave(hd, GetIdentity(sd)->IdentityID, trans);
     CharacterDatabase.CommitTransaction(trans);
     ClifHomInfo(sd);
 }

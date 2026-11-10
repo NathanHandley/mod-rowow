@@ -1992,13 +1992,34 @@ struct ROWOWStowedItem
     uint8 Slot = 0;
 };
 
+// A character's RO identity save slots (Nathan 2026-11-09): three RO characters per WoW character, one of them in use (mod_rowow_identity_slot,
+// and mod_rowow_identity_character for the one picked and the zeny they share).  Each identity's rows in the identity tables are keyed by its own ID
+// (rAthena's char_id): the character's GUID for the first slot, so the identities from before the slots are its first, and from
+// ROWOW_IDENTITY_ID_SLOT_START up for the others, past any character GUID.  The identities share only the zeny and the account's Ragnarok bank
+#define ROWOW_IDENTITY_SLOT_COUNT                   3
+#define ROWOW_IDENTITY_ID_SLOT_START                0x80000000u
+#define ROWOW_IDENTITY_SLOT_NAME_MAX_LENGTH         24
+struct ROWOWIdentitySlot
+{
+    ObjectGuid::LowType IdentityID = 0; // 0 for a slot never picked (no row yet)
+    std::string Name; // The slot's own name, never the character's ("Slot <n>" until renamed)
+    bool IsStored = false; // Its mod_rowow_identity_slot row is written
+    bool Exists = false; // ... and what the page's slot list shows of its identity (the slot in use reads the identity itself)
+    uint16 JobID = 0;
+    uint32 JobLevel = 0;
+};
+
 // A player's RO identity (mod_rowow_identity and the tables beside it), kept on the player while logged in.  Only the player's own
 // thread (its session's and map's updates) touches it
 struct ROWOWIdentity : public DataMap::Base
 {
     ~ROWOWIdentity() override; // Deletes the put away carried set's items
 
-    ObjectGuid::LowType CharacterGUID = 0; // status.char_id
+    ObjectGuid::LowType CharacterGUID = 0; // The WoW character's GUID (fame's lists and forged items name the character)
+    ObjectGuid::LowType IdentityID = 0; // status.char_id: the key of the identity's rows, the slot's (see ROWOWIdentitySlot)
+    uint8 Slot = 1; // The save slot in use, 1 to ROWOW_IDENTITY_SLOT_COUNT
+    std::array<ROWOWIdentitySlot, ROWOW_IDENTITY_SLOT_COUNT> Slots;
+    bool IsZenyShared = false; // Zeny holds the slots' shared zeny (one of them has had an identity), which a new identity keeps rather than start with its own
     bool IsLoaded = false;
     bool Exists = false; // Made on the first entry into the RO world
     uint16 JobID = ROWOW_JOB_NOVICE;
@@ -2364,10 +2385,23 @@ public:
     void UpdateLoginDeath(Player* player, uint32 diff); // An identity that logged out dead is dead again after its login (pc_authok's 0 HP)
     void CheckNoSaveArrival(Player* player); // After a login on a nosave map: to the save point
 
-    // The player's identity, loaded on first use (a row of defaults until the identity exists)
+    // The player's identity, loaded on first use (a row of defaults until the identity exists): the one in the save slot picked
     ROWOWIdentity* GetIdentity(Player* player);
     void SaveIdentity(Player* player, CharacterDatabaseTransaction trans, bool isInventorySaved);
-    void DeleteIdentityRows(ObjectGuid::LowType guid, CharacterDatabaseTransaction trans);
+    void DeleteIdentityRows(ObjectGuid::LowType identityID, CharacterDatabaseTransaction trans); // One identity's (its ID: a slot's)
+    void DeleteCharacterIdentityRows(ObjectGuid::LowType guid, CharacterDatabaseTransaction trans); // A deleted character's: every slot's, and the slots
+
+    // The save slots (see ROWOWIdentitySlot).  Picked and renamed from the Ragnarok page's drop-down (.ro slot, .ro slotname), the slot list sent with
+    // the page under the ROWOWSLOTS prefix (see SendIdentitySlotsToClient)
+    void LoadIdentitySlots(Player* player, ROWOWIdentity& identity); // Which slot is picked, the slots and the zeny they share
+    void LoadIdentityRows(Player* player, ROWOWIdentity& identity); // The identity of the slot picked (IdentityID), from its rows
+    void LoadLastIdentityID();
+    char const* GetIdentitySlotBlockedText(Player* player, ROWOWIdentity const& identity) const; // Why the slot can't change now, null when it can
+    bool SelectIdentitySlot(Player* player, uint8 slot); // The current identity saved and put away, the slot's loaded (or made, empty)
+    bool RenameIdentitySlot(Player* player, std::string const& name, std::string& errorOut); // The current slot's name
+    static bool MakeIdentitySlotName(std::string const& name, std::string& nameOut, std::string& errorOut); // Trimmed and checked
+    void SendIdentitySlotsToClient(Player* player);
+    std::string GetIdentitySlotDefaultName(uint8 slot) const { return fmt::format("Slot {}", slot); }
 
     // The carried sets (the backpack, the bag slots and the bags' items): the character's own and the form's.  The side the character is on has its set
     // on it and the other is put away, each item kept as it is (its row and GUID) with its place to go back to (see UpdateCarriedSet)
@@ -3349,6 +3383,7 @@ public:
     std::unordered_map<uint64, uint32> PetLookEntriesByKey; // By mob << 32 | accessory: its creature (startup only)
     std::unordered_map<uint64, std::vector<std::string>> PetTalkLinesByKey; // By mob, hunger and act (startup only)
     std::atomic<uint32> LastPetID { 0 }; // The char server's pet id
+    std::atomic<uint32> LastIdentityID { ROWOW_IDENTITY_ID_SLOT_START - 1 }; // The last ID given a save slot's identity (from ROWOW_IDENTITY_ID_SLOT_START up)
     bool ReadPetRow(Field const* fields, ROWOWPet& petOut) const;
     void PetDataInit(ROWOWIdentity& identity, ROWOWPet const& pet); // pet_data_init, without the placing
     void SavePet(ROWOWPet const& pet, CharacterDatabaseTransaction trans) const;

@@ -1555,7 +1555,7 @@ void ROWOWMod::LoadIdentityScriptVariables(Player* player, ROWOWIdentity& identi
     // The character's variables (char_reg_num and char_reg_str, with the C++ rules' own like jobchange_level) and its account's
     identity.Variables.Clear();
     identity.AccountVariables.Clear();
-    if (QueryResult result = CharacterDatabase.Query("SELECT `name`, `index`, `value`, `text` FROM `mod_rowow_identity_variable` WHERE `guid` = {}", player->GetGUID().GetCounter()))
+    if (QueryResult result = CharacterDatabase.Query("SELECT `name`, `index`, `value`, `text` FROM `mod_rowow_identity_variable` WHERE `guid` = {}", identity.IdentityID))
     {
         do
         {
@@ -1599,7 +1599,7 @@ void ROWOWMod::SaveIdentityScriptVariables(Player* player, ROWOWIdentity& identi
         }
         variables.ChangedElements.clear();
     };
-    saveVariables(identity.Variables, "mod_rowow_identity_variable", "guid", player->GetGUID().GetCounter());
+    saveVariables(identity.Variables, "mod_rowow_identity_variable", "guid", identity.IdentityID);
     if (player->GetSession() != nullptr)
         saveVariables(identity.AccountVariables, "mod_rowow_account_variable", "account", player->GetSession()->GetAccountId());
 }

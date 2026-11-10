@@ -190,7 +190,7 @@ bool ROWOWMod::MercenaryCreate(Player* sd, uint32 classID, uint32 lifeTime)
     MercenarySetCalls(sd, 1);
     FollowerSpawn(sd, md);
     CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
-    MercSave(md, sd->GetGUID().GetCounter(), trans);
+    MercSave(md, identity->IdentityID, trans);
     CharacterDatabase.CommitTransaction(trans);
     ClifMercenaryInfo(sd);
     return true;
@@ -227,7 +227,7 @@ void ROWOWMod::MercenaryDelete(Player* sd, int32 reply)
             break;
     }
     FollowerUnspawn(sd, *md);
-    CharacterDatabase.Execute("DELETE FROM `mod_rowow_mercenary` WHERE `CharacterGUID` = {}", sd->GetGUID().GetCounter());
+    CharacterDatabase.Execute("DELETE FROM `mod_rowow_mercenary` WHERE `CharacterGUID` = {}", identity->IdentityID);
     identity->Mercenary.reset();
     ClifMercenaryInfo(sd);
 }

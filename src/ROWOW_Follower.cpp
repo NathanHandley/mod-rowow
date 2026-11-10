@@ -352,8 +352,8 @@ int32 ROWOWMod::GetFollowerDamageLogFlag(Unit const* attacker) const
 
 void ROWOWMod::LoadIdentityFollowers(Player* player, ROWOWIdentity& identity)
 {
-    // sd->status.hom_id and mer_id, intif_homunculus_requestload, intif_mercenary_request and the mercenary_owner row
-    ObjectGuid::LowType charGUID = player->GetGUID().GetCounter();
+    // sd->status.hom_id and mer_id, intif_homunculus_requestload, intif_mercenary_request and the mercenary_owner row (keyed by the identity, its char_id)
+    ObjectGuid::LowType charGUID = identity.IdentityID;
     if (QueryResult result = CharacterDatabase.Query("SELECT `Class`, `PrevClass`, `Name`, `Level`, `Exp`, `Intimacy`, `Hunger`, `Str`, `Agi`, `Vit`, `Int`, `Dex`, `Luk`, `HP`, `MaxHP`, `SP`, `MaxSP`, "
         "`SkillPoints`, `IsRenamed`, `Vaporize`, `IsAutoFeed`, `Skills` FROM `mod_rowow_homunculus` WHERE `CharacterGUID` = {}", charGUID))
     {
@@ -429,10 +429,10 @@ void ROWOWMod::LoadIdentityFollowers(Player* player, ROWOWIdentity& identity)
     }
 }
 
-void ROWOWMod::SaveIdentityFollowers(Player* player, ROWOWIdentity& identity, CharacterDatabaseTransaction trans)
+void ROWOWMod::SaveIdentityFollowers(Player* /*player*/, ROWOWIdentity& identity, CharacterDatabaseTransaction trans)
 {
     // The vitals are the master's update's copy: a save can come with the master out of the world
-    ObjectGuid::LowType charGUID = player->GetGUID().GetCounter();
+    ObjectGuid::LowType charGUID = identity.IdentityID;
     if (identity.Homunculus != nullptr)
         HomSave(*identity.Homunculus, charGUID, trans);
     if (identity.Mercenary != nullptr)

@@ -244,9 +244,9 @@ void ROWOWMod::SkillCastendMap(Player* player, uint16 skillID, std::string const
     identity->MenuSkillValue = 0;
 }
 
-void ROWOWMod::LoadIdentityMemo(Player* player, ROWOWIdentity& identity) const
+void ROWOWMod::LoadIdentityMemo(Player* /*player*/, ROWOWIdentity& identity) const
 {
-    if (QueryResult memoResult = CharacterDatabase.Query("SELECT `slot`, `map`, `x`, `y` FROM `mod_rowow_identity_memo` WHERE `guid` = {}", player->GetGUID().GetCounter()))
+    if (QueryResult memoResult = CharacterDatabase.Query("SELECT `slot`, `map`, `x`, `y` FROM `mod_rowow_identity_memo` WHERE `guid` = {}", identity.IdentityID))
     {
         do
         {
@@ -261,11 +261,11 @@ void ROWOWMod::LoadIdentityMemo(Player* player, ROWOWIdentity& identity) const
     }
 }
 
-void ROWOWMod::SaveIdentityMemo(Player* player, ROWOWIdentity& identity, CharacterDatabaseTransaction trans) const
+void ROWOWMod::SaveIdentityMemo(Player* /*player*/, ROWOWIdentity& identity, CharacterDatabaseTransaction trans) const
 {
     if (identity.AreMemoPointsChanged == false)
         return;
-    uint32 guid = player->GetGUID().GetCounter();
+    uint32 guid = identity.IdentityID;
     trans->Append("DELETE FROM `mod_rowow_identity_memo` WHERE `guid` = {}", guid);
     for (uint8 slot = 0; slot < ROWOW_MAX_MEMOPOINTS; slot++)
     {

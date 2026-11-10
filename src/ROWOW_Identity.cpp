@@ -1050,8 +1050,94 @@ ROWOWIdentity* ROWOWMod::GetIdentity(Player* player)
         return identity;
     identity->IsLoaded = true;
     identity->CharacterGUID = player->GetGUID().GetCounter();
+    LoadIdentitySlots(player, *identity);
+    LoadIdentityRows(player, *identity);
+    return identity;
+}
 
-    uint32 guid = player->GetGUID().GetCounter();
+void ROWOWMod::LoadLastIdentityID()
+{
+    // The slots' identity IDs go on from the highest given (startup, before any session)
+    if (QueryResult result = CharacterDatabase.Query("SELECT MAX(`identity`) FROM `mod_rowow_identity_slot` WHERE `identity` >= {}", ROWOW_IDENTITY_ID_SLOT_START))
+        if (result->Fetch()[0].IsNull() == false)
+            LastIdentityID = std::max<uint32>(result->Fetch()[0].Get<uint32>(), ROWOW_IDENTITY_ID_SLOT_START - 1);
+}
+
+void ROWOWMod::LoadIdentitySlots(Player* player, ROWOWIdentity& identity)
+{
+    // The slot picked and the slots' shared zeny (mod_rowow_identity_character), and each slot's name and identity.  A character from before the slots
+    // has no rows: its identity, if it has one, is slot 1's (its ID is the character's GUID), and its zeny the shared zeny
+    ObjectGuid::LowType guid = player->GetGUID().GetCounter();
+    for (uint8 slotIndex = 0; slotIndex < ROWOW_IDENTITY_SLOT_COUNT; slotIndex++)
+    {
+        identity.Slots[slotIndex] = ROWOWIdentitySlot();
+        identity.Slots[slotIndex].Name = GetIdentitySlotDefaultName(slotIndex + 1);
+    }
+    identity.Slots[0].IdentityID = guid;
+    identity.Slot = 1;
+    identity.IsZenyShared = false;
+    if (QueryResult result = CharacterDatabase.Query("SELECT `slot`, `zeny` FROM `mod_rowow_identity_character` WHERE `guid` = {}", guid))
+    {
+        Field* fields = result->Fetch();
+        identity.Slot = uint8(std::clamp<uint32>(fields[0].Get<uint8>(), 1, ROWOW_IDENTITY_SLOT_COUNT));
+        identity.Zeny = fields[1].Get<uint32>();
+        identity.IsZenyShared = true;
+    }
+    if (QueryResult result = CharacterDatabase.Query("SELECT `slot`, `identity`, `name` FROM `mod_rowow_identity_slot` WHERE `guid` = {}", guid))
+    {
+        do
+        {
+            Field* fields = result->Fetch();
+            uint8 slot = fields[0].Get<uint8>();
+            if (slot < 1 || slot > ROWOW_IDENTITY_SLOT_COUNT)
+                continue;
+            ROWOWIdentitySlot& identitySlot = identity.Slots[slot - 1];
+            if (slot != 1) // Slot 1's is always the character's GUID
+                identitySlot.IdentityID = fields[1].Get<uint32>();
+            if (fields[2].Get<std::string>().empty() == false)
+                identitySlot.Name = fields[2].Get<std::string>();
+            identitySlot.IsStored = true;
+        } while (result->NextRow());
+    }
+    // A slot picked has its ID (a row lost would leave it none: slot 1 then)
+    if (identity.Slots[identity.Slot - 1].IdentityID == 0)
+        identity.Slot = 1;
+    identity.IdentityID = identity.Slots[identity.Slot - 1].IdentityID;
+
+    // What the slot list shows of each identity
+    std::string identityIDs;
+    for (ROWOWIdentitySlot const& identitySlot : identity.Slots)
+        if (identitySlot.IdentityID != 0)
+            identityIDs += fmt::format("{}{}", identityIDs.empty() == true ? "" : ",", identitySlot.IdentityID);
+    if (QueryResult result = CharacterDatabase.Query("SELECT `guid`, `job`, `job_level`, `zeny` FROM `mod_rowow_identity` WHERE `guid` IN ({})", identityIDs))
+    {
+        do
+        {
+            Field* fields = result->Fetch();
+            ObjectGuid::LowType identityID = fields[0].Get<uint32>();
+            for (ROWOWIdentitySlot& identitySlot : identity.Slots)
+            {
+                if (identitySlot.IdentityID != identityID)
+                    continue;
+                identitySlot.Exists = true;
+                identitySlot.JobID = fields[1].Get<uint16>();
+                identitySlot.JobLevel = fields[2].Get<uint8>();
+            }
+            // From before the shared zeny: the identity's own is the shared zeny
+            if (identity.IsZenyShared == false && identityID == identity.IdentityID)
+            {
+                identity.Zeny = fields[3].Get<uint32>();
+                identity.IsZenyShared = true;
+            }
+        } while (result->NextRow());
+    }
+}
+
+void ROWOWMod::LoadIdentityRows(Player* player, ROWOWIdentity& slotIdentity)
+{
+    // The identity of the slot picked, keyed by its ID.  Its zeny is the slots' shared zeny (LoadIdentitySlots), not its row's
+    ROWOWIdentity* identity = &slotIdentity;
+    uint32 guid = identity->IdentityID;
     QueryResult result = CharacterDatabase.Query("SELECT `job`, `base_level`, `base_exp`, `job_level`, `job_exp`, `status_points`, `skill_points`, `str`, `agi`, `vit`, `int`, `dex`, `luk`, "
         "`hp`, `sp`, `zeny`, `save_map`, `save_x`, `save_y`, `save_z`, `save_o`, `last_map`, `last_x`, `last_y`, `last_z`, `last_o`, `return_map`, `return_x`, `return_y`, "
         "`return_z`, `return_o`, `hair_style`, `hair_color`, `in_form`, `option`, `fame`, `carried_set` FROM `mod_rowow_identity` WHERE `guid` = {}", guid);
@@ -1059,7 +1145,7 @@ ROWOWIdentity* ROWOWMod::GetIdentity(Player* player)
     {
         // A new identity shares its account's variables: a # variable set before its first save must not rewrite them from an empty set
         LoadIdentityScriptVariables(player, *identity);
-        return identity;
+        return;
     }
     Field* fields = result->Fetch();
     identity->Exists = true;
@@ -1074,7 +1160,11 @@ ROWOWIdentity* ROWOWMod::GetIdentity(Player* player)
         identity->Stats[statIndex] = fields[7 + statIndex].Get<uint16>();
     identity->HP = fields[13].Get<uint32>();
     identity->SP = fields[14].Get<uint32>();
-    identity->Zeny = fields[15].Get<uint32>();
+    if (identity->IsZenyShared == false)
+    {
+        identity->Zeny = fields[15].Get<uint32>();
+        identity->IsZenyShared = true;
+    }
     ReadPosition(fields, 16, identity->SavePoint);
     ReadPosition(fields, 21, identity->LastPosition);
     ReadPosition(fields, 26, identity->ReturnPosition);
@@ -1135,7 +1225,22 @@ ROWOWIdentity* ROWOWMod::GetIdentity(Player* player)
     LoadIdentityPet(player, *identity);
     LoadIdentityFollowers(player, *identity);
     PCCalcSkillTree(*identity);
-    return identity;
+}
+
+void ROWOWMod::DeleteCharacterIdentityRows(ObjectGuid::LowType guid, CharacterDatabaseTransaction trans)
+{
+    // Every save slot's identity (the first one's ID is the character's GUID), the slots and their shared zeny
+    std::vector<ObjectGuid::LowType> identityIDs = { guid };
+    if (QueryResult result = CharacterDatabase.Query("SELECT `identity` FROM `mod_rowow_identity_slot` WHERE `guid` = {} AND `identity` <> {}", guid, guid))
+    {
+        do
+            identityIDs.push_back(result->Fetch()[0].Get<uint32>());
+        while (result->NextRow());
+    }
+    for (ObjectGuid::LowType identityID : identityIDs)
+        DeleteIdentityRows(identityID, trans);
+    trans->Append("DELETE FROM `mod_rowow_identity_slot` WHERE `guid` = {}", guid);
+    trans->Append("DELETE FROM `mod_rowow_identity_character` WHERE `guid` = {}", guid);
 }
 
 void ROWOWMod::DeleteIdentityRows(ObjectGuid::LowType guid, CharacterDatabaseTransaction trans)
@@ -1182,7 +1287,10 @@ void ROWOWMod::SaveIdentity(Player* player, CharacterDatabaseTransaction trans, 
     if (isInventorySaved == true)
         identity->SavedCarriedSet = identity->CarriedSet;
 
-    uint32 guid = player->GetGUID().GetCounter();
+    // The identity's rows are its slot's; the slot picked and the zeny go to the character's row, which the other slots share
+    uint32 guid = identity->IdentityID;
+    trans->Append("REPLACE INTO `mod_rowow_identity_character` (`guid`, `slot`, `zeny`) VALUES ({}, {}, {})", player->GetGUID().GetCounter(), identity->Slot, identity->Zeny);
+    identity->IsZenyShared = true;
     ROWOWPosition const& savePoint = identity->SavePoint;
     ROWOWPosition const& lastPosition = identity->LastPosition;
     ROWOWPosition const& returnPosition = identity->ReturnPosition;
@@ -1508,7 +1616,9 @@ void ROWOWMod::InitNewIdentity(ROWOWIdentity& identity) const
     identity.SkillPoints = 0;
     for (uint8 statIndex = 0; statIndex < ROWOW_STAT_COUNT; statIndex++)
         identity.Stats[statIndex] = 1;
-    identity.Zeny = StartZeny;
+    // The character's first identity starts with zeny; one in another save slot shares what the others have
+    if (identity.IsZenyShared == false)
+        identity.Zeny = StartZeny;
     identity.HP = ROWOW_IDENTITY_NEW_HP_SP;
     identity.SP = ROWOW_IDENTITY_NEW_HP_SP;
     identity.SavePoint = ROWOWPosition();
@@ -1737,8 +1847,9 @@ void ROWOWMod::SendRagnarokPageToClient(Player* player, char const* blockedText)
 {
     // ROWOWPAGE: "N" with no identity yet, "B<tab><why>" when the bags can't be opened now, else "V" (its carried set is on the character) or "C" (put
     // away), then "<tab><illusion job key><tab><job name><tab><base level><tab><job level><tab><zeny><tab><base exp><tab><HP><tab><SP><tab><STR>,<AGI>,
-    // <VIT>,<INT>,<DEX>,<LUK><tab><area>" (the HP and SP as saved: past any maximum for a new identity, which is full)
+    // <VIT>,<INT>,<DEX>,<LUK><tab><area>" (the HP and SP as saved: past any maximum for a new identity, which is full).  The save slots' list comes first
     ROWOWIdentity* identity = GetIdentity(player);
+    SendIdentitySlotsToClient(player);
     std::string addonMessage;
     if (identity->Exists == false)
         addonMessage = "ROWOWPAGE\tN";
@@ -1798,6 +1909,197 @@ bool ROWOWMod::CreateIdentity(Player* player, uint32 hairStyle, uint32 hairColor
     return true;
 }
 
+void ROWOWMod::SendIdentitySlotsToClient(Player* player)
+{
+    // ROWOWSLOTS: "<slot in use>", then for each slot "<tab><name><tab>E<tab><job name><tab><job level>" with an identity, "<tab><name><tab>N<tab><tab>"
+    // with none yet
+    ROWOWIdentity* identity = GetIdentity(player);
+    std::string addonMessage = fmt::format("ROWOWSLOTS\t{}", identity->Slot);
+    for (uint8 slotIndex = 0; slotIndex < ROWOW_IDENTITY_SLOT_COUNT; slotIndex++)
+    {
+        ROWOWIdentitySlot const& identitySlot = identity->Slots[slotIndex];
+        bool isInUse = slotIndex + 1 == identity->Slot;
+        bool exists = isInUse == true ? identity->Exists : identitySlot.Exists;
+        ROWOWJob const* job = exists == true ? GetJob(isInUse == true ? identity->JobID : identitySlot.JobID) : nullptr;
+        if (exists == true)
+            addonMessage += fmt::format("\t{}\tE\t{}\t{}", identitySlot.Name, job != nullptr ? job->Name : "?", isInUse == true ? identity->JobLevel : identitySlot.JobLevel);
+        else
+            addonMessage += fmt::format("\t{}\tN\t\t", identitySlot.Name);
+    }
+    WorldPacket data;
+    ChatHandler::BuildChatPacket(data, CHAT_MSG_SYSTEM, LANG_ADDON, nullptr, nullptr, addonMessage);
+    player->SendDirectMessage(&data);
+}
+
+char const* ROWOWMod::GetIdentitySlotBlockedText(Player* player, ROWOWIdentity const& identity) const
+{
+    // Out of the RO world only (the Ragnarok page), with nothing under way that the identity's things or the character's bags are in
+    if (identity.IsInForm == true || IsROMap(player->GetMapId()) == true)
+        return "You can't change your Ragnarok Online character in the Ragnarok Online world.";
+    if (player->IsInCombat() == true)
+        return "You can't change your Ragnarok Online character in combat.";
+    if (player->IsAlive() == false)
+        return "You can't change your Ragnarok Online character while dead.";
+    if (player->IsBeingTeleported() == true || player->GetTradeData() != nullptr || player->GetLootGUID() || player->IsNonMeleeSpellCast(false) == true ||
+        IsWorldTravelRequested(player) == true || identity.IsLeavingForReset == true)
+        return "You can't change your Ragnarok Online character right now.";
+    return nullptr;
+}
+
+bool ROWOWMod::SelectIdentitySlot(Player* player, uint8 slot)
+{
+    // The page's drop-down (.ro slot): the identity in use is saved with its carried set put away, and the slot's is loaded in its place, its carried
+    // set on the character if the page showed the bags.  A slot never picked gets its identity ID (and row) now; with no identity yet the page offers
+    // to make one.  World thread, with the maps idle
+    ROWOWIdentity* identity = GetIdentity(player);
+    if (IsEnabled == false || slot < 1 || slot > ROWOW_IDENTITY_SLOT_COUNT)
+        return false;
+    if (slot == identity->Slot)
+    {
+        SendRagnarokPageToClient(player);
+        return true;
+    }
+    if (char const* blockedText = GetIdentitySlotBlockedText(player, *identity))
+    {
+        ChatHandler(player->GetSession()).SendNotification(blockedText);
+        SendRagnarokPageToClient(player); // The drop-down back on the slot in use
+        return false;
+    }
+
+    // The form's carried set put away and the character's own back on it.  One from before the sets were apart is set apart first (as the page's bags
+    // do), so the next identity's set never meets this one's things
+    bool wasViewing = identity->IsViewingROSet;
+    if (identity->Exists == true && identity->CarriedSet == ROWOW_CARRIED_SET_NONE)
+    {
+        identity->IsViewingROSet = true;
+        UpdateCarriedSet(player, *identity);
+    }
+    identity->IsViewingROSet = false;
+    UpdateCarriedSet(player, *identity);
+
+    // The slot list's line of the identity put away, and the slot picked: one never picked gets its identity's ID
+    ObjectGuid::LowType guid = player->GetGUID().GetCounter();
+    uint8 oldSlot = identity->Slot;
+    ROWOWIdentitySlot& oldIdentitySlot = identity->Slots[oldSlot - 1];
+    oldIdentitySlot.Exists = identity->Exists;
+    oldIdentitySlot.JobID = identity->JobID;
+    oldIdentitySlot.JobLevel = identity->JobLevel;
+    ROWOWIdentitySlot& newIdentitySlot = identity->Slots[slot - 1];
+    if (newIdentitySlot.IdentityID == 0)
+        newIdentitySlot.IdentityID = slot == 1 ? guid : ++LastIdentityID;
+    // A character that never had an identity: the zeny its first one starts with is the slots' from now
+    if (identity->IsZenyShared == false)
+    {
+        identity->Zeny = StartZeny;
+        identity->IsZenyShared = true;
+    }
+
+    // One transaction saves the character as it is now (this identity's rows, its put away set's and the bags'), the slots and the slot picked.  It's
+    // queued (a save can't be committed directly), so the next identity is read from its own rows, which this doesn't write, and gets the account's
+    // variables and the zeny from this one
+    CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
+    player->SaveToDB(trans, false, false);
+    for (uint8 slotIndex = 0; slotIndex < ROWOW_IDENTITY_SLOT_COUNT; slotIndex++)
+    {
+        ROWOWIdentitySlot& identitySlot = identity->Slots[slotIndex];
+        if (identitySlot.IdentityID == 0 || identitySlot.IsStored == true)
+            continue;
+        std::string name = identitySlot.Name;
+        CharacterDatabase.EscapeString(name);
+        trans->Append("REPLACE INTO `mod_rowow_identity_slot` (`guid`, `slot`, `identity`, `name`) VALUES ({}, {}, {}, '{}')", guid, slotIndex + 1, identitySlot.IdentityID, name);
+        identitySlot.IsStored = true;
+    }
+    trans->Append("REPLACE INTO `mod_rowow_identity_character` (`guid`, `slot`, `zeny`) VALUES ({}, {}, {})", guid, slot, identity->Zeny);
+    CharacterDatabase.CommitTransaction(trans);
+
+    // The slot's identity in this one's place
+    std::array<ROWOWIdentitySlot, ROWOW_IDENTITY_SLOT_COUNT> slots = identity->Slots;
+    ROWOWScriptVariables accountVariables = identity->AccountVariables;
+    uint32 zeny = identity->Zeny;
+    uint32 mapKey = identity->MapKey;
+    player->CustomData.Erase("ROWOWIdentity");
+    identity = player->CustomData.GetDefault<ROWOWIdentity>("ROWOWIdentity");
+    identity->IsLoaded = true;
+    identity->CharacterGUID = guid;
+    identity->Slots = slots;
+    identity->Slot = slot;
+    identity->IdentityID = slots[slot - 1].IdentityID;
+    identity->Zeny = zeny;
+    identity->IsZenyShared = true;
+    identity->MapKey = mapKey;
+    LoadIdentityRows(player, *identity);
+    identity->AccountVariables = accountVariables; // Its rows may not have the save above yet
+    LOG_INFO("module.ROWOW", "{} changed Ragnarok Online save slot {} for {} ({}, identity {})", player->GetName(), oldSlot, slot,
+        identity->Exists == true ? "an identity" : "none yet", identity->IdentityID);
+
+    if (wasViewing == true)
+        StartViewingROSet(player);
+    else
+        SendRagnarokPageToClient(player);
+    SendROStatusToClient(player);
+    return true;
+}
+
+bool ROWOWMod::MakeIdentitySlotName(std::string const& name, std::string& nameOut, std::string& errorOut)
+{
+    // Trimmed, with each run of spaces inside made one: 1 to ROWOW_IDENTITY_SLOT_NAME_MAX_LENGTH letters, digits, spaces and ' - _ . ! ?  (no link or
+    // escape (|), no tab, which the slot list is split by, nor the parentheses the drop-down puts the job in)
+    nameOut.clear();
+    for (char character : name)
+    {
+        if (character == ' ')
+        {
+            if (nameOut.empty() == false && nameOut.back() != ' ')
+                nameOut += ' ';
+            continue;
+        }
+        bool isAllowed = (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9') ||
+            character == '\'' || character == '-' || character == '_' || character == '.' || character == '!' || character == '?';
+        if (isAllowed == false)
+        {
+            errorOut = "A save slot's name can only have letters, numbers, spaces and ' - _ . ! ?";
+            return false;
+        }
+        nameOut += character;
+    }
+    while (nameOut.empty() == false && nameOut.back() == ' ')
+        nameOut.pop_back();
+    if (nameOut.empty() == true)
+    {
+        errorOut = "A save slot's name can't be empty.";
+        return false;
+    }
+    if (nameOut.size() > ROWOW_IDENTITY_SLOT_NAME_MAX_LENGTH)
+    {
+        errorOut = fmt::format("A save slot's name can have at most {} characters.", ROWOW_IDENTITY_SLOT_NAME_MAX_LENGTH);
+        return false;
+    }
+    return true;
+}
+
+bool ROWOWMod::RenameIdentitySlot(Player* player, std::string const& name, std::string& errorOut)
+{
+    // The page's rename button (.ro slotname): the name of the slot in use, never the character's.  The slot list goes back either way
+    ROWOWIdentity* identity = GetIdentity(player);
+    std::string slotName;
+    if (IsEnabled == false)
+        return false;
+    if (MakeIdentitySlotName(name, slotName, errorOut) == false)
+    {
+        SendIdentitySlotsToClient(player);
+        return false;
+    }
+    ROWOWIdentitySlot& identitySlot = identity->Slots[identity->Slot - 1];
+    identitySlot.Name = slotName;
+    identitySlot.IsStored = true;
+    std::string escapedName = slotName;
+    CharacterDatabase.EscapeString(escapedName);
+    CharacterDatabase.Execute("REPLACE INTO `mod_rowow_identity_slot` (`guid`, `slot`, `identity`, `name`) VALUES ({}, {}, {}, '{}')", player->GetGUID().GetCounter(), identity->Slot,
+        identitySlot.IdentityID, escapedName);
+    SendIdentitySlotsToClient(player);
+    return true;
+}
+
 void ROWOWMod::StartWorldTravel(Player* player)
 {
     // The Ragnarok page's Enter button (.ro enter): the world travel spell's cast, as the spell book's was.  The character's own bags are back on it first
@@ -1839,7 +2141,7 @@ void ROWOWMod::LoadIdentityStowedItems(Player* player, ROWOWIdentity& identity) 
     QueryResult result = CharacterDatabase.Query("SELECT `instance`.`creatorGuid`, `instance`.`giftCreatorGuid`, `instance`.`count`, `instance`.`duration`, `instance`.`charges`, "
         "`instance`.`flags`, `instance`.`enchantments`, `instance`.`randomPropertyId`, `instance`.`durability`, `instance`.`playedTime`, `instance`.`text`, `stowed`.`bag`, "
         "`stowed`.`slot`, `stowed`.`item_guid`, `instance`.`itemEntry` FROM `mod_rowow_identity_stowed_item` `stowed` JOIN `item_instance` `instance` ON `instance`.`guid` = "
-        "`stowed`.`item_guid` WHERE `stowed`.`guid` = {}", player->GetGUID().GetCounter());
+        "`stowed`.`item_guid` WHERE `stowed`.`guid` = {}", identity.IdentityID);
     if (!result)
         return;
     do
@@ -1870,13 +2172,13 @@ void ROWOWMod::LoadIdentityStowedItems(Player* player, ROWOWIdentity& identity) 
     } while (result->NextRow());
 }
 
-void ROWOWMod::SaveIdentityStowedItems(Player* player, ROWOWIdentity& identity, CharacterDatabaseTransaction trans) const
+void ROWOWMod::SaveIdentityStowedItems(Player* /*player*/, ROWOWIdentity& identity, CharacterDatabaseTransaction trans) const
 {
     // In the inventory save's transaction: the put away items leave the bags' rows (and the account bank's) as they come into the set's, with their
     // item_instance rows as they are now, and the items that came back have their bags' rows from the same save (Player::_SaveInventory)
     if (identity.AreStowedItemsChanged == false)
         return;
-    uint32 guid = player->GetGUID().GetCounter();
+    uint32 guid = identity.IdentityID;
     trans->Append("DELETE FROM `mod_rowow_identity_stowed_item` WHERE `guid` = {}", guid);
     for (ROWOWStowedItem const& stowedItem : identity.StowedItems)
     {
