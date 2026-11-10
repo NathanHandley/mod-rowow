@@ -2160,6 +2160,9 @@ struct ROWOWIdentity : public DataMap::Base
     // Out of the form, the character window's Ragnarok page has the form's carried set on the character while it's shown, so its equipment and bags
     // can be changed there (StartViewingROSet; Nathan 2026-11-04).  Never saved: anything that isn't the page's ends it first (StopViewingROSet)
     bool IsViewingROSet = false;
+    // The page is open on the client (.ro view 1 until .ro view 0), whether or not the set is on the character: a slot with no identity has no set to put on,
+    // and combat puts the set away with the page still open.  A save slot picked on an open page shows that slot's bags (SelectIdentitySlot)
+    bool IsPageShown = false;
     std::string PageAreaName; // The page's MAP: the area the identity is in in the RO world, found when the page asks for its bags (world thread)
     uint64 WorldTravelRequestTick = 0; // When the Ragnarok page's Enter button asked for the world travel spell (.ro enter), the only way into the RO world
     bool IsLeavingForReset = false; // .ro identity reset takes the form off, on an RO map too, where CompleteROFormChange would put it back on

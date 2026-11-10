@@ -2966,6 +2966,7 @@ public:
         Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
         if (player == nullptr)
             return false;
+        ROWOW->GetIdentity(player)->IsPageShown = isViewing != 0;
         if (isViewing != 0)
             ROWOW->StartViewingROSet(player);
         else

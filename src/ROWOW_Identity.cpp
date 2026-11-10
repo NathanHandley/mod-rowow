@@ -1968,7 +1968,7 @@ bool ROWOWMod::SelectIdentitySlot(Player* player, uint8 slot)
 
     // The form's carried set put away and the character's own back on it.  One from before the sets were apart is set apart first (as the page's bags
     // do), so the next identity's set never meets this one's things
-    bool wasViewing = identity->IsViewingROSet;
+    bool wasPageShown = identity->IsPageShown;
     if (identity->Exists == true && identity->CarriedSet == ROWOW_CARRIED_SET_NONE)
     {
         identity->IsViewingROSet = true;
@@ -2032,7 +2032,9 @@ bool ROWOWMod::SelectIdentitySlot(Player* player, uint8 slot)
     LOG_INFO("module.ROWOW", "{} changed Ragnarok Online save slot {} for {} ({}, identity {})", player->GetName(), oldSlot, slot,
         identity->Exists == true ? "an identity" : "none yet", identity->IdentityID);
 
-    if (wasViewing == true)
+    // On the open page the slot's bags are shown, whatever the last slot had (an empty one has no bags to have been viewing; Nathan 2026-11-09)
+    identity->IsPageShown = wasPageShown;
+    if (wasPageShown == true)
         StartViewingROSet(player);
     else
         SendRagnarokPageToClient(player);
