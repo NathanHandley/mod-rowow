@@ -20,9 +20,10 @@
 //   first comma: "Prontera City"), then those items' templates, spells and skills.  The area lookup may load terrain, so it's only made in the world
 //   thread: on the addon's .ro sync (every loading screen and interface reload), and once a second for a client whose save point changed (a Kafra)
 // - The return tether, a hearthstone's gate in RO: a Butterfly Wing or Teleport's save point (ReturnToSavePoint) in the RO world leaves a 30 minute
-//   aura (the converter's Special_ReturnTether marker spell).  Clicking it off goes back to where the teleport was used.  The identity keeps it
-//   (mod_rowow_identity_tether), so it lasts through a relog (its 30 minutes are real time, offline too); the next return-to-save replaces it.  Its rules:
-//   - Only in the form, in the RO world: leaving Midgard ends it (the travel back in goes to where it left anyway)
+//   aura (the converter's Special_ReturnTether marker spell).  Clicking it off goes back to where the teleport was used.  The identity (its save slot)
+//   keeps it (mod_rowow_identity_tether, the time it has left); the next return-to-save replaces it.  Its rules:
+//   - Its 30 minutes count down only while its save slot is played in the RO world (Nathan 2026-11-11): leaving Midgard, a change of save slot or a
+//     logout hide its aura and stop its time, which goes on when the slot is back in Midgard (the aura then too)
 //   - Not given for a spot that can't be warped to (a nowarpto map)
 //   - Clicked off while dead, in combat, unable to act (a status that stops casting) or on a noreturn map it isn't used: the aura comes back with the time
 //     it had left, and the player is told why
@@ -31,7 +32,6 @@
 #include "Chat.h"
 #include "DBCStores.h"
 #include "DatabaseEnv.h"
-#include "GameTime.h"
 #include "Log.h"
 #include "MapMgr.h"
 #include "Player.h"
@@ -51,12 +51,18 @@
 
 namespace
 {
-    constexpr uint32 ROWOW_RETURN_TETHER_DURATION_IN_SECONDS = 30 * MINUTE;
+    constexpr uint32 ROWOW_RETURN_TETHER_DURATION_IN_MS = 30 * MINUTE * IN_MILLISECONDS;
     constexpr uint32 ROWOW_SAVE_PLACE_UPDATE_INTERVAL_IN_MS = 1000;
 
     bool IsSamePosition(ROWOWPosition const& first, ROWOWPosition const& second)
     {
         return first.IsSet == second.IsSet && first.MapID == second.MapID && first.X == second.X && first.Y == second.Y && first.Z == second.Z;
+    }
+
+    bool IsReturnTetherCounting(Player const* player, ROWOWIdentity const& identity)
+    {
+        // The identity's tether shows and its time counts down only while the identity (its save slot) is played in the RO world
+        return identity.ReturnTetherOrigin.IsSet == true && identity.ReturnTetherRemainingMS > 0 && identity.IsInForm == true && ROWOW->IsROMap(player->GetMapId()) == true;
     }
 
     void SendAddonText(Player* player, std::string const& addonMessage)
@@ -93,7 +99,7 @@ void ROWOWMod::SetReturnTether(Player* player, ROWOWPosition const& origin)
         return;
     ROWOWIdentity* identity = GetIdentity(player);
     identity->ReturnTetherOrigin = origin;
-    identity->ReturnTetherExpireTime = uint32(GameTime::GetGameTime().count()) + ROWOW_RETURN_TETHER_DURATION_IN_SECONDS;
+    identity->ReturnTetherRemainingMS = ROWOW_RETURN_TETHER_DURATION_IN_MS;
     player->RemoveAurasDueToSpell(ReturnTetherSpellID); // A new one replaces the last, with its full time
     RefreshReturnTether(player);
     ChatHandler(player->GetSession()).SendSysMessage("A return tether holds the way back for 30 minutes: click it off your buffs to return to where you teleported from.");
@@ -105,7 +111,7 @@ void ROWOWMod::ClearReturnTether(Player* player)
     if (identity == nullptr)
         return;
     identity->ReturnTetherOrigin = ROWOWPosition();
-    identity->ReturnTetherExpireTime = 0;
+    identity->ReturnTetherRemainingMS = 0;
     identity->IsReturnTetherUsePending = false;
     if (ReturnTetherSpellID != 0 && player->HasAura(ReturnTetherSpellID) == true)
         player->RemoveAurasDueToSpell(ReturnTetherSpellID);
@@ -114,23 +120,19 @@ void ROWOWMod::ClearReturnTether(Player* player)
 void ROWOWMod::RefreshReturnTether(Player* player)
 {
     // After every map arrival and form change (CompleteROFormChange), and when it's set or refused.  The core saves the aura with the character, so one
-    // loaded with it is set to the identity's time here, or taken off
+    // loaded with it is set to the identity's time here, or taken off.  Out of the RO world (or the form) the tether is kept, its aura hidden: the
+    // identity's time stands still until it's back (UpdateReturnTether)
     if (ReturnTetherSpellID == 0 || player == nullptr)
         return;
     ROWOWIdentity* identity = player->CustomData.Get<ROWOWIdentity>("ROWOWIdentity");
     if (identity == nullptr)
         return;
-    uint32 now = uint32(GameTime::GetGameTime().count());
-    if (identity->ReturnTetherOrigin.IsSet == true && (identity->ReturnTetherExpireTime <= now || identity->IsInForm == false))
-    {
+    if (identity->ReturnTetherOrigin.IsSet == true && identity->ReturnTetherRemainingMS == 0)
         identity->ReturnTetherOrigin = ROWOWPosition();
-        identity->ReturnTetherExpireTime = 0;
-    }
-    bool isWanted = identity->ReturnTetherOrigin.IsSet == true && identity->IsInForm == true && IsROMap(player->GetMapId()) == true;
-    if (isWanted == false)
+    if (IsReturnTetherCounting(player, *identity) == false)
     {
         if (player->HasAura(ReturnTetherSpellID) == true)
-            player->RemoveAurasDueToSpell(ReturnTetherSpellID);
+            player->RemoveAurasDueToSpell(ReturnTetherSpellID); // Not AURA_REMOVE_BY_CANCEL nor by expiry: the tether stays (OnReturnTetherAuraRemoved)
         return;
     }
     SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(ReturnTetherSpellID);
@@ -141,9 +143,24 @@ void ROWOWMod::RefreshReturnTether(Player* player)
         aura = player->AddAura(spellInfo, MAX_EFFECT_MASK, player); // The overload that also takes a dead target
     if (aura == nullptr)
         return;
-    int32 durationInMS = int32(std::min(identity->ReturnTetherExpireTime - now, ROWOW_RETURN_TETHER_DURATION_IN_SECONDS) * IN_MILLISECONDS);
-    aura->SetMaxDuration(int32(ROWOW_RETURN_TETHER_DURATION_IN_SECONDS * IN_MILLISECONDS));
-    aura->SetDuration(durationInMS);
+    aura->SetMaxDuration(int32(ROWOW_RETURN_TETHER_DURATION_IN_MS));
+    aura->SetDuration(int32(std::min(identity->ReturnTetherRemainingMS, ROWOW_RETURN_TETHER_DURATION_IN_MS)));
+}
+
+void ROWOWMod::UpdateReturnTether(Player* player, uint32 diffInMS)
+{
+    // The player's update (its map's thread; none while it's between maps or logged out): the tether's time goes down only while its identity is
+    // played in the RO world, the aura's with it.  Run out, it's over (the aura's own expiry, a moment apart, ends it the same way)
+    ROWOWIdentity* identity = player->CustomData.Get<ROWOWIdentity>("ROWOWIdentity");
+    if (identity == nullptr || player->IsInWorld() == false || player->IsBeingTeleported() == true || IsReturnTetherCounting(player, *identity) == false)
+        return;
+    if (identity->ReturnTetherRemainingMS > diffInMS)
+    {
+        identity->ReturnTetherRemainingMS -= diffInMS;
+        return;
+    }
+    ClearReturnTether(player);
+    ChatHandler(player->GetSession()).SendSysMessage("Your return tether has faded.");
 }
 
 void ROWOWMod::OnReturnTetherAuraRemoved(Player* player, bool isCancelled, bool isExpired)
@@ -158,7 +175,7 @@ void ROWOWMod::OnReturnTetherAuraRemoved(Player* player, bool isCancelled, bool 
     else if (isExpired == true)
     {
         identity->ReturnTetherOrigin = ROWOWPosition();
-        identity->ReturnTetherExpireTime = 0;
+        identity->ReturnTetherRemainingMS = 0;
         ChatHandler(player->GetSession()).SendSysMessage("Your return tether has faded.");
     }
 }
@@ -173,11 +190,13 @@ void ROWOWMod::UseReturnTether(Player* player)
     identity->IsReturnTetherUsePending = false;
     if (identity->ReturnTetherOrigin.IsSet == false)
         return;
-    if (identity->ReturnTetherExpireTime <= uint32(GameTime::GetGameTime().count()) || identity->IsInForm == false || IsROMap(player->GetMapId()) == false)
+    if (identity->ReturnTetherRemainingMS == 0)
     {
         ClearReturnTether(player);
         return;
     }
+    if (IsReturnTetherCounting(player, *identity) == false)
+        return; // Clicked off as it left the RO world: kept for the identity's return (RefreshReturnTether)
     auto refuse = [this, player](char const* text)
     {
         ChatHandler(player->GetSession()).SendNotification(text);
@@ -207,14 +226,15 @@ void ROWOWMod::UseReturnTether(Player* player)
 
 void ROWOWMod::LoadIdentityReturnTether(ROWOWIdentity& identity)
 {
+    // The identity's (its save slot's) tether, with the time it had left when it was last saved
     identity.ReturnTetherOrigin = ROWOWPosition();
-    identity.ReturnTetherExpireTime = 0;
-    QueryResult result = CharacterDatabase.Query("SELECT `map`, `x`, `y`, `z`, `o`, `expire_time` FROM `mod_rowow_identity_tether` WHERE `guid` = {}", identity.IdentityID);
+    identity.ReturnTetherRemainingMS = 0;
+    QueryResult result = CharacterDatabase.Query("SELECT `map`, `x`, `y`, `z`, `o`, `remaining_ms` FROM `mod_rowow_identity_tether` WHERE `guid` = {}", identity.IdentityID);
     if (!result)
         return;
     Field* fields = result->Fetch();
-    uint32 expireTime = fields[5].Get<uint32>();
-    if (expireTime <= uint32(GameTime::GetGameTime().count()))
+    uint32 remainingMS = std::min(fields[5].Get<uint32>(), ROWOW_RETURN_TETHER_DURATION_IN_MS);
+    if (remainingMS == 0)
         return;
     identity.ReturnTetherOrigin.IsSet = true;
     identity.ReturnTetherOrigin.MapID = fields[0].Get<uint32>();
@@ -222,17 +242,17 @@ void ROWOWMod::LoadIdentityReturnTether(ROWOWIdentity& identity)
     identity.ReturnTetherOrigin.Y = fields[2].Get<float>();
     identity.ReturnTetherOrigin.Z = fields[3].Get<float>();
     identity.ReturnTetherOrigin.O = fields[4].Get<float>();
-    identity.ReturnTetherExpireTime = expireTime;
+    identity.ReturnTetherRemainingMS = remainingMS;
 }
 
 void ROWOWMod::SaveIdentityReturnTether(ROWOWIdentity const& identity, CharacterDatabaseTransaction trans)
 {
     trans->Append("DELETE FROM `mod_rowow_identity_tether` WHERE `guid` = {}", identity.IdentityID);
     ROWOWPosition const& origin = identity.ReturnTetherOrigin;
-    if (origin.IsSet == false || identity.ReturnTetherExpireTime <= uint32(GameTime::GetGameTime().count()))
+    if (origin.IsSet == false || identity.ReturnTetherRemainingMS == 0)
         return;
-    trans->Append("INSERT INTO `mod_rowow_identity_tether` (`guid`, `map`, `x`, `y`, `z`, `o`, `expire_time`) VALUES ({}, {}, {}, {}, {}, {}, {})", identity.IdentityID,
-        origin.MapID, origin.X, origin.Y, origin.Z, origin.O, identity.ReturnTetherExpireTime);
+    trans->Append("INSERT INTO `mod_rowow_identity_tether` (`guid`, `map`, `x`, `y`, `z`, `o`, `remaining_ms`) VALUES ({}, {}, {}, {}, {}, {}, {})", identity.IdentityID,
+        origin.MapID, origin.X, origin.Y, origin.Z, origin.O, identity.ReturnTetherRemainingMS);
 }
 
 void ROWOWMod::LoadReturnToSaveData()
@@ -364,13 +384,16 @@ class ROWOW_ReturnTetherPlayerScript : public PlayerScript
 public:
     ROWOW_ReturnTetherPlayerScript() : PlayerScript("ROWOW_ReturnTetherPlayerScript", { PLAYERHOOK_ON_UPDATE }) {}
 
-    void OnPlayerUpdate(Player* player, uint32 /*p_time*/) override
+    void OnPlayerUpdate(Player* player, uint32 p_time) override
     {
         if (ROWOW->IsEnabled == false)
             return;
         ROWOWIdentity* identity = player->CustomData.Get<ROWOWIdentity>("ROWOWIdentity");
-        if (identity != nullptr && identity->IsReturnTetherUsePending == true)
+        if (identity == nullptr)
+            return;
+        if (identity->IsReturnTetherUsePending == true)
             ROWOW->UseReturnTether(player);
+        ROWOW->UpdateReturnTether(player, p_time);
     }
 };
 

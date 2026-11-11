@@ -2233,7 +2233,7 @@ void ROWOWMod::CompleteROFormChange(Player* player)
     SendROFormStateToClient(player);
     SendWorldTravelSpellsToClient(player);
     SendROStatusToClient(player);
-    RefreshReturnTether(player); // Its aura in the RO world with the time it has left; out of it, the tether is over (ROWOW_ReturnTether.cpp)
+    RefreshReturnTether(player); // Its aura in the RO world with the time it has left; out of it, hidden with its time held (ROWOW_ReturnTether.cpp)
     if (identity->IsInForm == true)
     {
         SendSkillsToClient(player, *identity, true);

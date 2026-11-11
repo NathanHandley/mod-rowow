@@ -2109,10 +2109,10 @@ struct ROWOWIdentity : public DataMap::Base
     ROWOWPosition SavePoint;
     ROWOWPosition LastPosition; // Where the identity last left the RO world, which the world travel spell goes back to
     ROWOWPosition ReturnPosition; // Where the character entered the RO world from, which the world travel spell returns to
-    // The return tether (Nathan 2026-11-10, ROWOW_ReturnTether.cpp; mod_rowow_identity_tether): where the last return-to-save teleport left from, until
-    // ReturnTetherExpireTime (unix seconds).  Clicking its aura off goes back there
+    // The return tether (Nathan 2026-11-10, ROWOW_ReturnTether.cpp; mod_rowow_identity_tether): where the last return-to-save teleport left from, for
+    // ReturnTetherRemainingMS more, which counts down only while this identity is played in the RO world (Nathan 2026-11-11).  Clicking its aura off goes back there
     ROWOWPosition ReturnTetherOrigin;
-    uint32 ReturnTetherExpireTime = 0;
+    uint32 ReturnTetherRemainingMS = 0;
     bool IsReturnTetherUsePending = false; // Its aura was clicked off: the player's next update takes it back (UseReturnTether)
     ROWOWPosition SentSavePlacePoint; // The save point the client was last told the place of (ROWOWSAVE; world thread)
     bool IsSavePlaceSent = false;
@@ -2735,7 +2735,8 @@ public:
     void TeleportToSavePoint(Player* player); // The identity's save point (AL_TELEPORT level 2 and up)
 
     // Return-to-save teleports (ROWOW_ReturnTether.cpp, Nathan 2026-11-10): the items' and skills' tooltips say where the save point is (ROWOWSAVE), and
-    // a teleport to it leaves a 30 minute return tether aura that, clicked off, goes back to where it was used
+    // a teleport to it leaves a 30 minute return tether aura that, clicked off, goes back to where it was used.  Its 30 minutes are the save slot's and
+    // count down only while that slot is played in the RO world (Nathan 2026-11-11)
     uint32 ReturnTetherSpellID = 0; // mod_rowow_status_spell's Special_ReturnTether (0: no tether)
     bool IsReturnToSaveDataLoaded = false;
     std::string ReturnToSaveItemTemplateIDsText; // The items whose use goes to the save point (a Butterfly Wing), as the ROWOWSAVE list
@@ -2747,6 +2748,7 @@ public:
     void RefreshReturnTether(Player* player); // Its aura as the identity's tether says (only in the form, in the RO world)
     void OnReturnTetherAuraRemoved(Player* player, bool isCancelled, bool isExpired);
     void UseReturnTether(Player* player); // The player's update, after its aura was clicked off
+    void UpdateReturnTether(Player* player, uint32 diffInMS); // The player's update: its time counts down while the identity is played in the RO world
     void LoadIdentityReturnTether(ROWOWIdentity& identity);
     void SaveIdentityReturnTether(ROWOWIdentity const& identity, CharacterDatabaseTransaction trans);
     void LoadReturnToSaveData(); // World thread, once the items and skills are loaded
