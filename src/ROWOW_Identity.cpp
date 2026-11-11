@@ -334,6 +334,7 @@ void ROWOWMod::LoadIdentityData()
     StatusPointsByBaseLevel.clear();
     MapIDsByMapName.clear();
     MapNamesByMapID.clear();
+    MapAliasNames.clear();
     MapPartsByMapName.clear();
     MapPartsByMapKey.clear();
     MapPartIndexesByMapID.clear();
@@ -456,6 +457,8 @@ void ROWOWMod::LoadIdentityData()
                 part.FormerMapID = fields[7].Get<uint32>();
                 part.Name = mapName;
                 MapIDsByMapName[mapName] = mapID;
+                if (isAlias == true)
+                    MapAliasNames.insert(mapName);
                 if (isAlias == false && part.HasArea() == false)
                     MapNamesByMapID[mapID] = mapName; // A part's own name is the part's (GetMapNameAt), not the stitched map's
                 if (part.CellOffsetX != 0 || part.CellOffsetY != 0 || part.HasArea() == true || part.FormerMapID != 0)
@@ -623,6 +626,7 @@ void ROWOWMod::LoadIdentityData()
     LOG_INFO("module.ROWOW", "ROWOWMod::LoadIdentityData loaded {} jobs, {} map names, {} items and {} start items (start map {} cell {},{}), start bag {}", JobsByID.size(),
         MapIDsByMapName.size(), ItemTemplateIDs.size(), StartItems.size(), StartMapID, StartCellX, StartCellY, StartBagItemTemplateID);
     MoveSavedSpotsOffStitchedMaps();
+    MoveSavedSpotsOnMovedParts();
 }
 
 uint64 ROWOWMod::GetIllusionJobKey(std::string const& jobKey, bool isMale)
@@ -824,6 +828,199 @@ void ROWOWMod::MoveSavedSpotsOffStitchedMaps()
         LOG_INFO("module.ROWOW", "ROWOWMod::MoveSavedSpotsOffStitchedMaps moved {} saved spots from the maps now stitched into others ({})", movedCount, formerMapIDsText);
 }
 
+void ROWOWMod::MoveSavedSpotsOnMovedParts()
+{
+    // A stitched map's grid has its middle at the WoW origin, so moving a part of it in RoMapMerges, or anything that changes the grid's size, moves
+    // the WoW position of that part's cells (and of the other parts' too): a spot saved before is then on another cell, often under or over the ground.
+    // grp_training_ground's new_zone03 moved from offset 0,224 to 200,224 (2026-11-10): the grid grew from 200 to 400 cells across, and every save
+    // point there, the start cell's, was then 105 yards off, under new_zone01's castle (Nathan: every login put Bits under the ground there).  Each
+    // startup keeps the layout it ran with (mod_rowow_map_layout, in the character database), and a part found elsewhere since takes the spots saved
+    // on it along, to the same cell of it.  At startup, before any session (the world thread, on the character database directly)
+    if (!CharacterDatabase.Query("SELECT 1 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'mod_rowow_map_layout'"))
+    {
+        LOG_ERROR("module.ROWOW", "ROWOWMod::MoveSavedSpotsOnMovedParts found no mod_rowow_map_layout table (the module's character database update), so saved spots on a "
+            "stitched map's moved parts aren't moved with them");
+        return;
+    }
+    struct ROWOWPartPlacement
+    {
+        uint32 MapKey = 0;
+        float OriginX = 0;
+        float OriginY = 0;
+        float CellSize = 0;
+        int32 OffsetX = 0;
+        int32 OffsetY = 0;
+        int32 Width = 0;
+        int32 Height = 0;
+        bool HasCell(int32 x, int32 y, int32 margin) const
+        {
+            return x >= OffsetX - margin && y >= OffsetY - margin && x < OffsetX + Width + margin && y < OffsetY + Height + margin;
+        }
+    };
+
+    // The layout now: every stitched map's parts in its grid
+    std::map<std::pair<uint32, uint32>, ROWOWPartPlacement> currentPlacements;
+    for (auto const& mapGridByMapID : MapGridsByMapID)
+    {
+        ROWOWMapGrid const& mapGrid = mapGridByMapID.second;
+        for (ROWOWMapGridPart const& gridPart : mapGrid.Parts)
+        {
+            if (gridPart.MapKey == 0)
+                continue;
+            ROWOWPartPlacement placement;
+            placement.MapKey = gridPart.MapKey;
+            placement.OriginX = mapGrid.OriginX;
+            placement.OriginY = mapGrid.OriginY;
+            placement.CellSize = mapGrid.CellSize;
+            placement.OffsetX = gridPart.OffsetX;
+            placement.OffsetY = gridPart.OffsetY;
+            placement.Width = gridPart.Width;
+            placement.Height = gridPart.Height;
+            currentPlacements[std::make_pair(mapGridByMapID.first, gridPart.MapKey)] = placement;
+        }
+    }
+
+    // The layout the last startup ran with, and how far each of its parts has moved since (a part gone or of another cell size stays)
+    struct ROWOWPartMove
+    {
+        ROWOWPartPlacement Last;
+        bool IsMoved = false;
+        float DeltaX = 0;
+        float DeltaY = 0;
+        int32 DeltaCellX = 0;
+        int32 DeltaCellY = 0;
+    };
+    std::unordered_map<uint32, std::vector<ROWOWPartMove>> partMovesByMapID;
+    std::string movedMapIDsText;
+    if (QueryResult result = CharacterDatabase.Query("SELECT `map`, `part`, `origin_x`, `origin_y`, `cell_size`, `cell_offset_x`, `cell_offset_y`, `cell_width`, `cell_height` "
+        "FROM `mod_rowow_map_layout`"))
+    {
+        do
+        {
+            Field* fields = result->Fetch();
+            uint32 mapID = fields[0].Get<uint32>();
+            ROWOWPartMove partMove;
+            partMove.Last.MapKey = fields[1].Get<uint32>();
+            partMove.Last.OriginX = fields[2].Get<float>();
+            partMove.Last.OriginY = fields[3].Get<float>();
+            partMove.Last.CellSize = fields[4].Get<float>();
+            partMove.Last.OffsetX = fields[5].Get<int32>();
+            partMove.Last.OffsetY = fields[6].Get<int32>();
+            partMove.Last.Width = fields[7].Get<int32>();
+            partMove.Last.Height = fields[8].Get<int32>();
+            auto currentIter = currentPlacements.find(std::make_pair(mapID, partMove.Last.MapKey));
+            if (currentIter != currentPlacements.end() && std::fabs(currentIter->second.CellSize - partMove.Last.CellSize) < 0.0001f)
+            {
+                ROWOWPartPlacement const& current = currentIter->second;
+                float cellSize = current.CellSize;
+                partMove.DeltaX = (current.OriginX + float(current.OffsetY) * cellSize) - (partMove.Last.OriginX + float(partMove.Last.OffsetY) * cellSize);
+                partMove.DeltaY = (current.OriginY - float(current.OffsetX) * cellSize) - (partMove.Last.OriginY - float(partMove.Last.OffsetX) * cellSize);
+                partMove.DeltaCellX = current.OffsetX - partMove.Last.OffsetX;
+                partMove.DeltaCellY = current.OffsetY - partMove.Last.OffsetY;
+                partMove.IsMoved = std::fabs(partMove.DeltaX) > 0.001f || std::fabs(partMove.DeltaY) > 0.001f || partMove.DeltaCellX != 0 || partMove.DeltaCellY != 0;
+            }
+            partMovesByMapID[mapID].push_back(partMove);
+        } while (result->NextRow());
+    }
+    for (auto iter = partMovesByMapID.begin(); iter != partMovesByMapID.end();)
+    {
+        bool isAnyMoved = std::any_of(iter->second.begin(), iter->second.end(), [](ROWOWPartMove const& partMove) { return partMove.IsMoved; });
+        if (isAnyMoved == false)
+            iter = partMovesByMapID.erase(iter);
+        else
+        {
+            movedMapIDsText += (movedMapIDsText.empty() == true ? "" : ",") + std::to_string(iter->first);
+            ++iter;
+        }
+    }
+
+    // A spot's part in the last layout: the one whose cells it's on, else one a cell off (the gaps between parts are the nearer part's)
+    auto findPartMove = [](std::vector<ROWOWPartMove> const& partMoves, int32 cellX, int32 cellY) -> ROWOWPartMove const*
+    {
+        for (int32 margin = 0; margin <= 1; margin++)
+            for (ROWOWPartMove const& partMove : partMoves)
+                if (partMove.Last.HasCell(cellX, cellY, margin) == true)
+                    return &partMove;
+        return nullptr;
+    };
+    uint32 movedCount = 0;
+    if (movedMapIDsText.empty() == false)
+    {
+        // The tables MoveSavedSpotsOffStitchedMaps moves spots in, with their map columns read as their own types; Z stays (the part's ground moved with it)
+        auto getSmallMapID = [](Field const& field) { return uint32(field.Get<uint16>()); };
+        auto getMapID = [](Field const& field) { return field.Get<uint32>(); };
+        auto getSignedMapID = [](Field const& field) { return uint32(std::max<int32>(0, field.Get<int32>())); };
+        auto moveSpots = [&](char const* tableName, char const* keyColumn, char const* mapColumn, char const* xColumn, char const* yColumn, uint32 (*readMapID)(Field const&))
+        {
+            QueryResult result = CharacterDatabase.Query("SELECT `{}`, `{}`, `{}`, `{}` FROM `{}` WHERE `{}` IN ({})", keyColumn, mapColumn, xColumn, yColumn, tableName, mapColumn,
+                movedMapIDsText);
+            if (!result)
+                return;
+            do
+            {
+                Field* fields = result->Fetch();
+                uint32 mapID = readMapID(fields[1]);
+                auto partMovesIter = partMovesByMapID.find(mapID);
+                if (partMovesIter == partMovesByMapID.end() || partMovesIter->second.empty() == true)
+                    continue;
+                float x = fields[2].Get<float>();
+                float y = fields[3].Get<float>();
+                ROWOWPartPlacement const& anyLast = partMovesIter->second.front().Last;
+                int32 cellX = int32(std::floor((anyLast.OriginY - y) / anyLast.CellSize));
+                int32 cellY = int32(std::floor((x - anyLast.OriginX) / anyLast.CellSize));
+                ROWOWPartMove const* partMove = findPartMove(partMovesIter->second, cellX, cellY);
+                if (partMove == nullptr || partMove->IsMoved == false)
+                    continue;
+                float newX = x + partMove->DeltaX;
+                float newY = y + partMove->DeltaY;
+                CharacterDatabase.DirectExecute("UPDATE `{}` SET `{}` = {}, `{}` = {} WHERE `{}` = {} AND `{}` = {}", tableName, xColumn, newX, yColumn, newY, keyColumn,
+                    fields[0].Get<uint32>(), mapColumn, mapID);
+                LOG_INFO("module.ROWOW", "ROWOWMod::MoveSavedSpotsOnMovedParts: {} {} {} on map {} moved from {},{} to {},{} with its part {}", tableName, keyColumn,
+                    fields[0].Get<uint32>(), mapID, x, y, newX, newY, partMove->Last.MapKey);
+                movedCount++;
+            } while (result->NextRow());
+        };
+        moveSpots("characters", "guid", "map", "position_x", "position_y", getSmallMapID);
+        moveSpots("character_homebind", "guid", "mapId", "posX", "posY", getSmallMapID);
+        moveSpots("corpse", "guid", "mapId", "posX", "posY", getSmallMapID);
+        moveSpots("character_entry_point", "guid", "joinMapId", "joinX", "joinY", getMapID);
+        moveSpots("mod_rowow_identity", "guid", "save_map", "save_x", "save_y", getSignedMapID);
+        moveSpots("mod_rowow_identity", "guid", "last_map", "last_x", "last_y", getSignedMapID);
+        moveSpots("mod_rowow_identity", "guid", "return_map", "return_x", "return_y", getSignedMapID);
+
+        // Memo points are cells of the stitched map
+        if (QueryResult result = CharacterDatabase.Query("SELECT `guid`, `slot`, `map`, `x`, `y` FROM `mod_rowow_identity_memo` WHERE `map` IN ({})", movedMapIDsText))
+        {
+            do
+            {
+                Field* fields = result->Fetch();
+                auto partMovesIter = partMovesByMapID.find(fields[2].Get<uint32>());
+                if (partMovesIter == partMovesByMapID.end())
+                    continue;
+                ROWOWPartMove const* partMove = findPartMove(partMovesIter->second, fields[3].Get<int32>(), fields[4].Get<int32>());
+                if (partMove == nullptr || partMove->IsMoved == false || (partMove->DeltaCellX == 0 && partMove->DeltaCellY == 0))
+                    continue;
+                CharacterDatabase.DirectExecute("UPDATE `mod_rowow_identity_memo` SET `x` = {}, `y` = {} WHERE `guid` = {} AND `slot` = {}", fields[3].Get<int32>() + partMove->DeltaCellX,
+                    fields[4].Get<int32>() + partMove->DeltaCellY, fields[0].Get<uint32>(), uint32(fields[1].Get<uint8>()));
+                movedCount++;
+            } while (result->NextRow());
+        }
+        LOG_INFO("module.ROWOW", "ROWOWMod::MoveSavedSpotsOnMovedParts moved {} saved spots with the parts that moved in stitched maps {}", movedCount, movedMapIDsText);
+    }
+
+    // The layout this startup runs with, for the next
+    CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
+    trans->Append("DELETE FROM `mod_rowow_map_layout`");
+    for (auto const& placementByKey : currentPlacements)
+    {
+        ROWOWPartPlacement const& placement = placementByKey.second;
+        trans->Append("INSERT INTO `mod_rowow_map_layout` (`map`, `part`, `origin_x`, `origin_y`, `cell_size`, `cell_offset_x`, `cell_offset_y`, `cell_width`, `cell_height`) "
+            "VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {})", placementByKey.first.first, placementByKey.first.second, placement.OriginX, placement.OriginY, placement.CellSize,
+            placement.OffsetX, placement.OffsetY, placement.Width, placement.Height);
+    }
+    CharacterDatabase.DirectCommitTransaction(trans);
+}
+
 std::unordered_map<std::string, std::unordered_set<uint32>> ROWOWMod::GetMapIDsByMapFlag() const
 {
     // RoMapFlags' rows in order (an "off" takes the flag away again), by any of a map's RO names, by map key: a part of a stitched map keeps its own
@@ -837,7 +1034,13 @@ std::unordered_map<std::string, std::unordered_set<uint32>> ROWOWMod::GetMapIDsB
     int32 valueColumnIndex = mapFlagTable->GetColumnIndex("Value");
     for (size_t rowIndex = 0; rowIndex < mapFlagTable->Rows.size(); rowIndex++)
     {
-        uint32 mapKey = GetMapKeyByMapName(mapFlagTable->GetCell(rowIndex, mapColumnIndex));
+        // An alias is another rAthena map on the same ground (pvp_y_1-1 is a PvP arena copy of prontera, bossnia_01 an MVP map on gef_dun03's), whose
+        // flags are that map's, not the one it shares the ground with: the converter made it a name of the map, so its key is the map's own.  Taken as
+        // the map's, pvp_y_1-1's nosave made Prontera (and Payon, Alberta and Morocc) nosave, and every login there went to the save point (Nathan 2026-11-10)
+        std::string const& mapName = mapFlagTable->GetCell(rowIndex, mapColumnIndex);
+        if (IsMapAliasOfAnother(mapName) == true)
+            continue;
+        uint32 mapKey = GetMapKeyByMapName(mapName);
         if (mapKey == 0)
             continue;
         std::string const& flag = mapFlagTable->GetCell(rowIndex, flagColumnIndex);
@@ -847,6 +1050,21 @@ std::unordered_map<std::string, std::unordered_set<uint32>> ROWOWMod::GetMapIDsB
             mapIDsByFlag[flag].insert(mapKey);
     }
     return mapIDsByFlag;
+}
+
+bool ROWOWMod::IsMapAliasOfAnother(std::string const& mapName) const
+{
+    // Only while the map or part it names has an own name that isn't an alias (an older conversion made every name of a part an alias)
+    std::string name = ToLower(mapName);
+    if (MapAliasNames.find(name) == MapAliasNames.end())
+        return false;
+    if (ROWOWMapPart const* part = GetMapPart(name))
+        return part->Name != name && MapAliasNames.find(part->Name) == MapAliasNames.end();
+    auto mapIDIter = MapIDsByMapName.find(name);
+    if (mapIDIter == MapIDsByMapName.end())
+        return false;
+    auto ownNameIter = MapNamesByMapID.find(mapIDIter->second);
+    return ownNameIter != MapNamesByMapID.end() && ownNameIter->second != name;
 }
 
 ROWOWMapPart const* ROWOWMod::GetMapPartAt(uint32 mapID, int32 cellX, int32 cellY) const
@@ -993,11 +1211,26 @@ void ROWOWMod::CheckArrivalFloor(Player* player)
     if (player->GetTransport() != nullptr || player->IsFlying() == true)
         return;
     Map* map = player->GetMap();
-    float floorZ = map->GetMapCollisionData().GetStaticTree().getHeight(player->GetPositionX(), player->GetPositionY(), player->GetPositionZ() + 1.0f, MAX_FALL_DISTANCE);
+    // ... and one left under the cell's ground (a position saved before its map's layout changed, see MoveSavedSpotsOnMovedParts: Bits arrived 6
+    // yards under the Training Ground's castle walk and was put down on a floor 16 yards further under it) is put up on it: the floor is looked for
+    // from just above the GAT's ground, which RO has only one of
+    float searchZ = player->GetPositionZ();
+    if (ROWOWMapGrid const* mapGrid = GetMapGrid(player->GetMapId()))
+    {
+        int32 cellX = mapGrid->GetCellX(player->GetPositionY());
+        int32 cellY = mapGrid->GetCellY(player->GetPositionX());
+        if (mapGrid->IsCellWalkable(cellX, cellY) == true)
+        {
+            float groundZ = mapGrid->GetCellGroundZ(cellX, cellY);
+            if (player->GetPositionZ() < groundZ - ROWOW_ARRIVAL_FLOOR_TOLERANCE)
+                searchZ = groundZ + ROWOW_ARRIVAL_FLOOR_TOLERANCE;
+        }
+    }
+    float floorZ = map->GetMapCollisionData().GetStaticTree().getHeight(player->GetPositionX(), player->GetPositionY(), searchZ + 1.0f, MAX_FALL_DISTANCE);
     if (floorZ <= INVALID_HEIGHT)
         return;
     floorZ = std::max(floorZ, map->GetWaterLevel(player->GetPositionX(), player->GetPositionY()));
-    if (player->GetPositionZ() - floorZ > ROWOW_ARRIVAL_FLOOR_TOLERANCE)
+    if (player->GetPositionZ() - floorZ > ROWOW_ARRIVAL_FLOOR_TOLERANCE || floorZ - player->GetPositionZ() > ROWOW_ARRIVAL_FLOOR_TOLERANCE)
         player->NearTeleportTo(player->GetPositionX(), player->GetPositionY(), floorZ + 0.5f, player->GetOrientation());
 }
 
@@ -1146,7 +1379,8 @@ void ROWOWMod::LoadIdentitySlots(Player* player, ROWOWIdentity& identity)
     identity.IsHairShared = false;
     identity.SpriteJobID = -1;
     identity.IsPecoMountLookEnabled = true;
-    if (QueryResult result = CharacterDatabase.Query("SELECT `slot`, `zeny`, `hair_style`, `hair_color`, `sprite_job`, `peco_mount_look` FROM `mod_rowow_identity_character` WHERE `guid` = {}", guid))
+    identity.IsAutolootEnabled = false;
+    if (QueryResult result = CharacterDatabase.Query("SELECT `slot`, `zeny`, `hair_style`, `hair_color`, `sprite_job`, `peco_mount_look`, `autoloot` FROM `mod_rowow_identity_character` WHERE `guid` = {}", guid))
     {
         Field* fields = result->Fetch();
         identity.Slot = uint8(std::clamp<uint32>(fields[0].Get<uint8>(), 1, ROWOW_IDENTITY_SLOT_COUNT));
@@ -1161,6 +1395,7 @@ void ROWOWMod::LoadIdentitySlots(Player* player, ROWOWIdentity& identity)
         }
         identity.SpriteJobID = fields[4].Get<int16>();
         identity.IsPecoMountLookEnabled = fields[5].Get<uint8>() != 0;
+        identity.IsAutolootEnabled = fields[6].Get<uint8>() != 0;
     }
     if (QueryResult result = CharacterDatabase.Query("SELECT `slot`, `identity`, `name` FROM `mod_rowow_identity_slot` WHERE `guid` = {}", guid))
     {
@@ -1384,10 +1619,27 @@ bool ROWOWMod::SetPecoMountLook(Player* player, bool isEnabled)
     return true;
 }
 
+bool ROWOWMod::SetAutoloot(Player* player, bool isEnabled)
+{
+    // Options > Interface > Ragnarok (.ro autoloot, Nathan 2026-11-10): a monster's drops the character has the loot priority on go straight into its
+    // bags when they fit, instead of onto the ground (MobDropAutoloot).  The character's own choice, shared by its save slots as the Peco look is
+    ROWOWIdentity* identity = GetIdentity(player);
+    if (IsEnabled == false || HasAnyIdentity(*identity) == false)
+        return false;
+    if (isEnabled != identity->IsAutolootEnabled)
+    {
+        identity->IsAutolootEnabled = isEnabled;
+        // Its row is there once a slot has had an identity (every save writes it too)
+        CharacterDatabase.Execute("UPDATE `mod_rowow_identity_character` SET `autoloot` = {} WHERE `guid` = {}", isEnabled == true ? 1 : 0, identity->CharacterGUID);
+    }
+    SendSpriteJobsToClient(player);
+    return true;
+}
+
 void ROWOWMod::SendSpriteJobsToClient(Player* player)
 {
     // ROWOWSPRITE: "<1 with an identity in any save slot, else 0><tab><the job picked, -1 for the job of the slot in use><tab><1 while the Peco is
-    // shown in a ground mount's place out of Midgard, 0 with the mount shown as it is>", then for each job that may be picked "<tab><job ID>:<job
+    // shown in a ground mount's place out of Midgard, 0 with the mount shown as it is><tab><1 with autoloot on, else 0>", then for each job that may be picked "<tab><job ID>:<job
     // name>" (the name with spaces for rAthena's underscores).  A job picked that can't be shown now is told as -1.  Sent when asked for (.ro
     // spritejob), each time the client's interface has loaded (ROWOW_IdentityServerScript), on every arrival (CompleteROFormChange) and whenever
     // it changes
@@ -1397,7 +1649,8 @@ void ROWOWMod::SendSpriteJobsToClient(Player* player)
     for (uint16 jobID : spriteJobIDs)
         if (int32(jobID) == identity->SpriteJobID)
             spriteJobID = identity->SpriteJobID;
-    std::string addonMessage = fmt::format("ROWOWSPRITE\t{}\t{}\t{}", HasAnyIdentity(*identity) == true ? 1 : 0, spriteJobID, identity->IsPecoMountLookEnabled == true ? 1 : 0);
+    std::string addonMessage = fmt::format("ROWOWSPRITE\t{}\t{}\t{}\t{}", HasAnyIdentity(*identity) == true ? 1 : 0, spriteJobID, identity->IsPecoMountLookEnabled == true ? 1 : 0,
+        identity->IsAutolootEnabled == true ? 1 : 0);
     for (uint16 jobID : spriteJobIDs)
     {
         std::string jobName = GetJob(jobID)->Name;
@@ -1571,8 +1824,9 @@ void ROWOWMod::SaveIdentity(Player* player, CharacterDatabaseTransaction trans, 
     // The identity's rows are its slot's; the slot picked and the zeny go to the character's row, which the other slots share
     uint32 guid = identity->IdentityID;
     // ... with the head and the job sprite picked, which they share too
-    trans->Append("REPLACE INTO `mod_rowow_identity_character` (`guid`, `slot`, `zeny`, `hair_style`, `hair_color`, `sprite_job`, `peco_mount_look`) VALUES ({}, {}, {}, {}, {}, {}, {})",
-        player->GetGUID().GetCounter(), identity->Slot, identity->Zeny, identity->HairStyle, identity->HairColor, identity->SpriteJobID, identity->IsPecoMountLookEnabled == true ? 1 : 0);
+    trans->Append("REPLACE INTO `mod_rowow_identity_character` (`guid`, `slot`, `zeny`, `hair_style`, `hair_color`, `sprite_job`, `peco_mount_look`, `autoloot`) VALUES ({}, {}, {}, {}, {}, {}, {}, {})",
+        player->GetGUID().GetCounter(), identity->Slot, identity->Zeny, identity->HairStyle, identity->HairColor, identity->SpriteJobID, identity->IsPecoMountLookEnabled == true ? 1 : 0,
+        identity->IsAutolootEnabled == true ? 1 : 0);
     identity->IsZenyShared = true;
     identity->IsHairShared = identity->HairStyle != 0;
     ROWOWPosition const& savePoint = identity->SavePoint;
@@ -1640,10 +1894,26 @@ bool ROWOWMod::IsSpellKeptInROForm(SpellInfo const* spellInfo) const
     return spellInfo->HasEffect(SPELL_EFFECT_LANGUAGE);
 }
 
+bool ROWOWMod::IsSpellKeptInROForm(Player const* player, SpellInfo const* spellInfo) const
+{
+    // What the form keeps for every character, and with Midgard Wayfarer (Nathan 2026-11-10) any companion pet's summon too
+    if (IsSpellKeptInROForm(spellInfo) == true)
+        return true;
+    return IsCompanionPetSpell(spellInfo) == true && HasMidgardWayfarer(player) == true;
+}
+
 bool ROWOWMod::IsROCompanionPetSpell(SpellInfo const* spellInfo) const
 {
     // An RO companion pet's summon (the converter's RoCompanionPetsMap.csv): an RO spell summoning a minipet
     if (spellInfo == nullptr || spellInfo->Id < ROWOW_SPELL_ID_RO_START || spellInfo->Id > ROWOW_SPELL_ID_RO_END)
+        return false;
+    return IsCompanionPetSpell(spellInfo);
+}
+
+bool ROWOWMod::IsCompanionPetSpell(SpellInfo const* spellInfo) const
+{
+    // Any companion pet's summon, RO's or not: a spell summoning a minipet
+    if (spellInfo == nullptr)
         return false;
     for (uint8 effectIndex = 0; effectIndex < MAX_SPELL_EFFECTS; effectIndex++)
     {
@@ -1662,6 +1932,44 @@ bool ROWOWMod::IsROCompanionPetCarrier(ItemTemplate const* itemTemplate) const
     if (itemTemplate == nullptr || (itemTemplate->Spells[0].SpellId != 483 && itemTemplate->Spells[0].SpellId != 55884))
         return false;
     return IsROCompanionPetSpell(sSpellMgr->GetSpellInfo(itemTemplate->Spells[1].SpellId));
+}
+
+bool ROWOWMod::IsCompanionPetCarrier(ItemTemplate const* itemTemplate) const
+{
+    // Any companion pet's carrier, RO's or not, the same way
+    if (itemTemplate == nullptr || (itemTemplate->Spells[0].SpellId != 483 && itemTemplate->Spells[0].SpellId != 55884))
+        return false;
+    return IsCompanionPetSpell(sSpellMgr->GetSpellInfo(itemTemplate->Spells[1].SpellId));
+}
+
+bool ROWOWMod::IsCompanionPetCarrierUsableInROForm(Player const* player, ItemTemplate const* itemTemplate) const
+{
+    // An RO companion's carrier always, and with Midgard Wayfarer any companion's
+    if (IsROCompanionPetCarrier(itemTemplate) == true)
+        return true;
+    return IsCompanionPetCarrier(itemTemplate) == true && HasMidgardWayfarer(player) == true;
+}
+
+void ROWOWMod::OpenWayfarerCompanions(Player* player)
+{
+    // Midgard Wayfarer earned in the form: the companion pets the arrival hid come back (with Midgard Worldwalker nothing was hidden)
+    ROWOWIdentity* identity = GetIdentity(player);
+    if (identity->IsInForm == false || identity->HiddenSpellIDs.empty() == true || HasMidgardWayfarer(player) == false)
+        return;
+    bool isAnySent = false;
+    for (auto spellIter = identity->HiddenSpellIDs.begin(); spellIter != identity->HiddenSpellIDs.end();)
+    {
+        if (IsCompanionPetSpell(sSpellMgr->GetSpellInfo(*spellIter)) == false)
+        {
+            ++spellIter;
+            continue;
+        }
+        SendQuietSpellChange(player, *spellIter, true);
+        spellIter = identity->HiddenSpellIDs.erase(spellIter);
+        isAnySent = true;
+    }
+    if (isAnySent == true)
+        ChatHandler(player->GetSession()).SendSysMessage("Midgard Wayfarer: your companion pets are open to you in Midgard.");
 }
 
 void ROWOWMod::EnterROForm(Player* player)
@@ -1733,7 +2041,7 @@ void ROWOWMod::EnterROForm(Player* player)
             break;
         if (spellByID.second->State == PLAYERSPELL_REMOVED || spellByID.second->Active == false || spellByID.second->IsInSpec(activeSpec) == false)
             continue;
-        if (IsSpellKeptInROForm(sSpellMgr->GetSpellInfo(spellByID.first)) == true)
+        if (IsSpellKeptInROForm(player, sSpellMgr->GetSpellInfo(spellByID.first)) == true)
             continue;
         identity->HiddenSpellIDs.push_back(spellByID.first);
     }
@@ -2329,8 +2637,9 @@ bool ROWOWMod::SelectIdentitySlot(Player* player, uint8 slot)
     bool isHairShared = identity->IsHairShared == true || (identity->Exists == true && identity->HairStyle != 0);
     uint8 hairStyle = identity->HairStyle;
     uint8 hairColor = identity->HairColor;
-    trans->Append("REPLACE INTO `mod_rowow_identity_character` (`guid`, `slot`, `zeny`, `hair_style`, `hair_color`, `sprite_job`, `peco_mount_look`) VALUES ({}, {}, {}, {}, {}, {}, {})",
-        guid, slot, identity->Zeny, isHairShared == true ? hairStyle : 0, isHairShared == true ? hairColor : 0, identity->SpriteJobID, identity->IsPecoMountLookEnabled == true ? 1 : 0);
+    trans->Append("REPLACE INTO `mod_rowow_identity_character` (`guid`, `slot`, `zeny`, `hair_style`, `hair_color`, `sprite_job`, `peco_mount_look`, `autoloot`) VALUES ({}, {}, {}, {}, {}, {}, {}, {})",
+        guid, slot, identity->Zeny, isHairShared == true ? hairStyle : 0, isHairShared == true ? hairColor : 0, identity->SpriteJobID, identity->IsPecoMountLookEnabled == true ? 1 : 0,
+        identity->IsAutolootEnabled == true ? 1 : 0);
     CharacterDatabase.CommitTransaction(trans);
 
     // The slot's identity in this one's place
@@ -2341,6 +2650,7 @@ bool ROWOWMod::SelectIdentitySlot(Player* player, uint8 slot)
     std::set<uint16> jobHistoryJobIDs = identity->JobHistoryJobIDs;
     int32 spriteJobID = identity->SpriteJobID;
     bool isPecoMountLookEnabled = identity->IsPecoMountLookEnabled;
+    bool isAutolootEnabled = identity->IsAutolootEnabled;
     player->CustomData.Erase("ROWOWIdentity");
     identity = player->CustomData.GetDefault<ROWOWIdentity>("ROWOWIdentity");
     identity->IsLoaded = true;
@@ -2361,6 +2671,7 @@ bool ROWOWMod::SelectIdentitySlot(Player* player, uint8 slot)
     identity->JobHistoryJobIDs = jobHistoryJobIDs;
     identity->SpriteJobID = spriteJobID;
     identity->IsPecoMountLookEnabled = isPecoMountLookEnabled;
+    identity->IsAutolootEnabled = isAutolootEnabled;
     LoadIdentityRows(player, *identity);
     identity->AccountVariables = accountVariables; // Its rows may not have the save above yet
     LOG_INFO("module.ROWOW", "{} changed Ragnarok Online save slot {} for {} ({}, identity {})", player->GetName(), oldSlot, slot,

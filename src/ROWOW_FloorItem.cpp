@@ -485,10 +485,12 @@ void ROWOWMod::MobDeadDrops(Creature* md, Unit* src, ROWOWLootPriority const& pr
     ObjectGuid first = priority.FirstSD != nullptr ? priority.FirstSD->GetGUID() : ObjectGuid::Empty;
     ObjectGuid second = priority.SecondSD != nullptr ? priority.SecondSD->GetGUID() : ObjectGuid::Empty;
     ObjectGuid third = priority.ThirdSD != nullptr ? priority.ThirdSD->GetGUID() : ObjectGuid::Empty;
-    auto processDropList = [this, md, x, y, first, second, third](std::vector<ROWOWDropItem> const& items, int8 dir)
+    auto processDropList = [this, md, x, y, first, second, third, &priority](std::vector<ROWOWDropItem> const& items, int8 dir)
     {
         for (ROWOWDropItem const& item : items)
         {
+            if (MobDropAutoloot(priority, item) == true)
+                continue;
             MapAddFloorItem(md->GetMap(), item, x, y, first, second, third, ROWOW_FLOORITEM_NO_DROP_CHECK, dir, true);
 
             // The drop location loops between three locations: SE -> W -> N -> SE
@@ -503,6 +505,18 @@ void ROWOWMod::MobDeadDrops(Creature* md, Unit* src, ROWOWLootPriority const& pr
     processDropList(dropItems, DIR_CENTER); // First regular drop always drops at center
     processDropList(mob->LootItems, DIR_NORTH); // Looted drops start north instead
     mob->LootItems.clear();
+}
+
+bool ROWOWMod::MobDropAutoloot(ROWOWLootPriority const& priority, ROWOWDropItem const& item)
+{
+    // mob_item_drop's autoloot, as @autoloot 100 (Options > Interface > Ragnarok, Nathan 2026-11-10): the one with the loot priority (first, else second,
+    // else third, as rAthena looks; they're on the monster's map and alive) with it on gets the item through party_share_loot, so in a party the
+    // loot method's pick has it (GetPartyItemShare).  When no one it may go to has room it falls on the ground as any drop.  Members on one map share
+    // its thread
+    Player* sd = priority.FirstSD != nullptr ? priority.FirstSD : (priority.SecondSD != nullptr ? priority.SecondSD : priority.ThirdSD);
+    if (sd == nullptr || IsInROForm(sd) == false || GetIdentity(sd)->IsAutolootEnabled == false)
+        return false;
+    return PartyShareLoot(sd, sd->GetGroup(), item, sd->GetGUID());
 }
 
 void ROWOWMod::ClearFloorItemRow(Map* map, ObjectGuid const& guid)
@@ -778,8 +792,7 @@ bool ROWOWMod::PCTakeItem(Player* sd, ObjectGuid const& guid, bool isGreed)
     if (ROWOWStatusChange const* sc = GetStatusChange(static_cast<Unit const*>(sd)); sc != nullptr && sc->Cant.PickUp == true)
         return false;
     Group* group = sd->GetGroup();
-    ROWOWPartyOption option = GetPartyOption(group);
-    bool isShare = group != nullptr && (option.Item & 1) != 0;
+    bool isShare = GetPartyItemShare(group) != ROWOW_PARTY_ITEM_EACH_TAKE;
 
     // Time the player needs to wait until the item can be taken.  By default the player needs to wait for top, second and third attacker loot priority
     // times.  This applies even if there are no second or third top attackers
@@ -808,7 +821,7 @@ bool ROWOWMod::PCTakeItem(Player* sd, ObjectGuid const& guid, bool isGreed)
 
     // This function takes care of giving the item to whoever should have it, considering party-share options.  pc_additem's failure tells the player, and the
     // item stays where it is
-    if (PartyShareLoot(sd, group, option, fitem->Item, fitem->FirstGetCharID) == false)
+    if (PartyShareLoot(sd, group, fitem->Item, fitem->FirstGetCharID) == false)
     {
         ChatHandler(sd->GetSession()).SendSysMessage(GET_ITEM_FAILED_TEXT);
         return true;

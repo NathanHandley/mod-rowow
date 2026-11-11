@@ -169,7 +169,7 @@ char const* ROWOWMod::GetWorldIdentityLockText(char lock) const
         case ROWOW_WORLD_IDENTITY_LOCK_COMBAT: return "You can't change your identity while you are in combat.";
         case ROWOW_WORLD_IDENTITY_LOCK_BATTLEGROUND: return "Your Warcraft identity is shown in battlegrounds and arenas. Your choice is kept and shows again when you leave.";
         case ROWOW_WORLD_IDENTITY_LOCK_PATHFINDER: return "You need the achievement Midgard Pathfinder to show your Ragnarok identity outside of Midgard.";
-        case ROWOW_WORLD_IDENTITY_LOCK_WAYFARER: return "You need the achievement Midgard Wayfarer to show another identity in Midgard.";
+        case ROWOW_WORLD_IDENTITY_LOCK_WAYFARER: return "You need the achievement Midgard Wayfarer to show another identity in Midgard. It also lets you use your non-Ragnarok companion pets there.";
         case ROWOW_WORLD_IDENTITY_LOCK_NO_RO_CHARACTER: return "You have no Ragnarok Online character yet. Make one on the Ragnarok page of the character window.";
         case ROWOW_WORLD_IDENTITY_LOCK_NO_EVERQUEST: return "Your character has no EverQuest identity.";
         default: return "";
@@ -544,6 +544,8 @@ void ROWOWMod::UpdateWorldIdentity(Player* player, uint32 diffInMS)
     state->CheckTimer = 0;
     if (state->IsWorldwalkerOpen == false && IsInROForm(player) == true && HasMidgardWorldwalker(player) == true)
         OpenWorldwalker(player);
+    if (IsInROForm(player) == true && HasMidgardWayfarer(player) == true)
+        OpenWayfarerCompanions(player);
     RefreshWorldIdentityLook(player);
     SendWorldIdentityToClient(player, false);
 }

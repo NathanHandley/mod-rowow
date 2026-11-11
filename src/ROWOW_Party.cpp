@@ -32,72 +32,52 @@
 
 using namespace std;
 
-// RO's parties (R11): a WoW group is the RO party.  Its window, invites, leader, party chat and member frames are the stock ones.  What RO adds on top is
-// here: the party's options (its share of exp and of items) and the levels and jobs of the members in the RO world, which the map threads can't read off
-// each other's identities.  So each member writes its own in PartiesByGroupGUID under PartyMutex from its own update (UpdateParty), which is rAthena's
-// char server's party data with party_update_interval between its updates.  A member not in the RO form is offline to the party.  PartyMutex is held only
-// over that map, never across a call into the core
+// RO's parties (R11): a WoW group is the RO party.  Its window, invites, leader, party chat, member frames and loot method are the stock ones.  RO's
+// own party settings are gone (Nathan 2026-11-10): exp is always RO's Even Share (within party_share_level base levels, else Each Take) and the items
+// follow the group's WoW loot method (GetPartyItemShare).  What's kept here is the levels and jobs of the members in the RO world, which the map threads
+// can't read off each other's identities.  So each member writes its own in PartiesByGroupGUID under PartyMutex from its own update (UpdateParty), which
+// is rAthena's char server's party data with party_update_interval between its updates.  A member not in the RO form is offline to the party.
+// PartyMutex is held only over that map, never across a call into the core
 
 namespace
 {
     // How often a member checks its group, level and job against what the party has (party_update_interval)
     constexpr uint32 PARTY_UPDATE_INTERVAL_IN_MS = 1000;
-
-    void BroadcastToGroup(Group* group, uint32 language, std::string const& message)
-    {
-        WorldPacket data;
-        ChatHandler::BuildChatPacket(data, CHAT_MSG_SYSTEM, Language(language), nullptr, nullptr, message);
-        group->BroadcastPacket(&data, false);
-    }
-
-    void SendAddonMessage(Player* player, std::string const& message)
-    {
-        WorldPacket data;
-        ChatHandler::BuildChatPacket(data, CHAT_MSG_SYSTEM, LANG_ADDON, nullptr, nullptr, message);
-        player->SendDirectMessage(&data);
-    }
-
-    std::string GetPartyOptionMessage(ROWOWPartyOption const& option)
-    {
-        return fmt::format("ROWOWPARTY\t{}\t{}\t{}", option.IsExpShare == true ? 1 : 0, (option.Item & 1) != 0 ? 1 : 0, (option.Item & 2) != 0 ? 1 : 0);
-    }
 }
 
 void ROWOWMod::LoadPartyData()
 {
     std::lock_guard<std::mutex> lock(PartyMutex);
     PartiesByGroupGUID.clear();
-    if (IsEnabled == false)
-        return;
-    if (QueryResult result = CharacterDatabase.Query("SELECT `GroupGUID`, `ExpShare`, `ItemShare` FROM `mod_rowow_party`"))
-    {
-        do
-        {
-            Field* fields = result->Fetch();
-            ROWOWParty& party = PartiesByGroupGUID[fields[0].Get<uint32>()];
-            party.Option.IsExpShare = fields[1].Get<uint8>() != 0;
-            party.Option.Item = fields[2].Get<uint8>() & 3;
-        } while (result->NextRow());
-    }
-    LOG_INFO("module.ROWOW", "ROWOWMod::LoadPartyData loaded the options of {} RO parties", PartiesByGroupGUID.size());
 }
 
-ROWOWPartyOption ROWOWMod::GetPartyOption(Group const* group)
+uint8 ROWOWMod::GetPartyItemShare(Group const* group) const
 {
-    ROWOWPartyOption option;
+    // The WoW loot method as RO's item share (Nathan 2026-11-10): free for all is RO's default (the loot priority, then anyone), round robin is RO's
+    // round robin, group loot and need before greed a random member, master loot the master looter.  The loot threshold isn't used
     if (group == nullptr)
-        return option;
+        return ROWOW_PARTY_ITEM_EACH_TAKE;
+    switch (group->GetLootMethod())
+    {
+        case ROUND_ROBIN: return ROWOW_PARTY_ITEM_ROUND_ROBIN;
+        case GROUP_LOOT:
+        case NEED_BEFORE_GREED: return ROWOW_PARTY_ITEM_RANDOM;
+        case MASTER_LOOT: return ROWOW_PARTY_ITEM_MASTER;
+        default: return ROWOW_PARTY_ITEM_EACH_TAKE;
+    }
+}
+
+bool ROWOWMod::IsPartyExpShared(Group const* group)
+{
+    // Even Share, always (Nathan 2026-11-10), while the members online to the party are within party_share_level base levels (int_party_check_lv).
+    // Unlike rAthena's it isn't switched off for good past that: each kill looks again
+    if (group == nullptr)
+        return false;
     std::lock_guard<std::mutex> lock(PartyMutex);
     auto partyIter = PartiesByGroupGUID.find(group->GetGUID().GetCounter());
-    if (partyIter != PartiesByGroupGUID.end())
-        option = partyIter->second.Option;
-    return option;
-}
-
-void ROWOWMod::SendPartyToClient(Player* player)
-{
-    // For the RO_Identity addon's party window, which only hears of a change
-    SendAddonMessage(player, GetPartyOptionMessage(GetPartyOption(player->GetGroup())));
+    if (partyIter == PartiesByGroupGUID.end())
+        return true;
+    return PartyCheckExpShare(partyIter->second);
 }
 
 bool ROWOWMod::PartyCheckExpShare(ROWOWParty const& party) const
@@ -117,8 +97,7 @@ bool ROWOWMod::PartyCheckExpShare(ROWOWParty const& party) const
 
 void ROWOWMod::UpdateParty(Player* player, uint32 diff)
 {
-    // The char server's side of a member: joining, leaving, a level or job changing.  Its level range then may break the even share
-    // (int_party_check_lv), which goes off by itself and doesn't come back
+    // The char server's side of a member: joining, leaving, a level or job changing
     ROWOWIdentity* identity = GetIdentity(player);
     identity->PartyUpdateTimer += diff;
     if (identity->PartyUpdateTimer < PARTY_UPDATE_INTERVAL_IN_MS)
@@ -129,42 +108,23 @@ void ROWOWMod::UpdateParty(Player* player, uint32 diff)
     uint32 groupGUID = group != nullptr ? group->GetGUID().GetCounter() : 0;
     if (groupGUID == identity->PartyGroupGUID && identity->BaseLevel == identity->PartyBaseLevel && identity->JobID == identity->PartyJobID)
         return;
-    bool isJoined = groupGUID != identity->PartyGroupGUID;
-    if (isJoined == true)
+    if (groupGUID != identity->PartyGroupGUID)
         PartyRemoveMember(player);
     identity->PartyGroupGUID = groupGUID;
     identity->PartyBaseLevel = identity->BaseLevel;
     identity->PartyJobID = identity->JobID;
-
-    ROWOWPartyOption option;
-    bool isShareBroken = false;
     if (groupGUID != 0)
     {
         std::lock_guard<std::mutex> lock(PartyMutex);
-        ROWOWParty& party = PartiesByGroupGUID[groupGUID];
-        ROWOWPartyMember& member = party.MembersByGUID[player->GetGUID().GetCounter()];
+        ROWOWPartyMember& member = PartiesByGroupGUID[groupGUID].MembersByGUID[player->GetGUID().GetCounter()];
         member.BaseLevel = identity->BaseLevel;
         member.JobID = identity->JobID;
-        if (party.Option.IsExpShare == true && PartyCheckExpShare(party) == false)
-        {
-            party.Option.IsExpShare = false;
-            isShareBroken = true;
-        }
-        option = party.Option;
     }
-    if (isShareBroken == true)
-    {
-        SavePartyOption(groupGUID, option);
-        BroadcastToGroup(group, LANG_ADDON, GetPartyOptionMessage(option));
-        BroadcastToGroup(group, LANG_UNIVERSAL, "Party EXP sharing is now Each Take: the members are too many levels apart.");
-    }
-    else if (isJoined == true)
-        SendAddonMessage(player, GetPartyOptionMessage(option));
 }
 
 void ROWOWMod::PartyRemoveMember(Player* player)
 {
-    // A member going offline to the party (leaving the RO world or the game) or leaving it.  Its range only gets narrower: the even share stays as it is
+    // A member going offline to the party (leaving the RO world or the game) or leaving it
     ROWOWIdentity* identity = GetIdentity(player);
     if (identity->PartyGroupGUID == 0)
         return;
@@ -179,49 +139,9 @@ void ROWOWMod::PartyRemoveMember(Player* player)
 
 void ROWOWMod::PartyDisband(Group const* group)
 {
-    // party_broken, on the world thread (or a map's, for a group the core disbands from an update): the options go with the group
-    uint32 groupGUID = group->GetGUID().GetCounter();
-    {
-        std::lock_guard<std::mutex> lock(PartyMutex);
-        PartiesByGroupGUID.erase(groupGUID);
-    }
-    CharacterDatabase.Execute("DELETE FROM `mod_rowow_party` WHERE `GroupGUID` = {}", groupGUID);
-}
-
-void ROWOWMod::SavePartyOption(uint32 groupGUID, ROWOWPartyOption const& option)
-{
-    CharacterDatabase.Execute("REPLACE INTO `mod_rowow_party` (`GroupGUID`, `ExpShare`, `ItemShare`) VALUES ({}, {}, {})", groupGUID, option.IsExpShare == true ? 1 : 0, uint32(option.Item));
-}
-
-void ROWOWMod::PartyChangeOption(Player* sd, bool isExpShare, uint8 item)
-{
-    // party_changeoption and mapif_parse_PartyChangeOption, the leader's (rAthena's client only offers the setting to the leader): even share is
-    // refused with members too far apart, the item options always go through.  A chat command: the world thread, with the maps idle
-    Group* group = sd->GetGroup();
-    if (group == nullptr || group->IsLeader(sd->GetGUID()) == false)
-    {
-        ChatHandler(sd->GetSession()).SendSysMessage("Only the party leader can change the party's settings.");
-        return;
-    }
-    uint32 groupGUID = group->GetGUID().GetCounter();
-    bool isRefused = false;
-    ROWOWPartyOption option;
-    {
-        std::lock_guard<std::mutex> lock(PartyMutex);
-        ROWOWParty& party = PartiesByGroupGUID[groupGUID];
-        if (isExpShare == true && PartyCheckExpShare(party) == false)
-        {
-            isExpShare = false;
-            isRefused = true;
-        }
-        party.Option.IsExpShare = isExpShare;
-        party.Option.Item = item & 3; // Filter out invalid values.
-        option = party.Option;
-    }
-    SavePartyOption(groupGUID, option);
-    BroadcastToGroup(group, LANG_ADDON, GetPartyOptionMessage(option));
-    if (isRefused == true)
-        ChatHandler(sd->GetSession()).PSendSysMessage("You can't set EXP sharing to Even Share: the party's members must be within {} base levels.", ROWOW_PARTY_SHARE_LEVEL);
+    // party_broken, on the world thread (or a map's, for a group the core disbands from an update)
+    std::lock_guard<std::mutex> lock(PartyMutex);
+    PartiesByGroupGUID.erase(group->GetGUID().GetCounter());
 }
 
 bool ROWOWMod::PartySkillCheckJob(Player const* sd, uint16 jobID)
@@ -269,12 +189,14 @@ void ROWOWMod::PartyExpShare(Group* group, Creature* src, uint64 baseExp, uint64
         PCGainExp(member, baseExp, jobExp, src);
 }
 
-bool ROWOWMod::PartyShareLoot(Player* sd, Group* group, ROWOWPartyOption const& option, ROWOWDropItem const& item, ObjectGuid const& firstCharID)
+bool ROWOWMod::PartyShareLoot(Player* sd, Group* group, ROWOWDropItem const& item, ObjectGuid const& firstCharID)
 {
-    // party_share_loot: with the even share, the first_charid (or any item, party_item_share_type &1 off) goes to a member on the map, alive, in turn
-    // (&2) or at random, and to whoever picked it up when none has room.  False when that one has no room either.  Members on one map share its thread
+    // party_share_loot: with a shared loot method (GetPartyItemShare), the first_charid (or any item, party_item_share_type &1 off) goes to a member on
+    // the map, alive: in turn, at random or the master looter, and to whoever picked it up when none has room.  False when that one has no room
+    // either.  Members on one map share its thread
     Player* target = nullptr;
-    if (group != nullptr && (option.Item & 2) != 0 && (firstCharID.IsEmpty() == false || (BattleConfig.PartyShareType & 1) == 0))
+    uint8 itemShare = GetPartyItemShare(group);
+    if (group != nullptr && itemShare != ROWOW_PARTY_ITEM_EACH_TAKE && (firstCharID.IsEmpty() == false || (BattleConfig.PartyShareType & 1) == 0))
     {
         std::vector<Player*> members;
         for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next())
@@ -284,7 +206,19 @@ bool ROWOWMod::PartyShareLoot(Player* sd, Group* group, ROWOWPartyOption const& 
                 continue;
             members.push_back(member);
         }
-        if ((BattleConfig.PartyShareType & 2) != 0) // Round Robin
+        if (itemShare == ROWOW_PARTY_ITEM_MASTER) // The master looter, when on the map, alive and with room
+        {
+            ObjectGuid masterLooterGUID = group->GetMasterLooterGuid();
+            for (Player* member : members)
+            {
+                if (member->GetGUID() == masterLooterGUID && PCAddItem(member, item.ItemTemplateID, item.Amount, item.IsIdentified) == true)
+                {
+                    target = member;
+                    break;
+                }
+            }
+        }
+        else if (itemShare == ROWOW_PARTY_ITEM_ROUND_ROBIN) // Round Robin
         {
             uint32 groupGUID = group->GetGUID().GetCounter();
             uint32 turn = 0;

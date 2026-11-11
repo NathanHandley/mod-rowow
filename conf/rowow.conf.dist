@@ -56,3 +56,15 @@ ROWOW.Creature.GroundSnapTolerance = 0.15
 ###################################################################################################
 
 ROWOW.Creature.CorpseTimeInMS = 3000
+
+###################################################################################################
+#
+# 	ROWOW.WeightLimit
+#		RO's weight limit.  A character's own is never kept (nothing it carries weighs anything: no overweight status, nothing refused
+#		for weight, its bag slots are the limit); this is the Merchant cart's (max_cart_weight).  0: the cart takes items whatever
+#		they weigh (only its 100 slots limit it), and its window shows the weight without a maximum.  1: rAthena's cart limit
+#	Default: 0
+#
+###################################################################################################
+
+ROWOW.WeightLimit = 0

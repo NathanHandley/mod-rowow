@@ -56,7 +56,7 @@ namespace
             baseSkillRatio += 50;
             ROWOWIdentity const* identity = src->IsPlayer() == true ? src->ToPlayer()->CustomData.Get<ROWOWIdentity>("ROWOWIdentity") : nullptr;
             if (identity != nullptr && identity->CartWeight != 0 && identity->CartWeightMax > 0)
-                baseSkillRatio += 100 * identity->CartWeight / identity->CartWeightMax; // +1% every 1% weight
+                baseSkillRatio += 100 * std::min(identity->CartWeight, identity->CartWeightMax) / identity->CartWeightMax; // +1% every 1% weight (a full cart's most, past it with no weight limit)
             else if (src->IsPlayer() == false)
                 baseSkillRatio += 100; // Max damage for non players.
         }
@@ -579,7 +579,7 @@ namespace
             // Preserve damage ratio when max cart weight is changed.  (Both in tenths, as max_cart_weight is after battle_adjust_conf)
             ROWOWIdentity const* identity = src->IsPlayer() == true ? src->ToPlayer()->CustomData.Get<ROWOWIdentity>("ROWOWIdentity") : nullptr;
             if (identity != nullptr && identity->CartWeight != 0)
-                baseSkillRatio += identity->CartWeight / i * 80000 / ROWOW->BattleConfig.MaxCartWeight - 100;
+                baseSkillRatio += std::min(identity->CartWeight, identity->CartWeightMax) / i * 80000 / ROWOW->BattleConfig.MaxCartWeight - 100; // (A full cart's most, past it with no weight limit)
             else if (src->IsPlayer() == false)
                 baseSkillRatio += 80000 / i - 100;
         }

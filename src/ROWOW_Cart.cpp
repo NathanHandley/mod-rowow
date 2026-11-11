@@ -130,7 +130,7 @@ int32 ROWOWMod::PCCartAddItem(Player* player, ROWOWIdentity& identity, ROWOWCart
         return ADDITEM_INVALID;
     }
     int32 w = roItem->Weight * amount;
-    if (w + identity.CartWeight > identity.CartWeightMax)
+    if (ConfigIsWeightLimited == true && w + identity.CartWeight > identity.CartWeightMax) // No weight limit unless ROWOW.WeightLimit (Nathan 2026-11-10)
         return ADDITEM_OVERWEIGHT;
     int32 i = ROWOW_MAX_CART;
     if (IsStackable(*roItem) == true)
@@ -240,7 +240,7 @@ bool ROWOWMod::PCGetItemFromCart(Player* player, int32 slot, int32 amount)
 void ROWOWMod::SendCartToClient(Player* player, ROWOWIdentity& identity, bool isForced)
 {
     // clif_cartlist and clif_updatestatus(SP_CARTINFO): the cart window's look, weight and items, in parts as the skill tree is sent
-    // ("B\t<cart look 0-5>,<weight>,<max weight>,<slots used>,<Change Cart allowed>", "S\t<slot>:<template>:<count>:<enchantment>:..|...", "E")
+    // ("B\t<cart look 0-5>,<weight>,<max weight, 0 for no limit>,<slots used>,<Change Cart allowed>", "S\t<slot>:<template>:<count>:<enchantment>:..|...", "E")
     if (identity.IsInForm == false)
         return;
     ROWOWStatusChangeEntry const* cart = GetSCE(player, ROWOW_SC_PUSH_CART);
@@ -255,7 +255,7 @@ void ROWOWMod::SendCartToClient(Player* player, ROWOWIdentity& identity, bool is
             itemText += fmt::format(":{}", enchantmentID);
         itemTexts.push_back(itemText);
     }
-    std::string message = fmt::format("{},{},{},{},{}", cart != nullptr ? cart->Val1 : 0, identity.CartWeight, identity.CartWeightMax, identity.CartNum,
+    std::string message = fmt::format("{},{},{},{},{}", cart != nullptr ? cart->Val1 : 0, identity.CartWeight, ConfigIsWeightLimited == true ? identity.CartWeightMax : 0, identity.CartNum,
         PCCheckSkill(player, ROWOW_SKILL_MC_CHANGECART) > 0 || PCCheckSkill(player, ROWOW_SKILL_MC_CARTDECORATE) > 0 ? 1 : 0);
     for (std::string const& itemText : itemTexts)
         message += "\t" + itemText;

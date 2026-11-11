@@ -1690,12 +1690,12 @@ struct ROWOWQuestEntry
 // RO's parties (ROWOW_Party.cpp, R11).  A WoW group is the party; this is what RO keeps beside it, under ROWOWMod::PartyMutex
 #define ROWOW_PARTY_SHARE_LEVEL                     15u     // party_share_level (inter_athena.conf): the base levels even share spans
 
-// party.exp and party.item
-struct ROWOWPartyOption
-{
-    bool IsExpShare = false; // party.exp: Even Share, or Each Take
-    uint8 Item = 0; // party.item: &1 a member's priority on items, &2 the even share of what's picked up
-};
+// How the party shares items, from the group's WoW loot method (ROWOWMod::GetPartyItemShare).  Any but Each Take is RO's party.item 3: the members
+// share the loot priority, and what's picked up goes to the one this picks
+#define ROWOW_PARTY_ITEM_EACH_TAKE                  0       // Free for all: RO's default, the loot priority then anyone
+#define ROWOW_PARTY_ITEM_ROUND_ROBIN                1       // Round robin: RO's round robin (party_item_share_type &2)
+#define ROWOW_PARTY_ITEM_RANDOM                     2       // Group loot, need before greed: a random member
+#define ROWOW_PARTY_ITEM_MASTER                     3       // Master loot: the master looter
 
 // A member in the RO world, as the char server's party data has it
 struct ROWOWPartyMember
@@ -1706,7 +1706,6 @@ struct ROWOWPartyMember
 
 struct ROWOWParty
 {
-    ROWOWPartyOption Option;
     uint32 ItemTurn = 0; // itemc: whose turn party_item_share_type's round robin is
     std::unordered_map<uint32, ROWOWPartyMember> MembersByGUID; // By character GUID: the members online to the party
 };
@@ -2108,6 +2107,7 @@ struct ROWOWIdentity : public DataMap::Base
     std::set<uint16> JobHistoryJobIDs; // Every job reached in any slot, with the jobs leading to it (RecordJobHistory)
     int32 SpriteJobID = -1; // The job whose sprite is shown (Options > Interface > Ragnarok, .ro spritejob): -1 the job of the slot in use
     bool IsPecoMountLookEnabled = true; // Out of Midgard, on a ground mount, a Peco rider's sprite shows its Peco in the mount's place (Options > Interface > Ragnarok, .ro pecomount; IsPecoShownForMount)
+    bool IsAutolootEnabled = false; // A monster's drops the character has the loot priority on go into its bags when they fit (Options > Interface > Ragnarok, .ro autoloot; MobDropAutoloot)
     std::map<uint8, uint32> ActionsByButton; // The RO form's own action bars (packed action and type, as SMSG_ACTION_BUTTONS sends them)
     bool AreActionsChanged = false;
     std::map<uint32, ObjectGuid::LowType> ItemGUIDsByEquipPosition; // The RO equipment worn (in the bags, as RO's inventory holds it)
@@ -2278,6 +2278,8 @@ public:
     uint32 ConfigGroundSnapCheckIntervalInMS = 1000;
     float ConfigGroundSnapTolerance = 0.15f;
     uint32 ConfigCorpseTimeInMS = 3000; // How long a monster's body stays, as RO's fades
+    bool ConfigIsWeightLimited = false; // ROWOW.WeightLimit: RO's weight limit (Nathan 2026-11-10: none).  A character has none in any case (nothing
+                                        // weighs anything: scripts' Weight is 0, checkweight passes, no overweight status); this is the cart's
     float CellSize = 1.05f; // Yards in an RO cell (from the map grids), for placing skill cells off the RO maps
 
     // Loaded once at startup, and only read after that (so the map threads can read it without a lock)
@@ -2305,6 +2307,7 @@ public:
     std::unordered_map<uint32, uint32> StatusPointsByBaseLevel; // Total status points at each base level (rAthena's statpoint.yml)
     std::unordered_map<std::string, uint32> MapIDsByMapName; // RO map names (rAthena's, including its aliases), lowercase
     std::unordered_map<uint32, std::string> MapNamesByMapID; // Each RO map's own name (not an alias), lowercase
+    std::unordered_set<std::string> MapAliasNames; // The names that are rAthena's aliases of another map (pvp_y_1-1 of prontera), lowercase
     std::unordered_map<std::string, ROWOWMapPart> MapPartsByMapName; // The names of maps stitched into a bigger one, lowercase (loaded at startup only)
     std::unordered_map<uint32, std::vector<ROWOWMapPart>> MapPartsByMapID; // Each stitched map's parts, one per part (startup only, then read-only)
     std::unordered_map<uint32, ROWOWMapPart const*> MapPartsByMapKey; // Into MapPartsByMapID
@@ -2405,6 +2408,7 @@ public:
     bool HasOtherIdentity(ROWOWIdentity const& identity) const; // An identity in a save slot other than the one in use
     bool SetSpriteJob(Player* player, int32 jobID); // .ro spritejob: -1 for the job of the slot in use; false when it isn't one to pick
     bool SetPecoMountLook(Player* player, bool isEnabled); // .ro pecomount: the Peco shown in a ground mount's place out of Midgard, or the mount as it is
+    bool SetAutoloot(Player* player, bool isEnabled); // .ro autoloot: a monster's drops straight into the bags, or on the ground
     void SendSpriteJobsToClient(Player* player);
 
     // R9.6: the post-renewal looks' garments (robes, wings) and hat effects in the RO form, each a hidden aura (the garment's model attached
@@ -2458,6 +2462,8 @@ public:
     uint32 ResolveMapCell(std::string const& mapName, int32& cellX, int32& cellY) const; // The map, and the cell moved onto it (a stitched map's part)
     uint32 ResolveMapArea(std::string const& mapName, int32& x1, int32& y1, int32& x2, int32& y2) const; // A box's both corners; a part's whole area for -1
     void MoveSavedSpotsOffStitchedMaps(); // Characters and save points on a map that's now a part of a bigger one go onto it
+    void MoveSavedSpotsOnMovedParts(); // ... and on a part that moved in its stitched map since the last startup (mod_rowow_map_layout) go with it
+    bool IsMapAliasOfAnother(std::string const& mapName) const; // An rAthena alias (pvp_y_1-1) of a map that has its own name (prontera)
     std::unordered_map<std::string, std::unordered_set<uint32>> GetMapIDsByMapFlag() const; // RoMapFlags by map key (a stitched map's parts their own)
 
     // Map keys: an RO map's own ID, or for a cell of a stitched map the part it's in (ROWOWMapPart::GetMapKey), which keeps its own map flags, name and
@@ -2576,8 +2582,13 @@ public:
     void RestoreWoWShapeshift(Player* player, ROWOWIdentity& identity); // Leaving the form: the stance or form the character came in with
     bool IsInNpcClickRange(Player const* player, Creature const* creature) const; // npc_checknear: an RO NPC on an RO map answers from here
     bool IsSpellKeptInROForm(SpellInfo const* spellInfo) const;
+    bool IsSpellKeptInROForm(Player const* player, SpellInfo const* spellInfo) const; // ... and with Midgard Wayfarer any companion pet's summon
     bool IsROCompanionPetSpell(SpellInfo const* spellInfo) const; // An RO companion pet's summon, which the form keeps
+    bool IsCompanionPetSpell(SpellInfo const* spellInfo) const; // Any companion pet's summon (a minipet's), RO's or not
     bool IsROCompanionPetCarrier(ItemTemplate const* itemTemplate) const; // An item teaching an RO companion pet, which the form can use
+    bool IsCompanionPetCarrier(ItemTemplate const* itemTemplate) const; // An item teaching any companion pet
+    bool IsCompanionPetCarrierUsableInROForm(Player const* player, ItemTemplate const* itemTemplate) const; // RO's always, any with Midgard Wayfarer
+    void OpenWayfarerCompanions(Player* player); // For a character in the form that just earned Midgard Wayfarer: its hidden companion pets back
 
     // RO status (ROWOW_Status.cpp): the port of rAthena's pre-renewal status calculation for a player (status.cpp)
     void CalculateIdentityStatus(Player* player, ROWOWIdentity& identity) const; // status_calc_pc_sub
@@ -2604,6 +2615,7 @@ public:
     bool PCIsMaxBaseLevel(ROWOWIdentity const& identity) const; // pc_is_maxbaselv
     bool PCIsMaxJobLevel(ROWOWIdentity const& identity) const; // pc_is_maxjoblv
     void PCGainExp(Player* player, uint64 baseExp, uint64 jobExp, Unit* src = nullptr); // pc_gainexp: src is the exp's source (the monster), for the bonuses against it
+    void SendROExpGainToClient(Player* player, uint64 baseExp, uint64 jobExp, Unit* src); // The chat's experience lines (CHAT_MSG_COMBAT_XP_GAIN) of what PCGainExp gave
     void PCCalcExp(Player* player, uint64& baseExp, uint64& jobExp, Unit const* src) const; // pc_calcexp
     bool PCCheckBaseLevelUp(Player* player); // pc_checkbaselevelup
     bool PCCheckJobLevelUp(Player* player); // pc_checkjoblevelup
@@ -2785,15 +2797,14 @@ public:
 
     // RO parties (ROWOW_Party.cpp)
     void LoadPartyData();
-    ROWOWPartyOption GetPartyOption(Group const* group);
-    void SendPartyToClient(Player* player);
+    uint8 GetPartyItemShare(Group const* group) const; // ROWOW_PARTY_ITEM_*, from the group's loot method
+    bool IsPartyExpShared(Group const* group); // Even Share: always, while the members online to the party are within party_share_level
     void UpdateParty(Player* player, uint32 diff); // From the player's update: the party's table follows its group, level and job
     void PartyRemoveMember(Player* player); // Offline to the party: out of the RO world or the game
     void PartyDisband(Group const* group); // party_broken
-    void PartyChangeOption(Player* sd, bool isExpShare, uint8 item); // party_changeoption
     bool PartySkillCheckJob(Player const* sd, uint16 jobID); // party_check_state: a member online anywhere of the job
     void PartyExpShare(Group* group, Creature* src, uint64 baseExp, uint64 jobExp); // party_exp_share
-    bool PartyShareLoot(Player* sd, Group* group, ROWOWPartyOption const& option, ROWOWDropItem const& item, ObjectGuid const& firstCharID); // party_share_loot
+    bool PartyShareLoot(Player* sd, Group* group, ROWOWDropItem const& item, ObjectGuid const& firstCharID); // party_share_loot
 
     // RO taming pets (ROWOW_Pet.cpp)
     void LoadPetData();
@@ -3232,6 +3243,7 @@ public:
     void MobRollDrops(uint32 mobID, int32 mobLevel, uint8 race, uint8 mobClass, Unit* src, Player* sd, Player* firstSD, std::vector<ROWOWDropItem>& itemsOut); // mob_dead's rolls
     void MobDeadLootPriority(Creature* md, Unit* src, ROWOWLootPriority& priority) const; // mob_dead's first_sd, second_sd and third_sd
     void MobDeadDrops(Creature* md, Unit* src, ROWOWLootPriority const& priority, bool isNoDrops); // mob_dead's drops, and what it looted, on the ground
+    bool MobDropAutoloot(ROWOWLootPriority const& priority, ROWOWDropItem const& item); // mob_item_drop's autoloot: true when it went into the bags
     ROWOWFloorItem const* MapFindFloorItem(Map* map, ObjectGuid const& guid) const; // map_id2bl for a floor item
     bool MapCellFree(Map* map, ROWOWMapGrid const& mapGrid, int32 x, int32 y, bool isCountingUnits) const; // map_cell_free
     bool MapSearchFreeCellDist(Map* map, ROWOWMapGrid const& mapGrid, int32& x, int32& y, int32 distMin, int32 distMax, bool isCountingUnits) const; // map_search_freecell_dist
@@ -3478,7 +3490,6 @@ public:
     std::mutex PartyMutex; // Over PartiesByGroupGUID, which every member's thread reads and writes.  Never held across a call into the core
     std::unordered_map<uint32, ROWOWParty> PartiesByGroupGUID;
     bool PartyCheckExpShare(ROWOWParty const& party) const; // party_check_exp_share (under PartyMutex)
-    void SavePartyOption(uint32 groupGUID, ROWOWPartyOption const& option);
 
     // RO homunculi and mercenaries (ROWOW_Follower.cpp, ROWOW_Homunculus.cpp, ROWOW_Mercenary.cpp)
     std::unordered_map<uint32, uint32> FollowerEntriesByClassID; // mod_rowow_follower_look (startup only)

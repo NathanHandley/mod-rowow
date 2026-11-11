@@ -1304,9 +1304,32 @@ void ROWOWMod::PCGainExp(Player* player, uint64 baseExp, uint64 jobExp, Unit* sr
         identity->JobExp = uint32(std::min<uint64>(uint64(identity->JobExp) + jobExp, std::numeric_limits<uint32>::max()));
         PCCheckJobLevelUp(player);
     }
-    // (No message: rAthena's disp_experience is off, and the Basic Info window shows the bars)
+    // (rAthena's disp_experience is off, and the Basic Info window shows the bars.)  The chat's experience line, as WoW's (Nathan 2026-11-10: so the
+    // addons that parse the combat log see it)
+    SendROExpGainToClient(player, baseExp, jobExp, src);
     if (baseExp != 0 || jobExp != 0)
         SendROStatusToClient(player);
+}
+
+void ROWOWMod::SendROExpGainToClient(Player* player, uint64 baseExp, uint64 jobExp, Unit* src)
+{
+    // What the player gained (its own share of a party's, after its bonuses and the max level's cap), one line each for base and job exp, sent as the
+    // chat message type the client prints WoW's experience line with (CHAT_MSG_COMBAT_XP_GAIN): it goes where that line goes (the frames showing
+    // "Experience") and fires that event for addons.  Base exp has WoW's own words (COMBATLOG_XPGAIN_FIRSTPERSON and _UNNAMED), so a parser built
+    // on them counts it as experience; job exp says "job experience", which those patterns don't match ("%d experience"), so it's never counted as
+    // base exp and can be parsed by its own.  Not SMSG_LOG_XPGAIN: that line is the client's, takes the WoW character's rested state into its words
+    // and has no job exp, and the WoW experience bar is untouched either way (in the form it shows the RO base exp, from PLAYER_XP)
+    auto sendLine = [player](std::string const& text)
+    {
+        WorldPacket data;
+        ChatHandler::BuildChatPacket(data, CHAT_MSG_COMBAT_XP_GAIN, LANG_UNIVERSAL, nullptr, nullptr, text);
+        player->SendDirectMessage(&data);
+    };
+    std::string sourceName = src != nullptr && src != player ? src->GetName() : std::string();
+    if (baseExp != 0)
+        sendLine(sourceName.empty() == false ? fmt::format("{} dies, you gain {} experience.", sourceName, baseExp) : fmt::format("You gain {} experience.", baseExp));
+    if (jobExp != 0)
+        sendLine(sourceName.empty() == false ? fmt::format("{} dies, you gain {} job experience.", sourceName, jobExp) : fmt::format("You gain {} job experience.", jobExp));
 }
 
 bool ROWOWMod::PCCheckBaseLevelUp(Player* player)
@@ -1577,7 +1600,7 @@ void ROWOWMod::MobDeadExp(Creature* creature, Unit* killer)
                 shareIter->JobExp += jobExp;
                 isOwnExp = false;
             }
-            else if (GetPartyOption(group).IsExpShare == true)
+            else if (IsPartyExpShared(group) == true)
             {
                 PartyShare share;
                 share.PartyGroup = group;

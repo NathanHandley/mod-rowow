@@ -681,8 +681,8 @@ public:
 
     bool OnPlayerCanCastItemUseSpell(Player* player, Item* item, SpellCastTargets const& /*targets*/, uint8 /*cast_count*/, uint32 /*glyphIndex*/) override
     {
-        // Only RO items work in the form, and the carriers of RO companion pets
-        if (item == nullptr || ROWOW->IsInROForm(player) == false || ROWOW->IsROItemTemplate(item->GetEntry()) == true || ROWOW->IsROCompanionPetCarrier(item->GetTemplate()) == true)
+        // Only RO items work in the form, and the carriers of RO companion pets (with Midgard Wayfarer, of any companion pet)
+        if (item == nullptr || ROWOW->IsInROForm(player) == false || ROWOW->IsROItemTemplate(item->GetEntry()) == true || ROWOW->IsCompanionPetCarrierUsableInROForm(player, item->GetTemplate()) == true)
             return true;
         // ... and with Midgard Worldwalker the character's own (what it still wears: its bags are put away).  What its spell may not do in the RO
         // world is refused as the cast is checked (ROWOW_IdentityAllSpellScript::OnSpellCheckCast)
@@ -1022,12 +1022,12 @@ public:
         {
             // ... but for what Midgard Worldwalker never opens, from the character's own items too (a hearthstone, a rocket boot)
             if (ROWOW->IsWorldwalkerOpen(caster->ToPlayer()) == true && ROWOW->IsROItemTemplate(spell->m_CastItem->GetEntry()) == false
-                && ROWOW->IsROCompanionPetCarrier(spell->m_CastItem->GetTemplate()) == false
+                && ROWOW->IsCompanionPetCarrierUsableInROForm(caster->ToPlayer(), spell->m_CastItem->GetTemplate()) == false
                 && IsSpellRefusedWithWorldwalker(caster->ToPlayer(), spell->GetSpellInfo()) == true)
                 res = SPELL_FAILED_NOT_HERE;
             return;
         }
-        if (ROWOW->IsSpellKeptInROForm(spell->GetSpellInfo()) == true || ROWOW->IsIdentitySkillSpell(caster->ToPlayer(), spell->GetSpellInfo()->Id) == true)
+        if (ROWOW->IsSpellKeptInROForm(caster->ToPlayer(), spell->GetSpellInfo()) == true || ROWOW->IsIdentitySkillSpell(caster->ToPlayer(), spell->GetSpellInfo()->Id) == true)
             return;
         // Midgard Worldwalker: the character's own spells too, but for the ones the RO world has no place for (IsSpellRefusedWithWorldwalker)
         if (ROWOW->IsWorldwalkerOpen(caster->ToPlayer()) == true)
@@ -1147,11 +1147,11 @@ public:
             { "create",   HandleROCreateCommand, SEC_PLAYER,     Console::No },
             { "spritejob", HandleROSpriteJobCommand, SEC_PLAYER, Console::No },
             { "pecomount", HandleROPecoMountCommand, SEC_PLAYER, Console::No },
+            { "autoloot", HandleROAutolootCommand, SEC_PLAYER, Console::No },
             { "enter",    HandleROEnterCommand,  SEC_PLAYER,     Console::No },
             { "slot",     HandleROSlotCommand,   SEC_PLAYER,     Console::No },
             { "slotname", HandleROSlotNameCommand, SEC_PLAYER,   Console::No },
             { "statup",   HandleROStatUpCommand, SEC_PLAYER,     Console::No },
-            { "partyoption", HandleROPartyOptionCommand, SEC_PLAYER, Console::No },
             { "pet",      HandleROPetCommand,    SEC_PLAYER,     Console::No },
             { "hom",      HandleROHomCommand,    SEC_PLAYER,     Console::No },
             { "homname",  HandleROHomNameCommand, SEC_PLAYER,    Console::No },
@@ -1288,7 +1288,6 @@ public:
             ROWOW->SendSpiritBallsToClient(player);
             ROWOW->SendQuestsToClient(player);
             ROWOW->ClifSendPetStatus(player);
-            ROWOW->SendPartyToClient(player);
             ROWOW->GetIdentity(player)->SentWaitingRoomMessage.clear();
         }
         return true;
@@ -1462,16 +1461,6 @@ public:
     {
         Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
         return (player != nullptr && ROWOW->IsInROForm(player) == true) ? player : nullptr;
-    }
-
-    static bool HandleROPartyOptionCommand(ChatHandler* handler, uint32 expShare, uint32 itemShare, uint32 itemEven)
-    {
-        // The RO_Identity addon's party window, for clif_parse_PartyChangeOption
-        Player* player = handler->GetSession()->GetPlayer();
-        if (ROWOW->IsInROForm(player) == false)
-            return false;
-        ROWOW->PartyChangeOption(player, expShare != 0, uint8((itemShare != 0 ? 1 : 0) | (itemEven != 0 ? 2 : 0)));
-        return true;
     }
 
     static bool HandleROPetCommand(ChatHandler* handler, uint32 menuNum)
@@ -3164,6 +3153,27 @@ public:
         return true; // Answered above (false would add the command's usage lines)
     }
 
+    // Options > Interface > Ragnarok's "Autoloot" (Nathan 2026-11-10): ".ro autoloot 1" puts a monster's drops the character has the loot priority on
+    // straight into its bags when they fit, ".ro autoloot 0" (the default) leaves them on the ground.  The answer is the ROWOWSPRITE message, which
+    // carries the choice
+    static bool HandleROAutolootCommand(ChatHandler* handler, Optional<uint32> isEnabled)
+    {
+        Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
+        if (player == nullptr)
+            return false;
+        if (isEnabled.has_value() == false)
+        {
+            ROWOW->SendSpriteJobsToClient(player);
+            return true;
+        }
+        if (ROWOW->SetAutoloot(player, *isEnabled != 0) == false)
+        {
+            handler->SendSysMessage("You have no Ragnarok Online character yet.");
+            ROWOW->SendSpriteJobsToClient(player); // The page shows what's kept again
+        }
+        return true; // Answered above (false would add the command's usage lines)
+    }
+
     static bool HandleROEnterCommand(ChatHandler* handler)
     {
         Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
@@ -3336,6 +3346,7 @@ public:
         std::set<uint16> jobHistoryJobIDs = oldIdentity->JobHistoryJobIDs;
         int32 spriteJobID = oldIdentity->SpriteJobID;
         bool isPecoMountLookEnabled = oldIdentity->IsPecoMountLookEnabled;
+        bool isAutolootEnabled = oldIdentity->IsAutolootEnabled;
         slots[slot - 1].Exists = false;
         slots[slot - 1].HasRiding = false;
         player->CustomData.Erase("ROWOWIdentity");
@@ -3353,6 +3364,7 @@ public:
         identity->JobHistoryJobIDs = jobHistoryJobIDs;
         identity->SpriteJobID = spriteJobID;
         identity->IsPecoMountLookEnabled = isPecoMountLookEnabled;
+        identity->IsAutolootEnabled = isAutolootEnabled;
         identity->AccountVariables = accountVariables;
         if (wasInForm == true)
             ROWOW->EnterROForm(player);
@@ -3418,14 +3430,13 @@ public:
 
     static bool HandleROExpInfoCommand(ChatHandler* handler)
     {
-        // What the rAthena oracle's @oracleexp prints, and the party's options, for comparing what a kill gave
+        // What the rAthena oracle's @oracleexp prints, and the party's sharing (exp: 1 Even Share; item: ROWOW_PARTY_ITEM_*), for comparing what a kill gave
         Player* player = handler->getSelectedPlayerOrSelf();
         if (player == nullptr || ROWOW->IsInROForm(player) == false)
             return false;
         ROWOWIdentity const* identity = ROWOW->GetIdentity(player);
-        ROWOWPartyOption option = ROWOW->GetPartyOption(player->GetGroup());
         handler->PSendSysMessage("expinfo {} base {} job {} blvl {} jlvl {} party {} exp {} item {} spheres {}", player->GetName(), identity->BaseExp, identity->JobExp, identity->BaseLevel, identity->JobLevel,
-            player->GetGroup() != nullptr ? 1 : 0, option.IsExpShare == true ? 1 : 0, uint32(option.Item), ROWOW->PCGetSpiritBall(player));
+            player->GetGroup() != nullptr ? 1 : 0, ROWOW->IsPartyExpShared(player->GetGroup()) == true ? 1 : 0, uint32(ROWOW->GetPartyItemShare(player->GetGroup())), ROWOW->PCGetSpiritBall(player));
         return true;
     }
 
