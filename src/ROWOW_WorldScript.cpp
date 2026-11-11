@@ -50,6 +50,7 @@ public:
         ROWOW->LoadCreatureMobData();
         ROWOW->LoadCreatureTemplateData();
         ROWOW->LoadIllusionData();
+        ROWOW->LoadContentData(); // After the illusions, whose looks' auras it lists
         ROWOW->LoadMapGridData();
         ROWOW->LoadIdentityData();
         ROWOW->LoadLastIdentityID();

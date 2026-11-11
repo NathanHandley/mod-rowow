@@ -553,7 +553,16 @@ public:
     bool OnPlayerBeforeTeleport(Player* player, uint32 mapid, float x, float y, float z, float orientation, uint32 /*options*/, Unit* /*target*/) override
     {
         // Remember where the character came into the RO world from, and where the identity left it, for the world travel spell
-        if (ROWOW->IsEnabled == false || player == nullptr || player->IsInWorld() == false)
+        if (ROWOW->IsEnabled == false || player == nullptr)
+            return true;
+        // No way into the RO world for a client without Ragnarok Online's content (ROWOW_Content.cpp), whatever sends it there: the world travel
+        // spell, a GM's teleport, a summon, a portal.  Before anything below is done for the trip
+        if (ROWOW->IsROMap(mapid) == true && ROWOW->HasRagnarokContent(player) == false)
+        {
+            ROWOW->SendRagnarokContentMissingMessage(player);
+            return false;
+        }
+        if (player->IsInWorld() == false)
             return true;
         ROWOW->StopViewingROSet(player); // The Ragnarok page's bags are put away before any arrival
         if (ROWOW->IsInROForm(player) == true)
@@ -1062,6 +1071,12 @@ class ROWOW_WorldTravelSpellScript : public SpellScript
         Map* map = player->GetMap();
         if (map->IsDungeon() == true || map->IsBattlegroundOrArena() == true)
             return SPELL_FAILED_NOT_HERE;
+        // A client without Ragnarok Online's content has no way in (ROWOW_Content.cpp)
+        if (ROWOW->IsROMap(player->GetMapId()) == false && ROWOW->HasRagnarokContent(player) == false)
+        {
+            ROWOW->SendRagnarokContentMissingMessage(player);
+            return SPELL_FAILED_DONT_REPORT;
+        }
         // The way in is the character window's Ragnarok page (its Enter button, .ro enter), not the spell itself (an old action button, a macro)
         if (ROWOW->IsROMap(player->GetMapId()) == false && ROWOW->IsWorldTravelRequested(player) == false)
         {
@@ -1151,6 +1166,7 @@ public:
             { "pecomount", HandleROPecoMountCommand, SEC_PLAYER, Console::No },
             { "autoloot", HandleROAutolootCommand, SEC_PLAYER, Console::No },
             { "enter",    HandleROEnterCommand,  SEC_PLAYER,     Console::No },
+            { "content",  HandleROContentCommand, SEC_GAMEMASTER, Console::Yes },
             { "slot",     HandleROSlotCommand,   SEC_PLAYER,     Console::No },
             { "slotname", HandleROSlotNameCommand, SEC_PLAYER,   Console::No },
             { "statup",   HandleROStatUpCommand, SEC_PLAYER,     Console::No },
@@ -3245,6 +3261,13 @@ public:
             return false;
         ROWOW->StartWorldTravel(player);
         return true;
+    }
+
+    // Optional content (ROWOW_Content.cpp): .ro content [on|off|auto] [player or account] treats an account's client as having Ragnarok Online's
+    // content or not (to test both with one client folder), or as its client says; .ro content [player or account] says how it stands
+    static bool HandleROContentCommand(ChatHandler* handler, Optional<std::string> modeText, Optional<std::string> nameText)
+    {
+        return ROWOW->HandleContentCommand(handler, modeText.value_or(""), nameText.value_or(""));
     }
 
     // The page's save slot drop-down (Nathan 2026-11-09): the slot picked (1 to 3), and the rename of the slot in use

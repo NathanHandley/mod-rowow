@@ -2083,6 +2083,28 @@ struct ROWOWWorldIdentityState : public DataMap::Base
     uint32 LookSpellIDBeingAdded = 0; // The look AddWorldIdentityAura is putting on right now: its aura isn't client hidden yet while the core applies it
 };
 
+// Optional content (ROWOW_Content.cpp): a player may leave Ragnarok Online's content off its client (the launcher's checklist).  The client tells
+// in CMSG_AUTH_SESSION, in the high byte of its client data version (the client's MWContent::GetContentFlags)
+#define ROWOW_CONTENT_FLAG_RAGNAROK                 0x01    // The client has Ragnarok Online's content (its patches)
+#define ROWOW_CONTENT_FLAG_REPORTED                 0x80    // The client reports its content: one that doesn't (older) has all of it
+#define ROWOW_CONTENT_FLAGS_SHIFT                   24
+#define ROWOW_CONTENT_OVERRIDE_AUTO                 -1      // .ro content: what the client says (no override)
+#define ROWOW_CONTENT_OVERRIDE_OFF                  0       // ... treated as without Ragnarok Online's content, whatever it says
+#define ROWOW_CONTENT_OVERRIDE_ON                   1       // ... treated as with it
+#define ROWOW_RO_SPELL_ID_FIRST                     200000  // The converter's Ragnarok Online spells (as the client's Unit_C.cpp RO_SPELL_ID_FIRST/LAST)
+#define ROWOW_RO_SPELL_ID_LAST                      248999
+#define ROWOW_RO_LOOK_SPELL_ICON_ID                 497     // ConfigurationRagnarok.ILLUSION_RO_SPELL_ICON_ID: the illusions and the auras of their looks
+
+// What the player's client has of the optional content, as it logged in (or as .ro content overrides it).  Written on the world thread (the login,
+// .ro content) while no map updates; read by the map thread the player is on (what it is sent)
+struct ROWOWContentState : public DataMap::Base
+{
+    bool HasRagnarok = true;
+    bool WasLoginRelocated = false; // Logged in on an RO map without the content: put at its way out (GetContentWayOut) before it was placed on a map
+    ROWOWPosition RelocatedFrom; // Where it logged out in the RO world (its identity's way back in once it has the content)
+    bool IsWayOutPending = false; // On an RO map without the content as it arrived (a login onto the character still in the world): taken out at its next update
+};
+
 // A player's RO identity (mod_rowow_identity and the tables beside it), kept on the player while logged in.  Only the player's own
 // thread (its session's and map's updates) touches it
 struct ROWOWIdentity : public DataMap::Base
@@ -2635,6 +2657,24 @@ public:
     void SendWorldIdentityToClient(Player* player, bool isForced); // ROWOWIDENT
     void DeleteWorldIdentityRows(ObjectGuid::LowType guid, CharacterDatabaseTransaction trans);
     void DressSpriteCorpse(Corpse* corpse); // A new corpse lying as an RO job sprite: its head and headgear named in its item fields, for the client
+
+    // Optional content (ROWOW_Content.cpp): a player whose client hasn't Ragnarok Online's content is never shown an RO model, look or map
+    std::vector<bool> RagnarokDisplayIDs; // By CreatureDisplayInfo ID: the displays of RO models (Creature\Ragnarok\...); startup only, then read-only
+    std::unordered_set<uint32> RagnarokLookSpellIDs; // The auras that hang an RO look on a unit (head, headgear, garment, hat effects, option looks, illusions)
+    void LoadContentData();
+    bool IsRagnarokDisplay(uint32 displayID) const { return displayID < RagnarokDisplayIDs.size() && RagnarokDisplayIDs[displayID] == true; }
+    bool IsRagnarokLookSpell(uint32 spellID) const { return RagnarokLookSpellIDs.find(spellID) != RagnarokLookSpellIDs.end(); }
+    void RecordClientContent(uint32 accountID, uint32 clientDataVersion); // CMSG_AUTH_SESSION's report (a network thread)
+    bool AccountHasRagnarokContent(uint32 accountID) const; // As the account's client reported it, or as .ro content overrides it
+    int8 GetContentOverride(uint32 accountID) const; // ROWOW_CONTENT_OVERRIDE_*
+    void SetContentOverride(uint32 accountID, int8 contentOverride);
+    std::string GetContentStatusText(uint32 accountID) const; // What .ro content says of the account
+    bool HasRagnarokContent(Player const* player) const; // The player's client has Ragnarok Online's content (in effect for its session)
+    void ApplyContentAtLogin(Player* player); // OnPlayerLoadFromDB: the session's content, and off an RO map without it before the player is placed
+    void ApplyContentChange(Player* player); // After .ro content: what the player is shown made right at once, and off an RO map without the content
+    bool GetContentWayOut(Player* player, uint32& mapIDOut, float& xOut, float& yOut, float& zOut, float& oOut); // Off the RO world: its return point, else home
+    void SendRagnarokContentMissingMessage(Player* player) const; // Why it can't go to Midgard
+    bool HandleContentCommand(ChatHandler* handler, std::string const& modeText, std::string const& nameText); // .ro content [on|off|auto] [player or account]
     // Midgard Worldwalker's effect: in the RO form the character's own (Azeroth and Norrath) spells stay known, their passives stay on and they may be cast
     bool IsWorldwalkerOpen(Player const* player) const;
     void OpenWorldwalker(Player* player); // For a character already in the form (it just earned the achievement): its hidden spells and passives back

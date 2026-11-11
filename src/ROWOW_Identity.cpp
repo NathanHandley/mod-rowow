@@ -2816,6 +2816,11 @@ void ROWOWMod::StartWorldTravel(Player* player)
     ROWOWIdentity* identity = GetIdentity(player);
     if (IsEnabled == false || IsROMap(player->GetMapId()) == true)
         return;
+    if (HasRagnarokContent(player) == false)
+    {
+        SendRagnarokContentMissingMessage(player); // Optional content (ROWOW_Content.cpp): no way in without it
+        return;
+    }
     if (identity->Exists == false)
     {
         ChatHandler(player->GetSession()).SendSysMessage("Make your Ragnarok Online character first.");
