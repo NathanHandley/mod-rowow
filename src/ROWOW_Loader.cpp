@@ -29,6 +29,7 @@ void AddROWOWPartyScripts();
 void AddROWOWPetScripts();
 void AddROWOWFollowerScripts();
 void AddROWOWWorldIdentityScripts();
+void AddROWOWReturnTetherScripts();
 
 void Addmod_rowowScripts()
 {
@@ -47,4 +48,5 @@ void Addmod_rowowScripts()
     AddROWOWPetScripts();
     AddROWOWFollowerScripts();
     AddROWOWWorldIdentityScripts();
+    AddROWOWReturnTetherScripts();
 }

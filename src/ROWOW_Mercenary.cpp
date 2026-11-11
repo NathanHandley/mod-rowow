@@ -223,6 +223,13 @@ void ROWOWMod::MercenaryDelete(Player* sd, int32 reply)
             MercenarySetFaith(sd, -1); // -1 Loyalty on Mercenary killed
             ChatHandler(sd->GetSession()).SendSysMessage("Your mercenary soldier has been killed.");
             break;
+        // clif_mercenary_message has a line for these two too (MSI_MER_RETIRE, MSI_MER_RUNAWAY)
+        case 2:
+            ChatHandler(sd->GetSession()).SendSysMessage("Your mercenary soldier has been fired.");
+            break;
+        case 3:
+            ChatHandler(sd->GetSession()).SendSysMessage("Your mercenary soldier has ran away.");
+            break;
         default:
             break;
     }

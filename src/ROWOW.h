@@ -114,6 +114,12 @@ struct ROWOWItemVisual
 #define ROWOW_RO_DIRECTION_EAST                     6
 #define ROWOW_SKILL_CELL_GROUND_SEARCH_HEIGHT       3.0f    // How far above a ground skill's spot the ground search for its units' cells starts
 #define ROWOW_SKILL_CELL_GROUND_SEARCH_DISTANCE     10.0f   // How far down it looks
+// A monster's floor on its cell (GetCellFloorZ).  RO has one ground a cell, the GAT's, so the floor is the collision surface nearest it: a search from
+// higher up first hits the bushes and branches (M2s in the vmaps) of the trees that stand on walkable cells
+#define ROWOW_GAT_GROUND_Z_LIFT                     0.5f    // The converter's RO_ZONE_POSITION_Z_LIFT, which the GAT heights of mod_rowow_map_grid include
+#define ROWOW_CELL_FLOOR_SEARCH_ABOVE               1.0f    // How far over the cell's RO ground the search starts
+#define ROWOW_CELL_FLOOR_SEARCH_BELOW               2.0f    // How far under it a floor may be; with none in between, the GAT's height itself
+#define ROWOW_CELL_FLOOR_SEARCH_STEPS               4       // Surfaces looked at, from the top, for the one nearest the RO ground
 
 // A cell of an RO map, as the server keeps its GAT (map_gat2cell's walkable and shootable), and what a path search stops at
 #define ROWOW_CELL_WALL                             0       // Not walkable, and shots don't pass
@@ -247,6 +253,12 @@ struct ROWOWMapGrid
         return cell == ROWOW_CELL_WALKABLE || cell == ROWOW_CELL_WATER;
     }
     bool IsCellShootable(int32 x, int32 y) const { return GetCell(x, y) != ROWOW_CELL_WALL; } // !CELL_CHKWALL
+    bool IsCellInGrid(int32 x, int32 y) const // On the map and, on a stitched map, on one of its parts (not in a gap): it has a GAT height
+    {
+        if (IsCellOnMap(x, y) == false)
+            return false;
+        return Parts.empty() == false ? GetPartAt(x, y) != nullptr : GroundHeights.empty() == false;
+    }
     float GetCellGroundZ(int32 x, int32 y) const // The GAT's height of the cell's center
     {
         if (IsCellOnMap(x, y) == false)
@@ -2097,6 +2109,13 @@ struct ROWOWIdentity : public DataMap::Base
     ROWOWPosition SavePoint;
     ROWOWPosition LastPosition; // Where the identity last left the RO world, which the world travel spell goes back to
     ROWOWPosition ReturnPosition; // Where the character entered the RO world from, which the world travel spell returns to
+    // The return tether (Nathan 2026-11-10, ROWOW_ReturnTether.cpp; mod_rowow_identity_tether): where the last return-to-save teleport left from, until
+    // ReturnTetherExpireTime (unix seconds).  Clicking its aura off goes back there
+    ROWOWPosition ReturnTetherOrigin;
+    uint32 ReturnTetherExpireTime = 0;
+    bool IsReturnTetherUsePending = false; // Its aura was clicked off: the player's next update takes it back (UseReturnTether)
+    ROWOWPosition SentSavePlacePoint; // The save point the client was last told the place of (ROWOWSAVE; world thread)
+    bool IsSavePlaceSent = false;
     uint8 HairStyle = 1;
     uint8 HairColor = 0;
     // The character's look, shared by its save slots (Nathan 2026-11-09; mod_rowow_identity_character and mod_rowow_identity_job_history, kept through
@@ -2237,6 +2256,7 @@ struct ROWOWIdentity : public DataMap::Base
     uint64 WorldTravelRequestTick = 0; // When the Ragnarok page's Enter button asked for the world travel spell (.ro enter), the only way into the RO world
     bool IsLeavingForReset = false; // .ro identity reset takes the form off, on an RO map too, where CompleteROFormChange would put it back on
     bool IsArrivalFloorCheckPending = false; // Arrived on an RO map: the next update checks it isn't left in the air (CheckArrivalFloor)
+    bool IsMidgardAchievementCheckPending = false; // A Midgard achievement was due while it couldn't be earned (GM mode, loading): UpdateMidgardAchievementCheck
     uint32 MapKey = 0; // The map key it was last on (GetMapKey), 0 for none yet: a change on the same WoW map is RO's map change (UpdateMapKey)
     uint32 LoginDeathTimer = 0; // Logged in after logging out dead: dies again where it lies when this runs out (UpdateLoginDeath)
 
@@ -2512,6 +2532,7 @@ public:
     uint32 GetHighestBaseLevel(Player* player); // The highest Base level of the character's identities, every save slot's (0 with none)
     void GrantMidgardAchievements(Player* player, uint32 baseLevel); // Those of a Base level reached that the character hasn't got yet
     void CheckMidgardAchievements(Player* player); // ... by the highest of its identities (login and arriving in the RO world)
+    void UpdateMidgardAchievementCheck(Player* player); // Every update: a check held back by GM mode or the login's loading, made once it can earn them
 
     // The carried sets (the backpack, the bag slots and the bags' items): the character's own and the form's.  The side the character is on has its set
     // on it and the other is put away, each item kept as it is (its row and GUID) with its place to go back to (see UpdateCarriedSet)
@@ -2712,6 +2733,26 @@ public:
     void TeleportToRandomSpot(Player* player); // A random spot on the map (AL_TELEPORT level 1), at one of its monsters' homes
     bool MapSearchRandomSpot(Map* map, uint32 mapKey, Position& positionOut) const; // map_search_freecell over the whole map: a monster's home (a part's: a free cell of it)
     void TeleportToSavePoint(Player* player); // The identity's save point (AL_TELEPORT level 2 and up)
+
+    // Return-to-save teleports (ROWOW_ReturnTether.cpp, Nathan 2026-11-10): the items' and skills' tooltips say where the save point is (ROWOWSAVE), and
+    // a teleport to it leaves a 30 minute return tether aura that, clicked off, goes back to where it was used
+    uint32 ReturnTetherSpellID = 0; // mod_rowow_status_spell's Special_ReturnTether (0: no tether)
+    bool IsReturnToSaveDataLoaded = false;
+    std::string ReturnToSaveItemTemplateIDsText; // The items whose use goes to the save point (a Butterfly Wing), as the ROWOWSAVE list
+    std::string ReturnToSaveSpellIDsText; // AL_TELEPORT's spells of level 2 and up
+    uint32 SavePlaceUpdateTimer = 0;
+    void ReturnToSavePoint(Player* player); // TeleportToSavePoint for a Butterfly Wing or Teleport's save point, with the tether
+    void SetReturnTether(Player* player, ROWOWPosition const& origin);
+    void ClearReturnTether(Player* player);
+    void RefreshReturnTether(Player* player); // Its aura as the identity's tether says (only in the form, in the RO world)
+    void OnReturnTetherAuraRemoved(Player* player, bool isCancelled, bool isExpired);
+    void UseReturnTether(Player* player); // The player's update, after its aura was clicked off
+    void LoadIdentityReturnTether(ROWOWIdentity& identity);
+    void SaveIdentityReturnTether(ROWOWIdentity const& identity, CharacterDatabaseTransaction trans);
+    void LoadReturnToSaveData(); // World thread, once the items and skills are loaded
+    std::string GetSavePlaceName(ROWOWPosition const& savePoint) const; // World thread only (the area lookup may load terrain)
+    void SendSavePlaceToClient(Player* player, bool isForced); // World thread only
+    void UpdateSavePlaces(uint32 diffInMS); // World thread: tells each client whose save point changed
 
     // RO bonuses and cards (ROWOW_Bonus.cpp): the port of rAthena's pc_bonus..pc_bonus5 and the item part of status_calc_pc_sub, the
     // scripts of the worn items, their cards and combos, refine, card compounding (pc_insert_card) and battle_calc_cardfix
@@ -3434,6 +3475,12 @@ public:
     // Finds the ground under a point, searching down from a little above the reference height.  Returns false when there is no ground
     bool GetGroundZ(Creature* creature, float x, float y, float referenceZ, float& groundZOut);
     bool GetGroundZ(Creature* creature, float x, float y, float referenceZ, float searchHeight, float& groundZOut);
+    // A monster's floor at a point of an RO cell: the collision surface nearest the cell's RO ground (ROWOW_CELL_FLOOR_SEARCH_*), else the GAT's
+    // height.  Never the top of a bush or tree standing on a walkable cell
+    float GetCellFloorZ(Creature* creature, ROWOWMapGrid const& mapGrid, int32 cellX, int32 cellY, float x, float y) const;
+    float GetCellFloorZ(Map const* map, uint32 phaseMask, ROWOWMapGrid const& mapGrid, int32 cellX, int32 cellY, float x, float y) const; // A cell in the grid
+    // The same at a world point of an RO map: false off the map's grid (not an RO map, or a stitched map's gap), where the caller's old search applies
+    bool GetROFloorZ(Map const* map, uint32 phaseMask, float x, float y, float& zOut) const;
 
     // Builds a path from the creature toward a target, one small step at a time with every step pulled onto the ground, so the
     // creature follows the terrain like an RO monster does.  The path stops early at a wall, a cliff, or missing ground, and

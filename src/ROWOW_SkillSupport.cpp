@@ -1379,8 +1379,10 @@ Creature* ROWOWMod::MobOnceSpawnSub(Unit* src, int32 x, int32 y, uint32 mobID, u
     // The ground of the cell near the caster's height (the highest ground can be terrain hidden above an RO map's floor)
     float cellX = 0, cellY = 0;
     GetCellWorldPosition(src->GetMapId(), x, y, cellX, cellY);
-    float cellZ = src->GetMap()->GetHeight(src->GetPhaseMask(), cellX, cellY, src->GetPositionZ() + ROWOW_SKILL_CELL_GROUND_SEARCH_HEIGHT, true,
-        ROWOW_SKILL_CELL_GROUND_SEARCH_DISTANCE);
+    float cellZ = 0;
+    if (GetROFloorZ(src->GetMap(), src->GetPhaseMask(), cellX, cellY, cellZ) == false) // The cell's floor, not a bush or tree on it
+        cellZ = src->GetMap()->GetHeight(src->GetPhaseMask(), cellX, cellY, src->GetPositionZ() + ROWOW_SKILL_CELL_GROUND_SEARCH_HEIGHT, true,
+            ROWOW_SKILL_CELL_GROUND_SEARCH_DISTANCE);
     if (cellZ <= INVALID_HEIGHT)
         return nullptr;
     // A duration of 0 is a monster with no deletetimer: it stays until it dies, then its body goes as a spawned one's
@@ -1634,8 +1636,14 @@ bool ROWOWMod::UnitWarpNear(Unit* bl, Position const& center)
     for (int32 tries = 0; tries < 9; tries++)
     {
         float cellX = 0, cellY = 0;
-        GetCellWorldPosition(bl->GetMapId(), centerX + int32(urand(0, 2)) - 1, centerY + int32(urand(0, 2)) - 1, cellX, cellY);
-        float cellZ = map->GetHeight(bl->GetPhaseMask(), cellX, cellY, center.GetPositionZ() + ROWOW_SKILL_CELL_GROUND_SEARCH_HEIGHT, true, ROWOW_SKILL_CELL_GROUND_SEARCH_DISTANCE);
+        int32 tryX = centerX + int32(urand(0, 2)) - 1;
+        int32 tryY = centerY + int32(urand(0, 2)) - 1;
+        GetCellWorldPosition(bl->GetMapId(), tryX, tryY, cellX, cellY);
+        if (ROWOWMapGrid const* mapGrid = GetMapGrid(bl->GetMapId()); mapGrid != nullptr && mapGrid->HasCells() == true && mapGrid->IsCellWalkable(tryX, tryY) == false)
+            continue; // CELL_CHKREACH (a wall cell's floor is the GAT's height, which the height check alone doesn't turn down)
+        float cellZ = 0;
+        if (GetROFloorZ(map, bl->GetPhaseMask(), cellX, cellY, cellZ) == false) // The cell's floor, not a bush or tree on it
+            cellZ = map->GetHeight(bl->GetPhaseMask(), cellX, cellY, center.GetPositionZ() + ROWOW_SKILL_CELL_GROUND_SEARCH_HEIGHT, true, ROWOW_SKILL_CELL_GROUND_SEARCH_DISTANCE);
         if (cellZ <= INVALID_HEIGHT || std::fabs(cellZ - center.GetPositionZ()) > ROWOW_SKILL_CELL_GROUND_SEARCH_HEIGHT)
             continue;
         x = cellX;
@@ -1873,7 +1881,9 @@ bool ROWOWMod::UnitRun(Unit* bl)
     }
     float x = 0, y = 0;
     GetCellWorldPosition(bl->GetMapId(), toX, toY, x, y);
-    float z = bl->GetMap()->GetHeight(bl->GetPhaseMask(), x, y, bl->GetPositionZ() + ROWOW_SKILL_CELL_GROUND_SEARCH_HEIGHT, true, ROWOW_SKILL_CELL_GROUND_SEARCH_DISTANCE);
+    float z = 0;
+    if (GetROFloorZ(bl->GetMap(), bl->GetPhaseMask(), x, y, z) == false) // The cell's floor, not a bush or tree on it
+        z = bl->GetMap()->GetHeight(bl->GetPhaseMask(), x, y, bl->GetPositionZ() + ROWOW_SKILL_CELL_GROUND_SEARCH_HEIGHT, true, ROWOW_SKILL_CELL_GROUND_SEARCH_DISTANCE);
     if (z <= INVALID_HEIGHT)
     {
         UnitRunHit(bl);

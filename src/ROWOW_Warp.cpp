@@ -162,7 +162,7 @@ void ROWOWMod::SkillCastendMap(Player* player, uint16 skillID, std::string const
             if (mapName == "Random" || mapName == "0")
                 TeleportToRandomSpot(player);
             else if (identity->MenuSkillValue > 1) // Need lv2 to be able to warp here.
-                TeleportToSavePoint(player);
+                ReturnToSavePoint(player); // With the return tether (ROWOW_ReturnTether.cpp)
             break;
         case ROWOW_SKILL_AL_WARP:
         {

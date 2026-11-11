@@ -93,6 +93,21 @@ public:
                 return;
             if (me->movespline->Finalized() == false || ROWOW->IsMobMovementBlocked(me, true) == true)
                 return;
+
+            // On a walkable RO cell the floor is the cell's (the one nearest its GAT ground), not the first surface over the creature's own height,
+            // which a creature standing in a bush or tree climbed one branch at a time
+            if (ROWOWMapGrid const* mapGrid = ROWOW->GetMapGrid(me->GetMapId()); mapGrid != nullptr)
+            {
+                int32 cellX = mapGrid->GetCellX(me->GetPositionY());
+                int32 cellY = mapGrid->GetCellY(me->GetPositionX());
+                if (mapGrid->IsCellInGrid(cellX, cellY) == true && mapGrid->IsCellWalkable(cellX, cellY) == true)
+                {
+                    float floorZ = ROWOW->GetCellFloorZ(me, *mapGrid, cellX, cellY, me->GetPositionX(), me->GetPositionY());
+                    if (std::fabs(floorZ - me->GetPositionZ()) > ROWOW->ConfigGroundSnapTolerance)
+                        me->NearTeleportTo(me->GetPositionX(), me->GetPositionY(), floorZ, me->GetOrientation());
+                    return;
+                }
+            }
             float groundZ = 0;
             if (ROWOW->GetGroundZ(me, me->GetPositionX(), me->GetPositionY(), me->GetPositionZ(), groundZ) == false)
                 return;

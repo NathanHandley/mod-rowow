@@ -804,7 +804,12 @@ std::shared_ptr<ROWOWSkillUnitGroup> ROWOWMod::SkillUnitSetting(Unit* src, uint1
         // don't place skill units on walls (except for songs/dances/encores): a cell with ground near the spot's height
         float cellX = 0, cellY = 0;
         GetCellWorldPosition(map->GetId(), ux, uy, cellX, cellY);
-        float cellZ = map->GetHeight(src->GetPhaseMask(), cellX, cellY, referenceZ + ROWOW_SKILL_CELL_GROUND_SEARCH_HEIGHT, true, ROWOW_SKILL_CELL_GROUND_SEARCH_DISTANCE);
+        // On an RO map: the cell's floor (not a bush or tree on it), none on a cell nothing can stand on (CELL_CHKREACH)
+        float cellZ = 0;
+        if (ROWOWMapGrid const* mapGrid = GetMapGrid(map->GetId()); mapGrid != nullptr && mapGrid->HasCells() == true && mapGrid->IsCellInGrid(ux, uy) == true)
+            cellZ = mapGrid->IsCellWalkable(ux, uy) == true ? GetCellFloorZ(map, src->GetPhaseMask(), *mapGrid, ux, uy, cellX, cellY) : INVALID_HEIGHT;
+        else
+            cellZ = map->GetHeight(src->GetPhaseMask(), cellX, cellY, referenceZ + ROWOW_SKILL_CELL_GROUND_SEARCH_HEIGHT, true, ROWOW_SKILL_CELL_GROUND_SEARCH_DISTANCE);
         if (group->SongDance == 0 && cellZ <= INVALID_HEIGHT)
             continue;
         if (cellZ <= INVALID_HEIGHT)
@@ -943,7 +948,9 @@ std::shared_ptr<ROWOWSkillUnitGroup> ROWOWMod::SkillUnitSetting(Unit* src, uint1
     {
         float centerX = 0, centerY = 0;
         GetCellWorldPosition(map->GetId(), x, y, centerX, centerY);
-        float centerZ = map->GetHeight(src->GetPhaseMask(), centerX, centerY, referenceZ + ROWOW_SKILL_CELL_GROUND_SEARCH_HEIGHT, true, ROWOW_SKILL_CELL_GROUND_SEARCH_DISTANCE);
+        float centerZ = 0;
+        if (GetROFloorZ(map, src->GetPhaseMask(), centerX, centerY, centerZ) == false) // The cell's floor, not a bush or tree on it
+            centerZ = map->GetHeight(src->GetPhaseMask(), centerX, centerY, referenceZ + ROWOW_SKILL_CELL_GROUND_SEARCH_HEIGHT, true, ROWOW_SKILL_CELL_GROUND_SEARCH_DISTANCE);
         int32 extent = range;
         for (std::pair<int16, int16> const& cell : layout->Cells)
             extent = std::max({ extent, range + std::abs(int32(cell.first)), range + std::abs(int32(cell.second)) });
@@ -2723,7 +2730,9 @@ namespace
         }
         float cellX = 0, cellY = 0;
         ROWOW->GetCellWorldPosition(map->GetId(), x, y, cellX, cellY);
-        float cellZ = map->GetHeight(PHASEMASK_NORMAL, cellX, cellY, unit.Z + ROWOW_SKILL_CELL_GROUND_SEARCH_HEIGHT, true, ROWOW_SKILL_CELL_GROUND_SEARCH_DISTANCE);
+        float cellZ = 0;
+        if (ROWOW->GetROFloorZ(map, PHASEMASK_NORMAL, cellX, cellY, cellZ) == false) // The cell's floor, not a bush or tree on it
+            cellZ = map->GetHeight(PHASEMASK_NORMAL, cellX, cellY, unit.Z + ROWOW_SKILL_CELL_GROUND_SEARCH_HEIGHT, true, ROWOW_SKILL_CELL_GROUND_SEARCH_DISTANCE);
         if (cellZ > INVALID_HEIGHT)
             unit.Z = cellZ;
         unit.X = x;

@@ -85,7 +85,7 @@ namespace
                 if (skillLevel == 1)
                     ROWOW->TeleportToRandomSpot(sd);
                 else
-                    ROWOW->TeleportToSavePoint(sd);
+                    ROWOW->ReturnToSavePoint(sd); // With the return tether (ROWOW_ReturnTether.cpp)
                 return;
             }
             std::vector<uint32> mapIDs = { 0 }; // "Random"

@@ -808,6 +808,7 @@ void ROWOWMod::MoveSavedSpotsOffStitchedMaps()
     moveSpots("mod_rowow_identity", "guid", "save_map", "save_x", "save_y", "save_z", getSignedMapID);
     moveSpots("mod_rowow_identity", "guid", "last_map", "last_x", "last_y", "last_z", getSignedMapID);
     moveSpots("mod_rowow_identity", "guid", "return_map", "return_x", "return_y", "return_z", getSignedMapID);
+    moveSpots("mod_rowow_identity_tether", "guid", "map", "x", "y", "z", getMapID); // The return tether's spot (ROWOW_ReturnTether.cpp)
 
     // Memo points are cells of their map
     if (QueryResult result = CharacterDatabase.Query("SELECT `guid`, `slot`, `map`, `x`, `y` FROM `mod_rowow_identity_memo` WHERE `map` IN ({})", formerMapIDsText))
@@ -1215,6 +1216,7 @@ void ROWOWMod::CheckArrivalFloor(Player* player)
     // yards under the Training Ground's castle walk and was put down on a floor 16 yards further under it) is put up on it: the floor is looked for
     // from just above the GAT's ground, which RO has only one of
     float searchZ = player->GetPositionZ();
+    float floorZ = INVALID_HEIGHT;
     if (ROWOWMapGrid const* mapGrid = GetMapGrid(player->GetMapId()))
     {
         int32 cellX = mapGrid->GetCellX(player->GetPositionY());
@@ -1224,9 +1226,13 @@ void ROWOWMod::CheckArrivalFloor(Player* player)
             float groundZ = mapGrid->GetCellGroundZ(cellX, cellY);
             if (player->GetPositionZ() < groundZ - ROWOW_ARRIVAL_FLOOR_TOLERANCE)
                 searchZ = groundZ + ROWOW_ARRIVAL_FLOOR_TOLERANCE;
+            // The cell's floor, the one nearest its GAT ground: not the bush or tree standing on it, which the search from over it finds first
+            if (mapGrid->IsCellInGrid(cellX, cellY) == true)
+                floorZ = GetCellFloorZ(map, player->GetPhaseMask(), *mapGrid, cellX, cellY, player->GetPositionX(), player->GetPositionY());
         }
     }
-    float floorZ = map->GetMapCollisionData().GetStaticTree().getHeight(player->GetPositionX(), player->GetPositionY(), searchZ + 1.0f, MAX_FALL_DISTANCE);
+    if (floorZ <= INVALID_HEIGHT)
+        floorZ = map->GetMapCollisionData().GetStaticTree().getHeight(player->GetPositionX(), player->GetPositionY(), searchZ + 1.0f, MAX_FALL_DISTANCE);
     if (floorZ <= INVALID_HEIGHT)
         return;
     floorZ = std::max(floorZ, map->GetWaterLevel(player->GetPositionX(), player->GetPositionY()));
@@ -1322,11 +1328,22 @@ uint32 ROWOWMod::GetHighestBaseLevel(Player* player)
 
 void ROWOWMod::GrantMidgardAchievements(Player* player, uint32 baseLevel)
 {
-    if (IsEnabled == false || player == nullptr)
+    if (IsEnabled == false || player == nullptr || player->GetSession() == nullptr)
         return;
-    // The core refuses achievements in GM mode (with a chat message), so they're left for the next check out of it (a login or an arrival in the RO world)
-    if (player->IsGameMaster() == true)
+    // Every one of the three whose Base level is reached at once, however it was reached (one level or many, by exp or a GM command).  Held back
+    // for UpdateMidgardAchievementCheck while one can't be earned properly:
+    // - in GM mode the core refuses achievements (with a chat message);
+    // - while the login loads (an arrival in the RO world at login checks here from inside the core's map add) the core completes it on the server
+    //   but sends the client nothing (AchievementMgr::SendAchievementEarned), and the client was already sent the full achievement list, so it only
+    //   saw the achievement after the next login (Follow-up 5: "Pathfinder only appeared after a relog").  The check after the loading has the
+    //   toast and the achievement window and every gate in step at once
+    if (baseLevel < ROWOW_ACHIEVEMENT_MIDGARD_PATHFINDER_BASE_LEVEL)
         return;
+    if (player->IsGameMaster() == true || player->GetSession()->PlayerLoading() == true)
+    {
+        GetIdentity(player)->IsMidgardAchievementCheckPending = true;
+        return;
+    }
     static const std::pair<uint32, uint32> achievementIDsAndBaseLevels[] =
     {
         { ROWOW_ACHIEVEMENT_MIDGARD_PATHFINDER, ROWOW_ACHIEVEMENT_MIDGARD_PATHFINDER_BASE_LEVEL },
@@ -1353,6 +1370,18 @@ void ROWOWMod::CheckMidgardAchievements(Player* player)
     if (IsEnabled == false || player == nullptr)
         return;
     GrantMidgardAchievements(player, GetHighestBaseLevel(player));
+}
+
+void ROWOWMod::UpdateMidgardAchievementCheck(Player* player)
+{
+    // A check GrantMidgardAchievements held back, made in the first update the character can earn them: just after the login's loading, or once
+    // GM mode is off (.gm off grants what .ro level gave in GM mode, with no relog)
+    ROWOWIdentity* identity = player->CustomData.Get<ROWOWIdentity>("ROWOWIdentity");
+    if (identity == nullptr || identity->IsMidgardAchievementCheckPending == false || player->IsInWorld() == false || player->GetSession() == nullptr ||
+        player->GetSession()->PlayerLoading() == true || player->IsGameMaster() == true)
+        return;
+    identity->IsMidgardAchievementCheckPending = false;
+    CheckMidgardAchievements(player);
 }
 
 void ROWOWMod::LoadLastIdentityID()
@@ -1753,6 +1782,7 @@ void ROWOWMod::LoadIdentityRows(Player* player, ROWOWIdentity& slotIdentity)
     LoadIdentityCart(player, *identity);
     LoadIdentityStowedItems(player, *identity);
     LoadIdentityMemo(player, *identity);
+    LoadIdentityReturnTether(*identity);
     LoadIdentityQuests(player, *identity);
     LoadIdentityPet(player, *identity);
     LoadIdentityFollowers(player, *identity);
@@ -1791,6 +1821,7 @@ void ROWOWMod::DeleteIdentityRows(ObjectGuid::LowType guid, CharacterDatabaseTra
     trans->Append("DELETE FROM `mod_rowow_identity_status` WHERE `guid` = {}", guid);
     trans->Append("DELETE FROM `mod_rowow_identity_cart` WHERE `guid` = {}", guid);
     trans->Append("DELETE FROM `mod_rowow_identity_memo` WHERE `guid` = {}", guid);
+    trans->Append("DELETE FROM `mod_rowow_identity_tether` WHERE `guid` = {}", guid);
     trans->Append("DELETE FROM `mod_rowow_identity_quest` WHERE `guid` = {}", guid);
     trans->Append("DELETE FROM `mod_rowow_homunculus` WHERE `CharacterGUID` = {}", guid);
     trans->Append("DELETE FROM `mod_rowow_mercenary` WHERE `CharacterGUID` = {}", guid);
@@ -1873,6 +1904,7 @@ void ROWOWMod::SaveIdentity(Player* player, CharacterDatabaseTransaction trans, 
         SaveIdentityStowedItems(player, *identity, trans);
     }
     SaveIdentityMemo(player, *identity, trans);
+    SaveIdentityReturnTether(*identity, trans);
     SaveIdentityQuests(player, *identity, trans);
     SaveIdentityPet(player, *identity, trans);
     SaveIdentityFollowers(player, *identity, trans);
@@ -2201,6 +2233,7 @@ void ROWOWMod::CompleteROFormChange(Player* player)
     SendROFormStateToClient(player);
     SendWorldTravelSpellsToClient(player);
     SendROStatusToClient(player);
+    RefreshReturnTether(player); // Its aura in the RO world with the time it has left; out of it, the tether is over (ROWOW_ReturnTether.cpp)
     if (identity->IsInForm == true)
     {
         SendSkillsToClient(player, *identity, true);

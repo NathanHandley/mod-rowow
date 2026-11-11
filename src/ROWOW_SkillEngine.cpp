@@ -3028,19 +3028,28 @@ int32 ROWOWMod::SkillBlown(Unit* src, Unit* target, int32 count, int8 dir, int32
     float x = target->GetPositionX();
     float y = target->GetPositionY();
     float z = target->GetPositionZ();
+    // On an RO map the steps go from floor to floor of the cells (GetCellFloorZ), so a target standing on a bush or knocked under a tree stays on
+    // the ground instead of stepping onto it
+    float floorZ = 0;
+    if (GetROFloorZ(map, target->GetPhaseMask(), x, y, floorZ) == true)
+        z = floorZ;
     int32 moved = 0;
     for (; moved < count; moved++)
     {
         // RO's x east is WoW's -Y, RO's y north is WoW's X
         float nextX = x + float(dy) * cellSize;
         float nextY = y - float(dx) * cellSize;
-        float nextZ = map->GetHeight(target->GetPhaseMask(), nextX, nextY, z + KnockbackMaxStepHeight + 0.5f, true, KnockbackMaxStepHeight * 2.0f + 1.0f);
+        float nextZ = 0;
+        if (GetROFloorZ(map, target->GetPhaseMask(), nextX, nextY, nextZ) == false)
+            nextZ = map->GetHeight(target->GetPhaseMask(), nextX, nextY, z + KnockbackMaxStepHeight + 0.5f, true, KnockbackMaxStepHeight * 2.0f + 1.0f);
         if (nextZ <= INVALID_HEIGHT || std::fabs(nextZ - z) > KnockbackMaxStepHeight)
             break;
         int32 nextCellX = 0, nextCellY = 0;
         GetWorldCell(target->GetMapId(), nextX, nextY, nextCellX, nextCellY);
         if (MapGetCellIceWall(map, nextCellX, nextCellY) == true)
             break; // An Ice Wall stops it like a wall
+        if (mapGrid != nullptr && mapGrid->HasCells() == true && mapGrid->IsCellWalkable(nextCellX, nextCellY) == false)
+            break; // path_blownpos's CELL_CHKNOPASS: the floor of a wall cell is no step (its height alone no longer stops it)
         if (map->isInLineOfSight(x, y, z + ROWOW_MOVE_LINE_OF_SIGHT_HEIGHT, nextX, nextY, nextZ + ROWOW_MOVE_LINE_OF_SIGHT_HEIGHT, target->GetPhaseMask(),
             LINEOFSIGHT_CHECK_VMAP, VMAP::ModelIgnoreFlags::Nothing) == false)
             break;
@@ -3066,7 +3075,11 @@ bool ROWOWMod::UnitMovePos(Unit* bl, int32 x, int32 y)
     Map* map = bl->GetMap();
     if (MapGetCellIceWall(map, x, y) == true)
         return false; // An Ice Wall's cell can't be stood on
-    float z = map->GetHeight(bl->GetPhaseMask(), cellX, cellY, bl->GetPositionZ() + ROWOW_SKILL_CELL_GROUND_SEARCH_HEIGHT, true, ROWOW_SKILL_CELL_GROUND_SEARCH_DISTANCE);
+    if (ROWOWMapGrid const* mapGrid = GetMapGrid(bl->GetMapId()); mapGrid != nullptr && mapGrid->HasCells() == true && mapGrid->IsCellWalkable(x, y) == false)
+        return false; // CELL_CHKNOPASS (a wall cell's floor is the GAT's height, so the ground search alone no longer turns it down)
+    float z = 0;
+    if (GetROFloorZ(map, bl->GetPhaseMask(), cellX, cellY, z) == false) // The cell's floor, not a bush or tree on it
+        z = map->GetHeight(bl->GetPhaseMask(), cellX, cellY, bl->GetPositionZ() + ROWOW_SKILL_CELL_GROUND_SEARCH_HEIGHT, true, ROWOW_SKILL_CELL_GROUND_SEARCH_DISTANCE);
     if (z <= INVALID_HEIGHT || map->isInLineOfSight(bl->GetPositionX(), bl->GetPositionY(), bl->GetPositionZ() + ROWOW_MOVE_LINE_OF_SIGHT_HEIGHT, cellX, cellY,
         z + ROWOW_MOVE_LINE_OF_SIGHT_HEIGHT, bl->GetPhaseMask(), LINEOFSIGHT_CHECK_VMAP, VMAP::ModelIgnoreFlags::Nothing) == false)
         return false;
@@ -3084,7 +3097,11 @@ bool ROWOWMod::UnitJumpPos(Unit* bl, int32 x, int32 y)
     Map* map = bl->GetMap();
     if (MapGetCellIceWall(map, x, y) == true)
         return false; // An Ice Wall's cell can't be stood on
-    float z = map->GetHeight(bl->GetPhaseMask(), cellX, cellY, bl->GetPositionZ() + ROWOW_SKILL_CELL_GROUND_SEARCH_HEIGHT, true, ROWOW_SKILL_CELL_GROUND_SEARCH_DISTANCE);
+    if (ROWOWMapGrid const* mapGrid = GetMapGrid(bl->GetMapId()); mapGrid != nullptr && mapGrid->HasCells() == true && mapGrid->IsCellWalkable(x, y) == false)
+        return false; // CELL_CHKNOPASS (a wall cell's floor is the GAT's height, so the ground search alone no longer turns it down)
+    float z = 0;
+    if (GetROFloorZ(map, bl->GetPhaseMask(), cellX, cellY, z) == false) // The cell's floor, not a bush or tree on it
+        z = map->GetHeight(bl->GetPhaseMask(), cellX, cellY, bl->GetPositionZ() + ROWOW_SKILL_CELL_GROUND_SEARCH_HEIGHT, true, ROWOW_SKILL_CELL_GROUND_SEARCH_DISTANCE);
     if (z <= INVALID_HEIGHT)
         return false;
     bl->StopMoving();

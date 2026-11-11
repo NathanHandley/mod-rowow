@@ -49,6 +49,50 @@ bool ROWOWMod::GetGroundZ(Creature* creature, float x, float y, float referenceZ
     return true;
 }
 
+float ROWOWMod::GetCellFloorZ(Creature* creature, ROWOWMapGrid const& mapGrid, int32 cellX, int32 cellY, float x, float y) const
+{
+    if (mapGrid.IsCellInGrid(cellX, cellY) == false)
+        return creature->GetPositionZ();
+    return GetCellFloorZ(creature->GetMap(), creature->GetPhaseMask(), mapGrid, cellX, cellY, x, y);
+}
+
+bool ROWOWMod::GetROFloorZ(Map const* map, uint32 phaseMask, float x, float y, float& zOut) const
+{
+    ROWOWMapGrid const* mapGrid = GetMapGrid(map->GetId());
+    if (mapGrid == nullptr)
+        return false;
+    int32 cellX = mapGrid->GetCellX(y);
+    int32 cellY = mapGrid->GetCellY(x);
+    if (mapGrid->IsCellInGrid(cellX, cellY) == false)
+        return false;
+    zOut = GetCellFloorZ(map, phaseMask, *mapGrid, cellX, cellY, x, y);
+    return true;
+}
+
+float ROWOWMod::GetCellFloorZ(Map const* map, uint32 phaseMask, ROWOWMapGrid const& mapGrid, int32 cellX, int32 cellY, float x, float y) const
+{
+    // RO has a single ground a cell, the GAT's.  The floor is the collision surface nearest it, looked for from just over it, going down past the
+    // surfaces of whatever stands on the cell.  A search from 3 yards over it took the first surface, which on prt_fild09 put a monster up to 3.5 yards
+    // up a bush or tree on 2,388 walkable cells, and a standing one climbed further from there (the ground snap searched from its own height)
+    float gatZ = mapGrid.GetCellGroundZ(cellX, cellY);
+    float roGroundZ = gatZ - ROWOW_GAT_GROUND_Z_LIFT;
+    float lowestZ = roGroundZ - ROWOW_CELL_FLOOR_SEARCH_BELOW;
+    float searchZ = roGroundZ + ROWOW_CELL_FLOOR_SEARCH_ABOVE;
+    float floorZ = INVALID_HEIGHT;
+    for (int32 step = 0; step < ROWOW_CELL_FLOOR_SEARCH_STEPS && searchZ > lowestZ; step++)
+    {
+        float surfaceZ = map->GetHeight(phaseMask, x, y, searchZ, true, searchZ - lowestZ);
+        if (surfaceZ <= INVALID_HEIGHT || surfaceZ < lowestZ || surfaceZ > searchZ)
+            break;
+        if (floorZ <= INVALID_HEIGHT || std::fabs(surfaceZ - roGroundZ) < std::fabs(floorZ - roGroundZ))
+            floorZ = surfaceZ;
+        if (surfaceZ <= roGroundZ)
+            break; // Anything lower is further from the ground
+        searchZ = surfaceZ - 0.05f; // Under this surface (the models' faces come in pairs a few hundredths apart)
+    }
+    return floorZ > INVALID_HEIGHT ? floorZ : gatZ;
+}
+
 namespace
 {
     // path.cpp
@@ -395,12 +439,20 @@ bool ROWOWMod::UnitWalkPath(Creature* md, ROWOWMobData* mob, std::vector<uint8> 
         y += DirectionY[direction];
         float worldX = mapGrid->GetCellCenterWorldX(y);
         float worldY = mapGrid->GetCellCenterWorldY(x);
-        float worldZ = mapGrid->GetCellGroundZ(x, y);
-        float groundZ = 0;
-        if (GetGroundZ(md, worldX, worldY, worldZ, groundZ) == true)
-            worldZ = groundZ;
-        nodes.emplace_back(worldX, worldY, worldZ);
+        nodes.emplace_back(worldX, worldY, GetCellFloorZ(md, *mapGrid, x, y, worldX, worldY));
         pathTime += uint32(status->Speed) * uint32((direction % 2) != 0 ? MOVE_DIAGONAL_COST : MOVE_COST) / uint32(MOVE_COST); // unit_get_walkpath_time
+    }
+
+    // A path of one cell is two points, which the core's escort movement turns into a MoveTo with the mmaps' path finding: its navmesh also has
+    // polygons on the tree tops, and RO's own path is already the path.  A middle point keeps it a plain spline
+    if (nodes.size() == 2 && (nodes[1] - nodes[0]).length() > 0.2f)
+    {
+        G3D::Vector3 middle = (nodes[0] + nodes[1]) * 0.5f;
+        int32 middleCellX = mapGrid->GetCellX(middle.y);
+        int32 middleCellY = mapGrid->GetCellY(middle.x);
+        middle.z = mapGrid->IsCellWalkable(middleCellX, middleCellY) == true ? GetCellFloorZ(md, *mapGrid, middleCellX, middleCellY, middle.x, middle.y) :
+            middle.z;
+        nodes.insert(nodes.begin() + 1, middle);
     }
     md->GetMotionMaster()->MoveSplinePath(&nodes, isRun == true ? FORCED_MOVEMENT_RUN : FORCED_MOVEMENT_WALK);
     mob->IsWalking = true;

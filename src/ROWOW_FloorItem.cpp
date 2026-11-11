@@ -596,9 +596,8 @@ ObjectGuid ROWOWMod::MapAddFloorItem(Map* map, ROWOWDropItem const& item, int32 
     // subx and suby: where on the cell, in RO's own steps
     float worldX = mapGrid->OriginX + (float(y) + float(irand(1, 4) * 3) / float(SUBCELL_STEPS)) * mapGrid->CellSize;
     float worldY = mapGrid->OriginY - (float(x) + float(irand(1, 4) * 3) / float(SUBCELL_STEPS)) * mapGrid->CellSize;
-    float worldZ = map->GetHeight(PHASEMASK_NORMAL, worldX, worldY, mapGrid->GetCellGroundZ(x, y) + ConfigMoveFloorSearchHeight, true, ConfigMoveFloorSearchDistance);
-    if (worldZ <= INVALID_HEIGHT)
-        worldZ = mapGrid->GetCellGroundZ(x, y);
+    // On the cell's floor, not on a bush or tree standing on it (GetCellFloorZ)
+    float worldZ = mapGrid->IsCellInGrid(x, y) == true ? GetCellFloorZ(map, PHASEMASK_NORMAL, *mapGrid, x, y, worldX, worldY) : mapGrid->GetCellGroundZ(x, y);
     uint32 entry = item.IsIdentified == true || groundItemIter->second.UnidentifiedGameObjectEntry == 0 ? groundItemIter->second.GameObjectEntry : groundItemIter->second.UnidentifiedGameObjectEntry;
     GameObject* go = map->SummonGameObject(entry, worldX, worldY, worldZ, 0, 0, 0, 0, 0, 0, false);
     if (go == nullptr)

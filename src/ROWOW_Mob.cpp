@@ -1333,10 +1333,7 @@ bool ROWOWMod::MobSpawn(Creature* md)
     float worldY = mapGrid->GetCellCenterWorldY(x);
     if (map->IsGridLoaded(worldX, worldY) == false)
         return true; // The core's own spot: a corpse can't be put on a grid nobody is on
-    float worldZ = mapGrid->GetCellGroundZ(x, y);
-    float groundZ = 0;
-    if (GetGroundZ(md, worldX, worldY, worldZ, groundZ) == true)
-        worldZ = groundZ;
+    float worldZ = GetCellFloorZ(md, *mapGrid, x, y, worldX, worldY);
     float orientation = frand(0.0f, float(M_PI) * 2.0f);
     md->SetHomePosition(worldX, worldY, worldZ, orientation);
     md->SetPosition(worldX, worldY, worldZ, orientation);

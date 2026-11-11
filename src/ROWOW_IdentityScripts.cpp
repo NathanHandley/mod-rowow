@@ -379,6 +379,7 @@ public:
         ROWOW->UpdateNaturalRegen(player, p_time);
         ROWOW->UpdateStatusChanges(player);
         ROWOW->UpdateWorldIdentity(player, p_time); // In every world: the look of the character's identity for it
+        ROWOW->UpdateMidgardAchievementCheck(player); // In every world: a Midgard achievement held back (GM mode, the login's loading)
         if (ROWOW->IsEnabled == false || ROWOW->IsInROForm(player) == false)
             return;
         // The character's pet stays put away in the form, whatever summoned it again (the core on arrival or at login)
@@ -1280,6 +1281,7 @@ public:
         ROWOW->SendROFormStateToClient(player);
         ROWOW->SendROStatusToClient(player);
         ROWOW->SendHairToClient(player);
+        ROWOW->SendSavePlaceToClient(player, true); // The tooltips' "Your save is in" (ROWOW_ReturnTether.cpp; a command is the world thread)
         if (ROWOW->IsInROForm(player) == true)
         {
             ROWOW->SendEquipmentToClient(player, *ROWOW->GetIdentity(player), true);
@@ -1288,6 +1290,9 @@ public:
             ROWOW->SendSpiritBallsToClient(player);
             ROWOW->SendQuestsToClient(player);
             ROWOW->ClifSendPetStatus(player);
+            // The homunculus and mercenary windows lose what they had with a reload of the interface ("You have no mercenary." with one under contract)
+            ROWOW->ClifHomInfo(player);
+            ROWOW->ClifMercenaryInfo(player);
             ROWOW->GetIdentity(player)->SentWaitingRoomMessage.clear();
         }
         return true;
@@ -3423,7 +3428,7 @@ public:
         ROWOW->RefreshROForm(player);
         ROWOW->GrantMidgardAchievements(player, identity->BaseLevel);
         if (player->IsGameMaster() == true && identity->BaseLevel >= ROWOW_ACHIEVEMENT_MIDGARD_PATHFINDER_BASE_LEVEL)
-            handler->SendSysMessage("In GM mode no Midgard achievement is earned: they come at the next login or arrival in the RO world out of GM mode.");
+            handler->SendSysMessage("In GM mode no Midgard achievement is earned: they come as soon as GM mode is off (.gm off).");
         handler->PSendSysMessage("{} is now base level {} and job level {}.", player->GetName(), identity->BaseLevel, identity->JobLevel);
         return true;
     }

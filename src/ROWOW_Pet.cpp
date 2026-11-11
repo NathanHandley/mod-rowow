@@ -428,7 +428,9 @@ void ROWOWMod::GetCellPositionBesideMaster(Player* sd, float& xOut, float& yOut,
     float cellX = 0, cellY = 0;
     if (GetCellWorldPosition(sd->GetMapId(), toX, toY, cellX, cellY) == false)
         return;
-    float cellZ = sd->GetMap()->GetHeight(sd->GetPhaseMask(), cellX, cellY, sd->GetPositionZ() + ROWOW_SKILL_CELL_GROUND_SEARCH_HEIGHT, true, ROWOW_SKILL_CELL_GROUND_SEARCH_DISTANCE);
+    float cellZ = 0;
+    if (GetROFloorZ(sd->GetMap(), sd->GetPhaseMask(), cellX, cellY, cellZ) == false) // The cell's floor, not a bush or tree on it
+        cellZ = sd->GetMap()->GetHeight(sd->GetPhaseMask(), cellX, cellY, sd->GetPositionZ() + ROWOW_SKILL_CELL_GROUND_SEARCH_HEIGHT, true, ROWOW_SKILL_CELL_GROUND_SEARCH_DISTANCE);
     if (cellZ <= INVALID_HEIGHT)
         return;
     xOut = cellX;

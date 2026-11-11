@@ -283,6 +283,7 @@ void ROWOWMod::LoadStatusChangeData()
     // The marker aura of each status the client shows, from the converter
     uint32 spellCount = 0;
     OptionIconSpellIDsByOption.clear();
+    ReturnTetherSpellID = 0;
     if (QueryResult result = WorldDatabase.Query("SELECT `Status`, `SpellID` FROM `mod_rowow_status_spell`"))
     {
         do
@@ -290,6 +291,14 @@ void ROWOWMod::LoadStatusChangeData()
             Field* fields = result->Fetch();
             std::string statusName = fields[0].Get<std::string>();
             uint32 spellID = fields[1].Get<uint32>();
+
+            // The return tether's aura, which isn't a status (ROWOW_ReturnTether.cpp)
+            if (statusName == "Special_ReturnTether")
+            {
+                if (sSpellMgr->GetSpellInfo(spellID) != nullptr)
+                    ReturnTetherSpellID = spellID;
+                continue;
+            }
 
             // The icons of the options RO shows one for (R9.5), which RefreshIllusionOptionLooks keeps
             if (statusName == "Option_Riding" || statusName == "Option_Falcon")
@@ -985,6 +994,14 @@ bool ROWOWMod::StatusChangeStartPostDelay(Unit* src, Unit* bl, int32 type, int32
     {
         switch (type)
         {
+            case ROWOW_SC_MERC_FLEEUP:
+            case ROWOW_SC_MERC_ATKUP:
+            case ROWOW_SC_MERC_HPUP:
+            case ROWOW_SC_MERC_SPUP:
+            case ROWOW_SC_MERC_HITUP:
+                if (sce->Val1 > val1)
+                    val1 = sce->Val1;
+                break;
             case ROWOW_SC_ADRENALINE:
             case ROWOW_SC_ADRENALINE2:
             case ROWOW_SC_WEAPONPERFECTION:
@@ -1955,6 +1972,15 @@ bool ROWOWMod::StatusChangeStartValues(Unit* src, Unit* bl, int32 type, int32& v
             break;
         case ROWOW_SC_KAIZEL:
             val2 = 10 * val1; // % of life to be revived with
+            break;
+        case ROWOW_SC_MERC_FLEEUP:
+        case ROWOW_SC_MERC_ATKUP:
+        case ROWOW_SC_MERC_HITUP:
+            val2 = 15 * val1; // The mercenary kill bonus (mercenary_killbonus): its Flee, ATK or Hit
+            break;
+        case ROWOW_SC_MERC_HPUP:
+        case ROWOW_SC_MERC_SPUP:
+            val2 = 5 * val1; // Its max HP / SP in percent
             break;
         case ROWOW_SC_REBIRTH:
             val2 = 20 * val1; // % of life to be revived with

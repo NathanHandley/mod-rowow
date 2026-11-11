@@ -533,7 +533,7 @@ void ROWOWMod::LoadItemScriptData()
             if (skillLevel <= 1)
                 TeleportToRandomSpot(context.AttachedPlayer);
             else
-                TeleportToSavePoint(context.AttachedPlayer);
+                ReturnToSavePoint(context.AttachedPlayer); // With the return tether (ROWOW_ReturnTether.cpp)
         }
         else if (skillID == ROWOW_SKILL_MC_IDENTIFY)
         {
