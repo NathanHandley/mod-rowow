@@ -1149,6 +1149,10 @@ bool ROWOWMod::StatusChangeStartPostDelay(Unit* src, Unit* bl, int32 type, int32
     if (sd != nullptr)
         StatusChangeSaveNeeded(sd);
 
+    // SendLook: an outfit's body in place of the job's, with no weapon or shield (status_set_viewdata's OPTION_COSTUME)
+    if (sd != nullptr && (scdb->Look & ROWOW_OPTION_COSTUME) != 0)
+        RequestWorldIdentityLookRefresh(sd);
+
     // 1st thing to execute when loading status
     switch (type)
     {
@@ -2349,6 +2353,10 @@ bool ROWOWMod::StatusChangeEnd(Unit* bl, int32 type, bool isTimer)
         StatusCalcBL(bl, calcFlag);
     if (sd != nullptr)
         StatusChangeSaveNeeded(sd);
+
+    // SendLook: the job's own body back
+    if (sd != nullptr && (scdb->Look & ROWOW_OPTION_COSTUME) != 0)
+        RequestWorldIdentityLookRefresh(sd);
 
     // Needed to be here to make sure OPT1_STONEWAIT has been cleared from the target (only on natural expiration of the stone wait timer)
     if (type == ROWOW_SC_STONEWAIT && isTimer == true)

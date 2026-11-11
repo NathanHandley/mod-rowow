@@ -229,6 +229,10 @@ uint32 ROWOWMod::GetWorldIdentityRagnarokLookSpellID(Player* player)
     // Out of Midgard (Nathan 2026-11-10) the body is the one on foot, whatever the RO character's Peco option, but for one case: on a ground mount
     // a job sprite that has a Peco body, of a character that has learned Riding, is shown on its Peco, in the mount's place (IsPecoShownForMount;
     // RefreshWorldIdentityMount keeps the mount's own model from showing)
+    // An outfit on (SC_WEDDING, SC_XMAS, SC_SUMMER) is shown in place of any job's body, the Peco's too (status_set_viewdata's OPTION_COSTUME look)
+    uint32 outfitSpellID = GetOutfitIllusionSpellID(player);
+    if (outfitSpellID != 0)
+        return outfitSpellID;
     ROWOWIdentity* identity = GetIdentity(player);
     if (identity->IsInForm == true)
         return GetIdentityLookIllusionSpellID(player, PCIsRiding(player) == true && player->IsMounted() == false);
@@ -250,6 +254,61 @@ uint32 ROWOWMod::GetWorldIdentityRagnarokLookSpellID(Player* player)
             return illusionSpellIDIter->second;
     }
     return 0;
+}
+
+uint32 ROWOWMod::GetOutfitOption(Player* player)
+{
+    // The outfits of pre-renewal's statuses (status.yml's Options: Wedding, Xmas, Summer).  In the RO world the statuses on the character; out of it
+    // (RO's logout: LeaveStatusChanges) the ones the save slot in use keeps, which come back as they were, so its look is still in its outfit.  Still
+    // arriving in the form, the kept ones, which RestoreStatusChanges is about to start again
+    ROWOWIdentity* identity = GetIdentity(player);
+    if (identity->IsInForm == true && identity->IsFormArrivalPending == false)
+    {
+        ROWOWStatusChange const* sc = GetStatusChange(static_cast<Unit const*>(player));
+        return sc != nullptr ? (sc->Option & ROWOW_OPTION_COSTUME) : 0;
+    }
+    if (identity->Exists == false)
+        return 0;
+    uint32 option = 0;
+    for (ROWOWSavedStatusChange const& saved : identity->SavedStatusChanges)
+    {
+        if (saved.Tick == 0)
+            continue; // Ran out as it was kept
+        if (ROWOWStatusChangeDB const* scdb = GetStatusChangeDB(saved.Type))
+            option |= scdb->Look & ROWOW_OPTION_COSTUME;
+    }
+    return option;
+}
+
+std::string ROWOWMod::GetOutfitIllusionJobKey(Player* player)
+{
+    // RO's bodies for the outfits (JOB_WEDDING, JOB_XMAS, JOB_SUMMER), the converter's job keys; with more than one on, the first in RO's job order
+    uint32 option = GetOutfitOption(player);
+    if (option == 0)
+        return std::string();
+    bool isMale = player->getGender() == GENDER_MALE;
+    std::pair<uint32, char const*> const outfitJobKeys[] = { { ROWOW_OPTION_WEDDING, "wedding" }, { ROWOW_OPTION_XMAS, "xmas" }, { ROWOW_OPTION_SUMMER, "summer" } };
+    for (auto const& outfitJobKey : outfitJobKeys)
+        if ((option & outfitJobKey.first) != 0 && IllusionSpellIDsByJobKey.find(GetIllusionJobKey(outfitJobKey.second, isMale)) != IllusionSpellIDsByJobKey.end())
+            return outfitJobKey.second;
+    return std::string();
+}
+
+uint32 ROWOWMod::GetOutfitIllusionSpellID(Player* player)
+{
+    std::string jobKey = GetOutfitIllusionJobKey(player);
+    if (jobKey.empty() == true)
+        return 0;
+    auto illusionSpellIDIter = IllusionSpellIDsByJobKey.find(GetIllusionJobKey(jobKey, player->getGender() == GENDER_MALE));
+    return illusionSpellIDIter != IllusionSpellIDsByJobKey.end() ? illusionSpellIDIter->second : 0;
+}
+
+void ROWOWMod::RequestWorldIdentityLookRefresh(Player* player)
+{
+    // status_change_start's and status_change_end's SendLook (clif_changelook LOOK_BASE): UpdateWorldIdentity makes the look right at the end of the
+    // character's next update, in its own thread, where every look change is made
+    if (player != nullptr)
+        GetWorldIdentityState(player)->CheckTimer = ROWOW_WORLD_IDENTITY_CHECK_TIME_IN_MS;
 }
 
 bool ROWOWMod::HasLearnedPecoRiding(Player* player)

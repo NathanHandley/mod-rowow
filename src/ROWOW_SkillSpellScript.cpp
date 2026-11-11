@@ -78,6 +78,13 @@ class ROWOW_SkillSpellScript : public SpellScript
         // item or another skill casts aren't the player's request
         if (caster->IsPlayer() == true && caster->IsSitState() == true && GetSpell()->IsTriggered() == false && GetSpell()->m_CastItem == nullptr)
             return SPELL_FAILED_NOT_STANDING;
+        // Nor in an outfit (clif_parse_UseSkillToId and _ToPos: if( sd->sc.option&OPTION_COSTUME ) return;): the Wedding, Xmas and Summer statuses
+        if (caster->IsPlayer() == true && GetSpell()->IsTriggered() == false && GetSpell()->m_CastItem == nullptr)
+        {
+            ROWOWStatusChange const* sc = ROWOW->GetStatusChange(static_cast<Unit const*>(caster));
+            if (sc != nullptr && (sc->Option & ROWOW_OPTION_COSTUME) != 0)
+                return SPELL_FAILED_DONT_REPORT;
+        }
         return ROWOW->UnitSkillUse(caster, target, GetExplTargetDest(), skillID, skillLevel);
     }
 

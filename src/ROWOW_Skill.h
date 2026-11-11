@@ -744,8 +744,16 @@ enum ROWOWStatusFlag : uint8
 #define ROWOW_OPTION_CLOAK                          0x00000004
 #define ROWOW_OPTION_FALCON                         0x00000010  // A Hunter's falcon, kept with the identity (status.option)
 #define ROWOW_OPTION_RIDING                         0x00000020  // A Knight's or Crusader's Peco, kept with the identity (status.option)
+#define ROWOW_OPTION_WEDDING                        0x00001000  // SC_WEDDING's outfit (RO's JOB_WEDDING body)
 #define ROWOW_OPTION_RUWACH                         0x00002000
 #define ROWOW_OPTION_CHASEWALK                      0x00004000
+#define ROWOW_OPTION_XMAS                           0x00010000  // SC_XMAS's outfit (JOB_XMAS, the Santa body)
+#define ROWOW_OPTION_SUMMER                         0x00040000  // SC_SUMMER's outfit (JOB_SUMMER)
+#define ROWOW_OPTION_HANBOK                         0x08000000
+#define ROWOW_OPTION_OKTOBERFEST                    0x10000000
+#define ROWOW_OPTION_SUMMER2                        0x20000000
+// OPTION_COSTUME: an outfit is on, so no weapon or shield is drawn and no skill may be used (clif_parse_UseSkillToId / ToPos)
+#define ROWOW_OPTION_COSTUME                        (ROWOW_OPTION_WEDDING | ROWOW_OPTION_XMAS | ROWOW_OPTION_SUMMER | ROWOW_OPTION_HANBOK | ROWOW_OPTION_OKTOBERFEST | ROWOW_OPTION_SUMMER2)
 
 // The option looks the converter attaches to RO illusions (mod_rowow_option_look Kind)
 #define ROWOW_OPTION_LOOK_CART                      1

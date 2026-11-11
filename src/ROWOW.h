@@ -2615,7 +2615,11 @@ public:
     void RefreshEverQuestIdentityLookDisplay(Player* player); // The EverQuest look's display taken back from whatever set another under it (the core, at every arrival)
     uint8 GetWorldIdentity(Player* player, uint8 world); // The identity shown in the world: the one picked while it may be shown, else the world's own
     bool SetWorldIdentity(Player* player, uint8 world, uint8 worldIdentity, std::string& errorOut); // .identity
-    uint32 GetWorldIdentityRagnarokLookSpellID(Player* player); // The Ragnarok identity's body: the RO illusion spell of the job sprite shown
+    uint32 GetWorldIdentityRagnarokLookSpellID(Player* player); // The Ragnarok identity's body: the RO illusion spell of the job sprite shown (or of the outfit on)
+    uint32 GetOutfitOption(Player* player); // The outfit options (ROWOW_OPTION_COSTUME's) of the statuses of the save slot in use: on now in the form, kept while out of it
+    std::string GetOutfitIllusionJobKey(Player* player); // The mod_rowow_illusion JobKey of the outfit shown (wedding, xmas, summer), "" with none or no body for it
+    uint32 GetOutfitIllusionSpellID(Player* player); // Its illusion spell in the character's gender, 0 with none
+    void RequestWorldIdentityLookRefresh(Player* player); // The look made right at the end of the character's next update (an outfit went on or off)
     bool HasLearnedPecoRiding(Player* player); // The identity of any of the save slots has learned Riding (whatever job sprite is shown)
     bool IsPecoShownForMount(Player* player, ROWOWJob const* shownJob); // Out of Midgard, on a ground mount: the job sprite shown rides its Peco in the mount's place
     uint32 GetMountAuraSpellID(Player const* player) const; // The spell of the mount aura the character is on (0 on none, and on a taxi)

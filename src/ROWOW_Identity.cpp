@@ -2506,8 +2506,11 @@ void ROWOWMod::SendRagnarokPageToClient(Player* player, char const* blockedText)
     else
     {
         ROWOWJob const* job = GetJob(identity->JobID);
+        std::string lookJobKey = GetOutfitIllusionJobKey(player); // An outfit on is the body shown, the picture's too
+        if (lookJobKey.empty() == true)
+            lookJobKey = GetIdentityLookJobKey(player);
         addonMessage = fmt::format("ROWOWPAGE\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{},{},{},{},{},{}\t{}", identity->IsViewingROSet == true ? "V" : "C",
-            GetIdentityLookJobKey(player), job != nullptr ? job->Name : "?", identity->BaseLevel, identity->JobLevel, identity->Zeny, identity->BaseExp,
+            lookJobKey, job != nullptr ? job->Name : "?", identity->BaseLevel, identity->JobLevel, identity->Zeny, identity->BaseExp,
             identity->HP, identity->SP, identity->Stats[0], identity->Stats[1], identity->Stats[2], identity->Stats[3], identity->Stats[4], identity->Stats[5],
             identity->PageAreaName);
     }
