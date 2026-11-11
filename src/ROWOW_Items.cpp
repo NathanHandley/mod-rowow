@@ -23,6 +23,7 @@
 #include "Group.h"
 #include "Item.h"
 #include "Log.h"
+#include "ObjectAccessor.h"
 #include "ObjectMgr.h"
 #include "Player.h"
 #include "SpellInfo.h"
@@ -601,19 +602,26 @@ void ROWOWMod::LoadItemScriptData()
     });
     ROWOWSCRIPT->RegisterCommand("getcharid", [](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
     {
-        // 0 the character, 1 its party, 2 its guild, 3 its account
-        if (context.AttachedPlayer == nullptr)
+        // getcharid(<type>{,"<name>"}): 0 the character, 1 its party, 2 its guild, 3 its account, of the attached player or the online one of that name
+        // (the church's marriage.txt finds the groom's account by name: 0 when no such player is online)
+        Player* player = context.AttachedPlayer;
+        if (arguments.size() > 1)
+        {
+            std::string name = arguments[1].GetText();
+            player = normalizePlayerName(name) == true ? ObjectAccessor::FindPlayerByName(name) : nullptr;
+        }
+        if (player == nullptr)
             return ROWOWScriptValue::FromNumber(0);
         switch (GetArgumentNumber(arguments, 0, 0))
         {
-            case 0: return ROWOWScriptValue::FromNumber(int64(context.AttachedPlayer->GetGUID().GetCounter()));
+            case 0: return ROWOWScriptValue::FromNumber(int64(player->GetGUID().GetCounter()));
             case 1:
             {
-                Group* group = context.AttachedPlayer->GetGroup();
+                Group* group = player->GetGroup();
                 return ROWOWScriptValue::FromNumber(group != nullptr ? int64(group->GetGUID().GetCounter()) : 0);
             }
-            case 2: return ROWOWScriptValue::FromNumber(int64(context.AttachedPlayer->GetGuildId()));
-            case 3: return ROWOWScriptValue::FromNumber(int64(context.AttachedPlayer->GetSession()->GetAccountId()));
+            case 2: return ROWOWScriptValue::FromNumber(int64(player->GetGuildId()));
+            case 3: return ROWOWScriptValue::FromNumber(int64(player->GetSession()->GetAccountId()));
             default: return ROWOWScriptValue::FromNumber(0);
         }
     });

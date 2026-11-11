@@ -1826,6 +1826,7 @@ void ROWOWMod::DeleteIdentityRows(ObjectGuid::LowType guid, CharacterDatabaseTra
     trans->Append("DELETE FROM `mod_rowow_homunculus` WHERE `CharacterGUID` = {}", guid);
     trans->Append("DELETE FROM `mod_rowow_mercenary` WHERE `CharacterGUID` = {}", guid);
     trans->Append("DELETE FROM `mod_rowow_mercenary_owner` WHERE `CharacterGUID` = {}", guid);
+    ClearIdentityFamily(guid, trans); // Its partner, child and parents (mod_rowow_identity_family), and their links to it (ROWOW_Family.cpp)
 }
 
 void ROWOWMod::SaveIdentity(Player* player, CharacterDatabaseTransaction trans, bool isInventorySaved)
@@ -2510,6 +2511,7 @@ void ROWOWMod::SendRagnarokPageToClient(Player* player, char const* blockedText)
             identity->HP, identity->SP, identity->Stats[0], identity->Stats[1], identity->Stats[2], identity->Stats[3], identity->Stats[4], identity->Stats[5],
             identity->PageAreaName);
     }
+    SendFamilyToClient(player); // The slot's family (ROWOW_Family.cpp), which the page shows under the character
     WorldPacket data;
     ChatHandler::BuildChatPacket(data, CHAT_MSG_SYSTEM, LANG_ADDON, nullptr, nullptr, addonMessage);
     player->SendDirectMessage(&data);

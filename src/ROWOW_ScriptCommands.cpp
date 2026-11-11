@@ -1481,10 +1481,71 @@ void ROWOWMod::RegisterNpcScriptCommands()
         Guild* guild = player != nullptr && player->GetGuildId() != 0 ? sGuildMgr->GetGuildById(player->GetGuildId()) : nullptr;
         return ROWOWScriptValue::FromNumber(guild != nullptr && guild->GetLeaderGUID() == player->GetGUID() ? 1 : 0);
     });
-    engine->RegisterCommand("getpartnerid", [](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const&)
+    // Marriage and adoption (ROWOW_Family.cpp): the family of the attached player's RO identity, by the other identities' IDs (rAthena's char_id is an
+    // RO identity, a save slot: getcharid(0) is the WoW character), 0 for none
+    auto registerFamilyIDCommand = [this, engine](char const* commandName, ObjectGuid::LowType ROWOWFamily::* member)
     {
-        // Marriage is out of scope (plan section 8 item 10): nobody has a partner
+        engine->RegisterCommand(commandName, [this, member](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const&)
+        {
+            if (context.AttachedPlayer == nullptr)
+                return ROWOWScriptValue::FromNumber(0);
+            return ROWOWScriptValue::FromNumber(int64(GetFamily(context.AttachedPlayer).*member));
+        });
+    };
+    registerFamilyIDCommand("getpartnerid", &ROWOWFamily::PartnerID);
+    registerFamilyIDCommand("getchildid", &ROWOWFamily::ChildID);
+    registerFamilyIDCommand("getmotherid", &ROWOWFamily::MotherID);
+    registerFamilyIDCommand("getfatherid", &ROWOWFamily::FatherID);
+    engine->RegisterCommand("ispartneron", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const&)
+    {
+        // ispartneron: whether the partner is online (its character, with that save slot in use)
+        Player* player = GetAttachedPlayer(context, "ispartneron");
+        if (player == nullptr)
+            return ROWOWScriptValue::FromNumber(0);
+        ROWOWFamily family = GetFamily(player);
+        return ROWOWScriptValue::FromNumber(family.PartnerID != 0 && FindIdentityPlayer(family.PartnerID, false) != nullptr ? 1 : 0);
+    });
+    engine->RegisterCommand("marriage", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // marriage "<name>": pc_marriage of the attached player and the one of that name (online, in the RO world): 1 when they're married
+        Player* player = GetAttachedPlayer(context, "marriage");
+        if (player == nullptr)
+            return ROWOWScriptValue::FromNumber(0);
+        std::string name = GetTextArgument(arguments, 0);
+        Player* partner = normalizePlayerName(name) == true ? ObjectAccessor::FindPlayerByName(name) : nullptr;
+        return ROWOWScriptValue::FromNumber(PCMarriage(player, partner) == true ? 1 : 0);
+    });
+    engine->RegisterCommand("wedding", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const&)
+    {
+        // wedding: clif_wedding_effect on the attached player.  The converter made no wedding effect: the Blessing light stands in
+        if (Player* player = GetAttachedPlayer(context, "wedding"))
+            PlayScriptLook(player, ROWOW_SCRIPT_LOOK_EFFECT, "BLESSING");
         return ROWOWScriptValue::FromNumber(0);
+    });
+    engine->RegisterCommand("divorce", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const&)
+    {
+        // divorce: pc_divorce of the attached player: 1 when it was married
+        Player* player = GetAttachedPlayer(context, "divorce");
+        return ROWOWScriptValue::FromNumber(player != nullptr && PCDivorce(player) == true ? 1 : 0);
+    });
+    engine->RegisterCommand("adopt", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    {
+        // adopt "<parent>","<baby>": the baby is asked, as a parent's right-click asks it (the ADOPT_* answer: 0 when it's asked).  No official script uses it
+        std::string parentName = GetTextArgument(arguments, 0);
+        std::string babyName = GetTextArgument(arguments, 1);
+        Player* parent = normalizePlayerName(parentName) == true ? ObjectAccessor::FindPlayerByName(parentName) : nullptr;
+        Player* baby = normalizePlayerName(babyName) == true ? ObjectAccessor::FindPlayerByName(babyName) : nullptr;
+        if (IsInNpcWorldUpdate == false && (context.AttachedPlayer == nullptr || (parent != nullptr && parent->GetMap() != context.AttachedPlayer->GetMap()) ||
+            (baby != nullptr && baby->GetMap() != context.AttachedPlayer->GetMap())))
+            return ROWOWScriptValue::FromNumber(ROWOW_ADOPT_CHARACTER_NOT_FOUND); // Other players only on the run's map, or from the world update
+        if (parent == nullptr || baby == nullptr)
+            return ROWOWScriptValue::FromNumber(ROWOW_ADOPT_CHARACTER_NOT_FOUND);
+        ROWOWFamily family = GetFamily(parent);
+        Player* partner = family.PartnerID != 0 ? FindIdentityPlayer(family.PartnerID, true) : nullptr;
+        int32 response = PCTryAdopt(parent, partner, baby, false);
+        if (response == ROWOW_ADOPT_ALLOWED)
+            PCAdoptRequest(parent, baby);
+        return ROWOWScriptValue::FromNumber(response);
     });
 
     // Strings
@@ -2181,7 +2242,8 @@ void ROWOWMod::RegisterNpcScriptCommands()
         bool isForced = GetArgument(arguments, 1, 1) != 0;
         if (isForced == false && GetIdentity(player)->NpcRun != nullptr)
             return ROWOWScriptValue::FromNumber(0);
-        Map* runMap = context.AttachedPlayer != nullptr ? context.AttachedPlayer->GetMap() : nullptr;
+        // The run's map: the attached player's, or the last one's after a detachrid (marriage.txt detaches the groom, then attaches the bride again)
+        Map const* runMap = context.AttachedPlayer != nullptr ? context.AttachedPlayer->GetMap() : context.RunMap;
         if (IsInNpcWorldUpdate == false && (runMap == nullptr || runMap != player->GetMap()))
         {
             LogStubCommandOnce("attachrid", "a player on another map can only be attached from the world update");

@@ -1034,6 +1034,7 @@ void AddROWOWSkillsTaekwon();
 void AddROWOWSkillsGunslinger();
 void AddROWOWSkillsNinja();
 void AddROWOWSkillsNpc();
+void AddROWOWSkillsWedding(); // ROWOW_Family.cpp
 void AddROWOWSkillsHomunculus();
 void AddROWOWSkillsMercenary();
 

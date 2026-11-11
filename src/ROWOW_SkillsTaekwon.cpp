@@ -47,9 +47,12 @@ namespace
         Player* dstsd = target->ToPlayer();
         ROWOWStatusChangeEntry const* spirit = ROWOW->GetSCE(sd, ROWOW_SC_SPIRIT);
         ROWOWJob const* dstJob = dstsd != nullptr ? ROWOW->GetJob(ROWOW->GetIdentity(dstsd)->JobID) : nullptr;
-        // (No marriage or adoption in the RO world: the partner and child are never there)
+        // The partner and child are other RO identities (ROWOW_Family.cpp): the target's identity in use is the one named
+        ObjectGuid::LowType dstIdentityID = dstsd != nullptr ? ROWOW->GetIdentity(dstsd)->IdentityID : 0;
+        ROWOWFamily family = dstsd != nullptr && dstsd != sd ? ROWOW->GetFamily(sd) : ROWOWFamily();
+        bool isFamily = dstIdentityID != 0 && (dstIdentityID == family.PartnerID || dstIdentityID == family.ChildID);
         if (dstsd == nullptr || ((spirit == nullptr || spirit->Val2 != ROWOW_SKILL_SL_SOULLINKER) && (dstJob == nullptr || dstJob->JobID != ROWOW_JOB_SOUL_LINKER) &&
-            dstsd != sd))
+            dstsd != sd && isFamily == false))
         {
             ROWOW->StatusChangeStart(src, src, ROWOW_SC_STUN, 10000, skillLevel, 0, 0, 0, 500, ROWOW_SCSTART_NORATEDEF);
             ROWOW->ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_LEVEL);

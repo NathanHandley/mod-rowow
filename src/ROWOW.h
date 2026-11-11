@@ -2275,6 +2275,40 @@ struct ROWOWIdentity : public DataMap::Base
     uint32 StowedPetNumber = 0; // The character's pet put away for the form (its temporarily unsummoned pet number, taken so nothing summons it in the form)
 };
 
+// Marriage and adoption (ROWOW_Family.cpp, Nathan 2026-11-11): an RO identity's family, by the other identities' IDs (0 for none)
+struct ROWOWFamily
+{
+    ObjectGuid::LowType PartnerID = 0; // status.partner_id
+    ObjectGuid::LowType FatherID = 0; // status.father
+    ObjectGuid::LowType MotherID = 0; // status.mother
+    ObjectGuid::LowType ChildID = 0; // status.child
+    bool IsRingRemovalPending = false; // Divorced while away: its wedding ring goes when it's next in the form (rAthena's char server deletes it at once)
+    bool IsEmpty() const { return PartnerID == 0 && FatherID == 0 && MotherID == 0 && ChildID == 0 && IsRingRemovalPending == false; }
+};
+struct ROWOWFamilyCall
+{
+    ObjectGuid::LowType IdentityID = 0; // The save slot called: nothing happens if another is in use by then
+    ROWOWPosition Destination; // The caster's spot when it called
+    uint64 RequestTime = 0; // GameTime ms; a call not answered in a few seconds is dropped
+};
+struct ROWOWAdoptInvite
+{
+    ObjectGuid::LowType ParentGUID = 0; // The parent who asked (its character), and its partner
+    ObjectGuid::LowType PartnerGUID = 0;
+    uint64 ExpireTime = 0; // GameTime ms
+};
+#define ROWOW_ADOPT_ALLOWED                         0
+#define ROWOW_ADOPT_ALREADY_ADOPTED                 1
+#define ROWOW_ADOPT_MARRIED_AND_PARTY               2
+#define ROWOW_ADOPT_EQUIP_RINGS                     3
+#define ROWOW_ADOPT_NOT_NOVICE                      4
+#define ROWOW_ADOPT_CHARACTER_NOT_FOUND             5
+#define ROWOW_ADOPT_MORE_CHILDREN                   6
+#define ROWOW_ADOPT_LEVEL_70                        7
+#define ROWOW_ADOPT_MARRIED                         8
+#define ROWOW_ITEM_WEDDING_RING_M                   2634 // Bridegroom_Ring
+#define ROWOW_ITEM_WEDDING_RING_F                   2635 // Bride_Ring
+
 #define ROWOW_ARRIVAL_FLOOR_TOLERANCE               3.0f    // Yards above the floor an arrival may be before it's put down on it
 #define ROWOW_MOVE_LINE_OF_SIGHT_HEIGHT             1.0f    // Height above the ground that a cell of no GAT checks for a wall at
 
@@ -2755,6 +2789,37 @@ public:
     std::string GetSavePlaceName(ROWOWPosition const& savePoint) const; // World thread only (the area lookup may load terrain)
     void SendSavePlaceToClient(Player* player, bool isForced); // World thread only
     void UpdateSavePlaces(uint32 diffInMS); // World thread: tells each client whose save point changed
+
+    // Marriage and adoption (ROWOW_Family.cpp, Nathan 2026-11-11): rAthena's status.partner_id, child, father and mother, of each RO identity (save slot,
+    // its IdentityID = status.char_id), kept here for every identity (mod_rowow_identity_family, written at each change) rather than on the player, as
+    // a marriage, a divorce or an adoption changes two or three identities at once.  FamilyMutex guards it all; any thread reads it
+    std::mutex FamilyMutex;
+    bool IsFamilyLoaded = false;
+    std::unordered_map<ObjectGuid::LowType, ROWOWFamily> FamiliesByIdentityID; // Only identities with a link or a pending ring removal
+    std::unordered_map<ObjectGuid::LowType, ObjectGuid::LowType> CharacterGUIDsByIdentityID; // Whose save slot each linked identity is
+    std::unordered_map<ObjectGuid::LowType, ROWOWFamilyCall> FamilyCallsByCharacterGUID; // WE_CALLPARTNER and the like: done in the called's own update
+    std::unordered_map<ObjectGuid::LowType, ROWOWAdoptInvite> AdoptInvitesByCharacterGUID; // adopt_invite: the child (character) asked, and by whom
+    std::atomic<uint32> FamilyPendingCount { 0 }; // Calls and ring removals waiting: the players' updates look only while there are any
+    void LoadFamilyData(); // Once, with FamilyMutex held
+    ROWOWFamily GetFamily(ObjectGuid::LowType identityID);
+    ROWOWFamily GetFamily(Player* player); // The family of the identity in use (none without one)
+    ObjectGuid::LowType GetIdentityCharacterGUID(ObjectGuid::LowType identityID); // The character whose save slot the identity is, 0 if unknown
+    std::string GetIdentityCharacterName(ObjectGuid::LowType identityID); // That character's name, "" if unknown
+    Player* FindIdentityPlayer(ObjectGuid::LowType identityID, bool isInFormRequired); // map_charid2sd: its character online with that save slot in use
+    Player* FindFamilyPlayerOnMap(Player* player, ObjectGuid::LowType identityID); // ... on the player's RO map, in the form
+    bool IsWearingWeddingRing(Player* player); // pc_isequipped(WEDDING_RING_M) || pc_isequipped(WEDDING_RING_F)
+    void RemoveWeddingRings(Player* player); // A divorce takes them, worn or not (in the form: the RO set on the character)
+    bool PCMarriage(Player* sd, Player* dstsd); // pc_marriage
+    bool PCDivorce(Player* sd); // pc_divorce (an offline or away partner loses its ring when that save slot is next played in Midgard)
+    int32 PCTryAdopt(Player* p1, Player* p2, Player* baby, bool isAnswer); // pc_try_adopt: ROWOW_ADOPT_*
+    void SendAdoptRefusal(Player* player, Player* baby, int32 response);
+    bool PCAdoptRequest(Player* parent, Player* baby); // clif_parse_Adopt_request: the child is asked (ROWOWADOPT), or the parent told why not
+    void PCAdoptReply(Player* baby, bool isAccepted); // clif_parse_Adopt_reply
+    bool PCAdoption(Player* p1, Player* p2, Player* baby); // pc_adoption
+    void ClearIdentityFamily(ObjectGuid::LowType identityID, CharacterDatabaseTransaction trans); // A reset or deleted identity: its links and the others' to it
+    void RequestFamilyCall(Player* caster, ObjectGuid::LowType identityID); // UNT_CALLFAMILY: the identity's player comes to the caster
+    void UpdateFamily(Player* player); // The player's update: a call to answer, rings a divorce took
+    void SendFamilyToClient(Player* player); // ROWOWFAMILY
 
     // RO bonuses and cards (ROWOW_Bonus.cpp): the port of rAthena's pc_bonus..pc_bonus5 and the item part of status_calc_pc_sub, the
     // scripts of the worn items, their cards and combos, refine, card compounding (pc_insert_card) and battle_calc_cardfix

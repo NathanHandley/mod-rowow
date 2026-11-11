@@ -23,6 +23,7 @@
 #include "Log.h"
 #include "Map.h"
 #include "ObjectAccessor.h"
+#include "ObjectMgr.h"
 #include "Player.h"
 #include "ScriptMgr.h"
 #include "Spell.h"
@@ -1172,6 +1173,8 @@ public:
             { "merset",   HandleROMerSetCommand, SEC_GAMEMASTER, Console::No },
             { "merstatus", HandleROMerStatusCommand, SEC_GAMEMASTER, Console::No },
             { "petname",  HandleROPetNameCommand, SEC_PLAYER,    Console::No },
+            { "adopt",    HandleROAdoptCommand,  SEC_PLAYER,     Console::No },
+            { "family",   HandleROFamilyCommand, SEC_GAMEMASTER, Console::No },
             { "pethatch", HandleROPetHatchCommand, SEC_PLAYER,   Console::No },
             { "petset",   HandleROPetSetCommand, SEC_GAMEMASTER, Console::No },
             { "floortake", HandleROFloorTakeCommand, SEC_GAMEMASTER, Console::No },
@@ -1282,6 +1285,7 @@ public:
         ROWOW->SendROStatusToClient(player);
         ROWOW->SendHairToClient(player);
         ROWOW->SendSavePlaceToClient(player, true); // The tooltips' "Your save is in" (ROWOW_ReturnTether.cpp; a command is the world thread)
+        ROWOW->SendFamilyToClient(player); // The Ragnarok page's family (ROWOW_Family.cpp)
         if (ROWOW->IsInROForm(player) == true)
         {
             ROWOW->SendEquipmentToClient(player, *ROWOW->GetIdentity(player), true);
@@ -1738,6 +1742,61 @@ public:
         if (ROWOW->IsInROForm(player) == false)
             return false;
         ROWOW->PetChangeName(player, std::string(name));
+        return true;
+    }
+
+    static bool HandleROAdoptCommand(ChatHandler* handler, Tail argument)
+    {
+        // Adoption (ROWOW_Family.cpp): .ro adopt <name> asks that player to be the child of this one and its partner (the unit menu's "Adopt as Child",
+        // clif_parse_Adopt_request); the child answers .ro adopt accept or .ro adopt decline (its popup, clif_parse_Adopt_reply)
+        Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
+        if (player == nullptr)
+            return false;
+        std::string text(argument);
+        if (text == "accept" || text == "decline")
+        {
+            ROWOW->PCAdoptReply(player, text == "accept");
+            return true;
+        }
+        if (ROWOW->IsInROForm(player) == false)
+        {
+            handler->SendSysMessage("Adoption is only possible in Midgard.");
+            return true;
+        }
+        if (text.empty() == true)
+        {
+            handler->SendSysMessage("Usage: .ro adopt <name> (a character in your party), or .ro adopt accept|decline when asked.");
+            return true;
+        }
+        Player* baby = normalizePlayerName(text) == true ? ObjectAccessor::FindPlayerByName(text) : nullptr;
+        if (baby == nullptr)
+        {
+            handler->PSendSysMessage("{} isn't online.", text);
+            return true;
+        }
+        ROWOW->PCAdoptRequest(player, baby);
+        return true;
+    }
+
+    static bool HandleROFamilyCommand(ChatHandler* handler)
+    {
+        // For testing: the selected player's (or your) RO identity's family (ROWOW_Family.cpp), by identity ID and character name
+        Player* player = handler->getSelectedPlayerOrSelf();
+        if (player == nullptr)
+            return false;
+        ROWOWIdentity* identity = ROWOW->GetIdentity(player);
+        ROWOWFamily family = ROWOW->GetFamily(player);
+        auto describe = [](ObjectGuid::LowType identityID) -> std::string
+        {
+            if (identityID == 0)
+                return "none";
+            std::string name = ROWOW->GetIdentityCharacterName(identityID);
+            Player* member = ROWOW->FindIdentityPlayer(identityID, false);
+            return fmt::format("{} ({}, {})", identityID, name.empty() == false ? name : std::string("?"), member != nullptr ? "online" : "away");
+        };
+        handler->PSendSysMessage("{} RO identity {} (slot {}): partner {}, father {}, mother {}, child {}{}; wearing a wedding ring: {}", player->GetName(),
+            identity->IdentityID, identity->Slot, describe(family.PartnerID), describe(family.FatherID), describe(family.MotherID), describe(family.ChildID),
+            family.IsRingRemovalPending == true ? ", ring removal pending" : "", ROWOW->IsWearingWeddingRing(player) == true ? "yes" : "no");
         return true;
     }
 

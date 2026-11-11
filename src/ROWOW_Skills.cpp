@@ -426,6 +426,7 @@ void ROWOWMod::LoadSkillData()
     AddROWOWSkillsGunslinger();
     AddROWOWSkillsNinja();
     AddROWOWSkillsNpc();
+    AddROWOWSkillsWedding();
     AddROWOWSkillsHomunculus();
     AddROWOWSkillsMercenary();
     LOG_INFO("module.ROWOW", "ROWOWMod::LoadSkillData loaded {} skills ({} skill spells, {} with their own rules) and {} job skill trees ({} skills)", SkillsByID.size(),

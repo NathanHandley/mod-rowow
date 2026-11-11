@@ -843,6 +843,24 @@ SpellCastResult ROWOWMod::UnitSkillUse(Unit* src, Unit* target, WorldLocation co
                     return SPELL_FAILED_DONT_REPORT;
                 }
                 break;
+            case ROWOW_SKILL_WE_MALE:
+            case ROWOW_SKILL_WE_FEMALE:
+            {
+                // unit_skilluse_id2: nothing without a partner, a fail when it isn't found (UnitSkillTarget aimed it at the partner on this map), and
+                // the skill's range to it
+                ObjectGuid::LowType partnerID = GetFamily(sd).PartnerID;
+                if (partnerID == 0)
+                    return SPELL_FAILED_DONT_REPORT;
+                Player* partner = target != nullptr ? target->ToPlayer() : nullptr;
+                ROWOWIdentity const* partnerIdentity = partner != nullptr ? partner->CustomData.Get<ROWOWIdentity>("ROWOWIdentity") : nullptr;
+                if (partner == nullptr || partner == sd || partnerIdentity == nullptr || partnerIdentity->IdentityID != partnerID ||
+                    DistanceBL(sd, partner) > SkillGetRange2(sd, skillID, skillLevel, true))
+                {
+                    ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_LEVEL);
+                    return SPELL_FAILED_DONT_REPORT;
+                }
+                break;
+            }
         }
     }
     if (skill->Inf2[ROWOW_INF2_NOTARGETSELF] == true && src == target)
@@ -929,6 +947,11 @@ Unit* ROWOWMod::UnitSkillTarget(Unit* src, Unit* target, Unit* pickedTarget, uin
     if (src->IsPlayer() == true && skillID == ROWOW_SKILL_MO_CHAINCOMBO && sc != nullptr)
         if (ROWOWStatusChangeEntry const* bladeStop = sc->GetSCE(ROWOW_SC_BLADESTOP))
             target = MapID2BL(src, bladeStop->Val4);
+    // The wedding rings' WE_MALE and WE_FEMALE go at the partner (map_charid2sd(partner_id)), on the caster's map (ROWOW_Family.cpp); UnitSkillUse fails
+    // them when it isn't there
+    if (src->IsPlayer() == true && (skillID == ROWOW_SKILL_WE_MALE || skillID == ROWOW_SKILL_WE_FEMALE))
+        if (Player* partner = FindFamilyPlayerOnMap(src->ToPlayer(), GetFamily(src->ToPlayer()).PartnerID))
+            target = partner;
     return target != nullptr ? target : src;
 }
 

@@ -660,6 +660,7 @@ void ROWOWMod::SetupNpcRunContext(ROWOWScriptContext& context, Player* player, R
     context.AttachedPlayer = player;
     if (player != nullptr)
     {
+        context.RunMap = player->GetMap();
         ROWOWIdentity* identity = GetIdentity(player);
         context.Identity = identity;
         context.CharacterVariables = &identity->Variables;

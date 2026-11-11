@@ -30,6 +30,7 @@
 #include <vector>
 
 class Item;
+class Map;
 class Player;
 class Unit;
 struct ROWOWIdentity;
@@ -192,6 +193,7 @@ struct ROWOWScriptContext
     // NPC scripts (R7): the variables live in their scopes (below and in the engine), the run keeps its frames, and it can wait
     bool IsNpcRun = false;
     ROWOWNpc const* Npc = nullptr; // The NPC it runs for (rAthena's oid), null for a function's run
+    Map const* RunMap = nullptr; // The map of the player it last had attached, kept through a detachrid: another player there may be attached (its thread)
     std::vector<ROWOWScriptFrame> Frames; // The first is the script the run started in
     ROWOWScriptVariables* CharacterVariables = nullptr; // The attached player's: name (saved), @name (until logout), #name and ##name (saved)
     ROWOWScriptVariables* PlayerVariables = nullptr;
