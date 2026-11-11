@@ -2025,7 +2025,7 @@ struct ROWOWIdentitySlot
     bool HasRiding = false; // It has learned Riding (KN_RIDING), as of when it was last the slot in use; the slot in use reads its own skills (HasLearnedPecoRiding)
 };
 
-// The Midgard achievements (Nathan 2026-11-09): earned on the WoW character by the Base level of any of its identities (the converter's Ragnarok
+// The Midgard achievements (Nathan 2026-11-09): earned on the WoW character by what any of its identities reached (the converter's Ragnarok
 // AchievementData.csv has the rows, in Other Worlds > Ragnarok; they have no criteria, so only GrantMidgardAchievements gives them).  Each unlocks
 // something of the character's identities across the worlds, which HasMidgardPathfinder, HasMidgardWayfarer and HasMidgardWorldwalker tell
 #define ROWOW_ACHIEVEMENT_MIDGARD_PATHFINDER              5300 // The Ragnarok identity may be shown outside the RO world
@@ -2033,7 +2033,8 @@ struct ROWOWIdentitySlot
 #define ROWOW_ACHIEVEMENT_MIDGARD_WORLDWALKER             5302 // The character's own (Azeroth and Norrath) abilities may be used in the RO world
 #define ROWOW_ACHIEVEMENT_MIDGARD_PATHFINDER_BASE_LEVEL   10
 #define ROWOW_ACHIEVEMENT_MIDGARD_WAYFARER_BASE_LEVEL     30
-#define ROWOW_ACHIEVEMENT_MIDGARD_WORLDWALKER_BASE_LEVEL  90
+// Midgard Worldwalker is no Base level's (Nathan 2026-11-11, was Base level 90): a Transcendent second job (Lord Knight .. Gypsy, their Peco forms
+// too) at its max Job level, 70 (IsMidgardWorldwalkerJob)
 
 // Identity per world (Nathan 2026-11-09; ROWOW_WorldIdentity.cpp): the three worlds, the three identities a character can show in each, and why one
 // can't be picked (the lock letters the client is sent in ROWOWIDENT)
@@ -2562,10 +2563,13 @@ public:
     // has earned the achievement, nothing else (false too while the achievement isn't in the server's Achievement.dbc)
     bool HasMidgardPathfinder(Player const* player) const; // Base level 10: may show the Ragnarok identity outside the RO world
     bool HasMidgardWayfarer(Player const* player) const; // Base level 30: may show a non-Ragnarok identity in the RO world
-    bool HasMidgardWorldwalker(Player const* player) const; // Base level 90: may use its own (Azeroth and Norrath) abilities in the RO world
+    bool HasMidgardWorldwalker(Player const* player) const; // Transcendent second job at Job level 70: may use its own (Azeroth and Norrath) abilities in the RO world
     uint32 GetHighestBaseLevel(Player* player); // The highest Base level of the character's identities, every save slot's (0 with none)
-    void GrantMidgardAchievements(Player* player, uint32 baseLevel); // Those of a Base level reached that the character hasn't got yet
-    void CheckMidgardAchievements(Player* player); // ... by the highest of its identities (login and arriving in the RO world)
+    bool IsMidgardWorldwalkerJob(uint16 jobID, uint32 jobLevel) const; // A Transcendent second job at its max Job level (70)
+    bool HasMidgardWorldwalkerJob(Player* player); // ... of any of the character's identities, every save slot's
+    void GrantMidgardAchievements(Player* player); // Those the character's identities (every save slot's) have reached that it hasn't got yet (login,
+                                                   // arriving in the RO world, a Base or Job level up, a GM's .ro level)
+    void CheckMidgardAchievements(Player* player) { GrantMidgardAchievements(player); }
     void UpdateMidgardAchievementCheck(Player* player); // Every update: a check held back by GM mode or the login's loading, made once it can earn them
 
     // The carried sets (the backpack, the bag slots and the bags' items): the character's own and the form's.  The side the character is on has its set

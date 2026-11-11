@@ -37,6 +37,7 @@
 #include "WorldSession.h"
 
 #include "ROWOW.h"
+#include "ROWOW_JobMapIDs.h"
 
 using namespace std;
 
@@ -1326,50 +1327,73 @@ uint32 ROWOWMod::GetHighestBaseLevel(Player* player)
     return highestBaseLevel;
 }
 
-void ROWOWMod::GrantMidgardAchievements(Player* player, uint32 baseLevel)
+bool ROWOWMod::IsMidgardWorldwalkerJob(uint16 jobID, uint32 jobLevel) const
+{
+    // A Transcendent second job (JOBL_UPPER and JOBL_2: Lord Knight .. Gypsy, and the Peco forms) at its max Job level, 70 in the job database.  Not
+    // Gunslinger or Ninja (also 70, but no Transcendent jobs), nor Star Gladiator or Soul Linker (second jobs, not Transcendent)
+    ROWOWJob const* job = GetJob(jobID);
+    if (job == nullptr || job->IsUpper == false || job->IsBaby == true || jobLevel < job->MaxJobLevel)
+        return false;
+    int64 mapID = PCJobIDToMapID(jobID);
+    return mapID >= 0 && (uint64(mapID) & ROWOW_JOBL_2) != 0;
+}
+
+bool ROWOWMod::HasMidgardWorldwalkerJob(Player* player)
+{
+    // The identity in use, and the slot list's line of each one put away, as GetHighestBaseLevel
+    ROWOWIdentity* identity = GetIdentity(player);
+    if (identity->Exists == true && IsMidgardWorldwalkerJob(identity->JobID, identity->JobLevel) == true)
+        return true;
+    for (uint8 slotIndex = 0; slotIndex < ROWOW_IDENTITY_SLOT_COUNT; slotIndex++)
+    {
+        ROWOWIdentitySlot const& identitySlot = identity->Slots[slotIndex];
+        if (slotIndex + 1 == identity->Slot || identitySlot.Exists == false)
+            continue;
+        if (IsMidgardWorldwalkerJob(identitySlot.JobID, identitySlot.JobLevel) == true)
+            return true;
+    }
+    return false;
+}
+
+void ROWOWMod::GrantMidgardAchievements(Player* player)
 {
     if (IsEnabled == false || player == nullptr || player->GetSession() == nullptr)
         return;
-    // Every one of the three whose Base level is reached at once, however it was reached (one level or many, by exp or a GM command).  Held back
+    uint32 baseLevel = GetHighestBaseLevel(player);
+    bool hasWorldwalkerJob = HasMidgardWorldwalkerJob(player);
+    // Every one of the three reached is given at once, however it was reached (one level or many, by exp or a GM command).  Held back
     // for UpdateMidgardAchievementCheck while one can't be earned properly:
     // - in GM mode the core refuses achievements (with a chat message);
     // - while the login loads (an arrival in the RO world at login checks here from inside the core's map add) the core completes it on the server
     //   but sends the client nothing (AchievementMgr::SendAchievementEarned), and the client was already sent the full achievement list, so it only
     //   saw the achievement after the next login (Follow-up 5: "Pathfinder only appeared after a relog").  The check after the loading has the
     //   toast and the achievement window and every gate in step at once
-    if (baseLevel < ROWOW_ACHIEVEMENT_MIDGARD_PATHFINDER_BASE_LEVEL)
+    if (baseLevel < ROWOW_ACHIEVEMENT_MIDGARD_PATHFINDER_BASE_LEVEL && hasWorldwalkerJob == false)
         return;
     if (player->IsGameMaster() == true || player->GetSession()->PlayerLoading() == true)
     {
         GetIdentity(player)->IsMidgardAchievementCheckPending = true;
         return;
     }
-    static const std::pair<uint32, uint32> achievementIDsAndBaseLevels[] =
+    std::pair<uint32, bool> const achievementIDsAndReached[] =
     {
-        { ROWOW_ACHIEVEMENT_MIDGARD_PATHFINDER, ROWOW_ACHIEVEMENT_MIDGARD_PATHFINDER_BASE_LEVEL },
-        { ROWOW_ACHIEVEMENT_MIDGARD_WAYFARER, ROWOW_ACHIEVEMENT_MIDGARD_WAYFARER_BASE_LEVEL },
-        { ROWOW_ACHIEVEMENT_MIDGARD_WORLDWALKER, ROWOW_ACHIEVEMENT_MIDGARD_WORLDWALKER_BASE_LEVEL },
+        { ROWOW_ACHIEVEMENT_MIDGARD_PATHFINDER, baseLevel >= ROWOW_ACHIEVEMENT_MIDGARD_PATHFINDER_BASE_LEVEL },
+        { ROWOW_ACHIEVEMENT_MIDGARD_WAYFARER, baseLevel >= ROWOW_ACHIEVEMENT_MIDGARD_WAYFARER_BASE_LEVEL },
+        { ROWOW_ACHIEVEMENT_MIDGARD_WORLDWALKER, hasWorldwalkerJob },
     };
-    for (auto const& achievementIDAndBaseLevel : achievementIDsAndBaseLevels)
+    for (auto const& achievementIDAndReached : achievementIDsAndReached)
     {
-        if (baseLevel < achievementIDAndBaseLevel.second || player->HasAchieved(achievementIDAndBaseLevel.first) == true)
+        if (achievementIDAndReached.second == false || player->HasAchieved(achievementIDAndReached.first) == true)
             continue;
-        AchievementEntry const* achievementEntry = sAchievementStore.LookupEntry(achievementIDAndBaseLevel.first);
+        AchievementEntry const* achievementEntry = sAchievementStore.LookupEntry(achievementIDAndReached.first);
         if (achievementEntry == nullptr)
         {
-            LOG_ERROR("module.ROWOW", "ROWOWMod::GrantMidgardAchievements error, no achievement with ID {} exists (base level {} of {})", achievementIDAndBaseLevel.first,
+            LOG_ERROR("module.ROWOW", "ROWOWMod::GrantMidgardAchievements error, no achievement with ID {} exists (base level {} of {})", achievementIDAndReached.first,
                 baseLevel, player->GetName());
             continue;
         }
         player->CompletedAchievement(achievementEntry);
     }
-}
-
-void ROWOWMod::CheckMidgardAchievements(Player* player)
-{
-    if (IsEnabled == false || player == nullptr)
-        return;
-    GrantMidgardAchievements(player, GetHighestBaseLevel(player));
 }
 
 void ROWOWMod::UpdateMidgardAchievementCheck(Player* player)

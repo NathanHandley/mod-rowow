@@ -1374,7 +1374,7 @@ bool ROWOWMod::PCCheckBaseLevelUp(Player* player)
     PCLevelUpAngel(player);
     CastLevelUpEffect(player, ROWOW_SPELL_BASE_LEVEL_UP);
     PetOwnerLevelUp(player);
-    GrantMidgardAchievements(player, identity->BaseLevel);
+    GrantMidgardAchievements(player);
     return true;
 }
 
@@ -1406,6 +1406,7 @@ bool ROWOWMod::PCCheckJobLevelUp(Player* player)
 
     RefreshROForm(player);
     CastLevelUpEffect(player, ROWOW_SPELL_JOB_LEVEL_UP);
+    GrantMidgardAchievements(player); // Midgard Worldwalker: a Transcendent second job's Job level 70
     return true;
 }
 

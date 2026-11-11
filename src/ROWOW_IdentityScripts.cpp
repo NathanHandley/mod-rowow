@@ -3485,8 +3485,9 @@ public:
             identity->JobExp = 0;
         }
         ROWOW->RefreshROForm(player);
-        ROWOW->GrantMidgardAchievements(player, identity->BaseLevel);
-        if (player->IsGameMaster() == true && identity->BaseLevel >= ROWOW_ACHIEVEMENT_MIDGARD_PATHFINDER_BASE_LEVEL)
+        ROWOW->GrantMidgardAchievements(player);
+        if (player->IsGameMaster() == true && (identity->BaseLevel >= ROWOW_ACHIEVEMENT_MIDGARD_PATHFINDER_BASE_LEVEL ||
+            ROWOW->IsMidgardWorldwalkerJob(identity->JobID, identity->JobLevel) == true))
             handler->SendSysMessage("In GM mode no Midgard achievement is earned: they come as soon as GM mode is off (.gm off).");
         handler->PSendSysMessage("{} is now base level {} and job level {}.", player->GetName(), identity->BaseLevel, identity->JobLevel);
         return true;
