@@ -37,6 +37,7 @@
 #include "ROWOW.h"
 
 #include <algorithm>
+#include <sstream>
 
 using namespace std;
 
@@ -729,21 +730,54 @@ public:
             area = sAreaTableStore.LookupEntry(area->zone);
         if (area != nullptr && area->zone == zoneID)
             info.ZoneID = area->ID;
-        if (ROWOW->IsInROForm(player) == true)
+        std::string jobName = ROWOW->GetPlayerJobDisplayName(player);
+        if (jobName.empty() == false)
         {
-            ROWOWIdentity const* identity = player->CustomData.Get<ROWOWIdentity>("ROWOWIdentity");
-            ROWOWJob const* job = identity != nullptr ? ROWOW->GetJob(identity->JobID) : nullptr;
-            if (job != nullptr)
-            {
-                std::string jobName = job->Name;
-                std::replace(jobName.begin(), jobName.end(), '_', ' '); // Lord_Knight as Lord Knight
-                info.IsPrimaryClassTheClass = false;
-                info.PrimaryClass = jobName;
-                info.IsSecondaryClassTheClass = true;
-            }
+            info.IsPrimaryClassTheClass = false;
+            info.PrimaryClass = jobName;
+            info.IsSecondaryClassTheClass = true;
         }
     }
 };
+
+std::string ROWOWMod::GetJobDisplayName(uint16 jobID) const
+{
+    ROWOWJob const* job = GetJob(jobID);
+    if (job == nullptr)
+        return "";
+    std::string jobName = job->Name;
+    std::replace(jobName.begin(), jobName.end(), '_', ' '); // Lord_Knight as Lord Knight
+    return jobName;
+}
+
+std::string ROWOWMod::GetPlayerJobDisplayName(Player* player)
+{
+    if (player == nullptr || IsInROForm(player) == false)
+        return "";
+    ROWOWIdentity const* identity = player->CustomData.Get<ROWOWIdentity>("ROWOWIdentity");
+    return identity != nullptr ? GetJobDisplayName(identity->JobID) : "";
+}
+
+void ROWOWMod::SendUnitJobsToClient(Player* player, std::string const& guidsText)
+{
+    // The unit tooltip (RO_Identity_UnitTooltip.lua, Nathan 2026-11-12): a player in the RO form shows its RO job where WoW's tooltip names its
+    // class.  The client asks for the players it shows by GUID (as UnitGUID writes it), and gets "ROWOWJOB<tab><GUID><tab><job>" for each, the job
+    // empty for one out of the form or not on the asker's map (whose class shows as it is).  Only the asker's map's players are looked at, so
+    // their identities are this thread's
+    std::istringstream guids(guidsText);
+    std::string guidText;
+    for (uint32 count = 0; std::getline(guids, guidText, ',') && count < ROWOW_UNIT_JOB_QUERY_MAX_GUIDS; count++)
+    {
+        ObjectGuid guid(uint64(strtoull(guidText.c_str(), nullptr, 16)));
+        if (guid.IsPlayer() == false)
+            continue;
+        Player* other = ObjectAccessor::GetPlayer(*player, guid);
+        std::string message = fmt::format("ROWOWJOB\t{}\t{}", guidText, GetPlayerJobDisplayName(other));
+        WorldPacket data;
+        ChatHandler::BuildChatPacket(data, CHAT_MSG_SYSTEM, LANG_ADDON, nullptr, nullptr, message);
+        player->SendDirectMessage(&data);
+    }
+}
 
 // .identity: the client's way to ask for and set the identities (the unit frame's menu, Options > Interface > Display).  Any player's
 class ROWOW_WorldIdentityCommandScript : public CommandScript
