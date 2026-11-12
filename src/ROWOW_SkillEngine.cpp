@@ -29,6 +29,7 @@
 #include "Map.h"
 #include "ModelIgnoreFlags.h"
 #include "MotionMaster.h"
+#include "MoveSplineInit.h"
 #include "ObjectAccessor.h"
 #include "ObjectMgr.h"
 #include "Player.h"
@@ -3083,7 +3084,7 @@ int32 ROWOWMod::SkillBlown(Unit* src, Unit* target, int32 count, int8 dir, int32
     if (moved == 0)
         return 0;
     target->StopMoving();
-    target->GetMotionMaster()->MoveCharge(x, y, z, KnockbackSpeed);
+    UnitSlideTo(target, x, y, z, KnockbackSpeed);
     ROWOWSkillUnitData* targetUD = GetSkillUnitData(target);
     targetUD->SkillBlownTick = std::max(GetTick(), targetUD->SkillBlownTick + 1); // Always changes, so a hit can tell it knocked back
     return moved; // Return amount of knocked back cells
@@ -3107,7 +3108,7 @@ bool ROWOWMod::UnitMovePos(Unit* bl, int32 x, int32 y)
         z + ROWOW_MOVE_LINE_OF_SIGHT_HEIGHT, bl->GetPhaseMask(), LINEOFSIGHT_CHECK_VMAP, VMAP::ModelIgnoreFlags::Nothing) == false)
         return false;
     bl->StopMoving();
-    bl->GetMotionMaster()->MoveCharge(cellX, cellY, z, KnockbackSpeed);
+    UnitSlideTo(bl, cellX, cellY, z, KnockbackSpeed);
     return true;
 }
 
@@ -3128,8 +3129,32 @@ bool ROWOWMod::UnitJumpPos(Unit* bl, int32 x, int32 y)
     if (z <= INVALID_HEIGHT)
         return false;
     bl->StopMoving();
-    bl->GetMotionMaster()->MoveJump(cellX, cellY, z, KnockbackSpeed, 8.0f);
+    UnitSlideTo(bl, cellX, cellY, z, KnockbackSpeed, 8.0f);
     return true;
+}
+
+void ROWOWMod::UnitSlideTo(Unit* bl, float x, float y, float z, float speedXY, float speedZ)
+{
+    // A knockback, Back Slide or Leap moves the unit without turning it, as RO does.  The core's charge and jump moves give the spline no fixed
+    // facing, so the client turned a player along its path (backwards in a knockback) and the camera, which looks along the player's facing, swung
+    // with it; the attack facing then turned the player back to its victim with the camera held, so the camera stayed swung (Nathan 2026-11-12,
+    // with Attacking Turns the Camera off).  A player's move is its own spline with the orientation fixed (the server keeps the orientation too,
+    // MoveSpline::ComputePosition); a creature keeps the core's moves, whose movement generator holds off its AI's chase until it lands
+    if (bl->IsPlayer() == false)
+    {
+        if (speedZ > 0.0f)
+            bl->GetMotionMaster()->MoveJump(x, y, z, speedXY, speedZ);
+        else
+            bl->GetMotionMaster()->MoveCharge(x, y, z, speedXY);
+        return;
+    }
+    Movement::MoveSplineInit init(bl);
+    init.MoveTo(x, y, z);
+    init.SetVelocity(speedXY);
+    if (speedZ > 0.0f)
+        init.SetParabolic(-Movement::computeFallElevation(speedZ / Movement::gravity, false, -speedZ), 0); // MotionMaster::MoveJump's arc
+    init.SetOrientationFixed(true);
+    init.Launch();
 }
 
 int32 ROWOWMod::SkillAdditionalEffect(Unit* src, Unit* bl, uint16 skillID, uint16 skillLevel, int32 attackType, uint8 dmgLv, uint64 tick)

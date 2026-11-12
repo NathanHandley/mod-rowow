@@ -1889,7 +1889,7 @@ bool ROWOWMod::UnitRun(Unit* bl)
         UnitRunHit(bl);
         return false;
     }
-    bl->GetMotionMaster()->MoveCharge(x, y, z, bl->GetSpeed(MOVE_RUN));
+    UnitSlideTo(bl, x, y, z, bl->GetSpeed(MOVE_RUN)); // A player keeps its own facing (and its camera), as in a knockback
     return true;
 }
 

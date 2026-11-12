@@ -3103,6 +3103,7 @@ public:
     int32 SkillBlown(Unit* src, Unit* target, int32 count, int8 dir, int32 flag, ROWOWSkillUnit const* srcUnit = nullptr); // skill_blown, in RO cells (from a unit's cell)
     bool UnitMovePos(Unit* bl, int32 x, int32 y); // skill_check_unit_movepos and unit_movepos: the unit slides onto an RO cell at once
     bool UnitJumpPos(Unit* bl, int32 x, int32 y); // unit_movepos without its path check: the unit jumps onto an RO cell (Leap)
+    void UnitSlideTo(Unit* bl, float x, float y, float z, float speedXY, float speedZ = 0.0f); // The quick move of a knockback, slide or jump, facing kept
     void BattleConsumeAmmo(Player* sd, uint16 skillID, uint16 skillLevel); // battle_consume_ammo: a normal attack's or skill's ammo
     int32 SkillAdditionalEffect(Unit* src, Unit* bl, uint16 skillID, uint16 skillLevel, int32 attackType, uint8 dmgLv, uint64 tick); // skill_additional_effect
     int32 SkillCounterAdditionalEffect(Unit* src, Unit* bl, uint16 skillID, uint16 skillLevel, int32 attackType, uint64 tick); // skill_counter_additional_effect
