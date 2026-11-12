@@ -120,7 +120,7 @@ struct ROWOWItemVisual
 #define ROWOW_CELL_FLOOR_SEARCH_ABOVE               1.0f    // How far over the cell's RO ground the search starts
 #define ROWOW_CELL_FLOOR_SEARCH_BELOW               2.0f    // How far under it a floor may be; with none in between, the GAT's height itself
 #define ROWOW_CELL_FLOOR_SEARCH_STEPS               4       // Surfaces looked at, from the top, for the one nearest the RO ground
-#define ROWOW_UNIT_JOB_QUERY_MAX_GUIDS              40      // Players one ".ro jobof" answers for (the unit tooltip asks for a few at a time)
+#define ROWOW_JOB_NAMES_PER_MESSAGE                 20      // Jobs one ROWOWJOBNAMES message names (kept well under a chat message's length)
 // RO's teleport looks (PlayTeleportLooks) and Safe Step (FindSafeStepSpot)
 #define ROWOW_TELEPORT_LOOK_DELAY_IN_MS             300     // After the trigger (or the arrival) is there, so the clients around know it before its effect
 #define ROWOW_TELEPORT_LOOK_TRIGGER_DURATION_IN_MS  3000    // The vanish effect's unseen trigger lasts past the effect's 1.5 seconds
@@ -2666,7 +2666,8 @@ public:
     void SendWorldIdentityToClient(Player* player, bool isForced); // ROWOWIDENT
     std::string GetJobDisplayName(uint16 jobID) const; // An RO job as players read it (Lord_Knight as "Lord Knight"), empty for no job
     std::string GetPlayerJobDisplayName(Player* player); // The job a player in the RO form shows (who list, unit tooltip), empty out of the form
-    void SendUnitJobsToClient(Player* player, std::string const& guidsText); // ROWOWJOB, for ".ro jobof <GUID>,<GUID>..."
+    void UpdateJobField(Player* player); // Every update: PLAYER_FIELD_MW_RO_JOB, the job every client's unit tooltip names (job + 1 in the form, else 0)
+    void SendJobNamesToClient(Player* player); // ROWOWJOBNAMES, at ".ro sync": the jobs' names by ID, which UnitRagnarokJob gives
     void DeleteWorldIdentityRows(ObjectGuid::LowType guid, CharacterDatabaseTransaction trans);
     void DressSpriteCorpse(Corpse* corpse); // A new corpse lying as an RO job sprite: its head and headgear named in its item fields, for the client
 

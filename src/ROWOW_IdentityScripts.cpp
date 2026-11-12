@@ -380,6 +380,7 @@ public:
         ROWOW->UpdateNaturalRegen(player, p_time);
         ROWOW->UpdateStatusChanges(player);
         ROWOW->UpdateWorldIdentity(player, p_time); // In every world: the look of the character's identity for it
+        ROWOW->UpdateJobField(player); // In every world: the RO job other clients' tooltips name (0 out of the form)
         ROWOW->UpdateMidgardAchievementCheck(player); // In every world: a Midgard achievement held back (GM mode, the login's loading)
         if (ROWOW->IsEnabled == false || ROWOW->IsInROForm(player) == false)
             return;
@@ -1162,7 +1163,6 @@ public:
             { "sync",     HandleROSyncCommand,   SEC_PLAYER,     Console::No },
             { "hair",     HandleROHairCommand,   SEC_PLAYER,     Console::No },
             { "view",     HandleROViewCommand,   SEC_PLAYER,     Console::No },
-            { "jobof",    HandleROJobOfCommand,  SEC_PLAYER,     Console::No },
             { "create",   HandleROCreateCommand, SEC_PLAYER,     Console::No },
             { "spritejob", HandleROSpriteJobCommand, SEC_PLAYER, Console::No },
             { "pecomount", HandleROPecoMountCommand, SEC_PLAYER, Console::No },
@@ -1305,6 +1305,7 @@ public:
         ROWOW->SendSavePlaceToClient(player, true); // The tooltips' "Your save is in" (ROWOW_ReturnTether.cpp; a command is the world thread)
         ROWOW->SendReturnTetherToClient(player, true); // ... and the return tether's place, on its aura's tooltip
         ROWOW->SendFamilyToClient(player); // The Ragnarok page's family (ROWOW_Family.cpp)
+        ROWOW->SendJobNamesToClient(player); // The jobs' names, for the unit tooltip (ROWOW_WorldIdentity.cpp)
         if (ROWOW->IsInROForm(player) == true)
         {
             ROWOW->SendEquipmentToClient(player, *ROWOW->GetIdentity(player), true);
@@ -3149,16 +3150,6 @@ public:
     }
 
     // The character window's Ragnarok page (the RO_Identity addon), out of the form: shown or closed (1 or 0), its character creation, its Enter button
-    static bool HandleROJobOfCommand(ChatHandler* handler, std::string guidsText)
-    {
-        // The unit tooltip's ask for the RO jobs of the players it shows: ".ro jobof <GUID>,<GUID>..." (UnitGUID's hex), answered as ROWOWJOB
-        Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
-        if (player == nullptr)
-            return false;
-        ROWOW->SendUnitJobsToClient(player, guidsText);
-        return true;
-    }
-
     static bool HandleROViewCommand(ChatHandler* handler, uint32 isViewing)
     {
         Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;

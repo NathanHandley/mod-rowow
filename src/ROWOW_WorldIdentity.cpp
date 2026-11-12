@@ -37,7 +37,7 @@
 #include "ROWOW.h"
 
 #include <algorithm>
-#include <sstream>
+#include <vector>
 
 using namespace std;
 
@@ -758,25 +758,48 @@ std::string ROWOWMod::GetPlayerJobDisplayName(Player* player)
     return identity != nullptr ? GetJobDisplayName(identity->JobID) : "";
 }
 
-void ROWOWMod::SendUnitJobsToClient(Player* player, std::string const& guidsText)
+// The unit tooltip (Nathan 2026-11-12): a player in the RO form shows its RO job where WoW's tooltip names its class.  The job travels with the
+// player itself, in the core's PLAYER_FIELD_MW_RO_JOB (public, so every client that sees the player has it as it has the class, with no asking),
+// and the client reads it with UnitRagnarokJob; the jobs' names come once, at the addon's ".ro sync" (RO_Identity_UnitTooltip.lua)
+void ROWOWMod::UpdateJobField(Player* player)
 {
-    // The unit tooltip (RO_Identity_UnitTooltip.lua, Nathan 2026-11-12): a player in the RO form shows its RO job where WoW's tooltip names its
-    // class.  The client asks for the players it shows by GUID (as UnitGUID writes it), and gets "ROWOWJOB<tab><GUID><tab><job>" for each, the job
-    // empty for one out of the form or not on the asker's map (whose class shows as it is).  Only the asker's map's players are looked at, so
-    // their identities are this thread's
-    std::istringstream guids(guidsText);
-    std::string guidText;
-    for (uint32 count = 0; std::getline(guids, guidText, ',') && count < ROWOW_UNIT_JOB_QUERY_MAX_GUIDS; count++)
+    uint32 value = 0;
+    if (IsEnabled == true && IsInROForm(player) == true)
+        if (ROWOWIdentity const* identity = player->CustomData.Get<ROWOWIdentity>("ROWOWIdentity"); identity != nullptr && identity->Exists == true)
+            value = uint32(identity->JobID) + 1;
+    if (player->GetUInt32Value(PLAYER_FIELD_MW_RO_JOB) != value)
+        player->SetUInt32Value(PLAYER_FIELD_MW_RO_JOB, value); // Sent to the clients around with the player's next values update
+}
+
+void ROWOWMod::SendJobNamesToClient(Player* player)
+{
+    // "ROWOWJOBNAMES<tab><job ID>:<name>,<job ID>:<name>..." a few at a time, in job order
+    std::vector<uint16> jobIDs;
+    for (auto const& jobEntry : JobsByID)
+        jobIDs.push_back(jobEntry.first);
+    std::sort(jobIDs.begin(), jobIDs.end());
+    std::string entries;
+    uint32 count = 0;
+    auto send = [&]()
     {
-        ObjectGuid guid(uint64(strtoull(guidText.c_str(), nullptr, 16)));
-        if (guid.IsPlayer() == false)
-            continue;
-        Player* other = ObjectAccessor::GetPlayer(*player, guid);
-        std::string message = fmt::format("ROWOWJOB\t{}\t{}", guidText, GetPlayerJobDisplayName(other));
+        if (entries.empty() == true)
+            return;
         WorldPacket data;
-        ChatHandler::BuildChatPacket(data, CHAT_MSG_SYSTEM, LANG_ADDON, nullptr, nullptr, message);
+        ChatHandler::BuildChatPacket(data, CHAT_MSG_SYSTEM, LANG_ADDON, nullptr, nullptr, "ROWOWJOBNAMES\t" + entries);
         player->SendDirectMessage(&data);
+        entries.clear();
+        count = 0;
+    };
+    for (uint16 jobID : jobIDs)
+    {
+        std::string name = GetJobDisplayName(jobID);
+        if (name.empty() == true)
+            continue;
+        entries += fmt::format("{}{}:{}", entries.empty() == true ? "" : ",", jobID, name);
+        if (++count >= ROWOW_JOB_NAMES_PER_MESSAGE)
+            send();
     }
+    send();
 }
 
 // .identity: the client's way to ask for and set the identities (the unit frame's menu, Options > Interface > Display).  Any player's
