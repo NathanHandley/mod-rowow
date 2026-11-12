@@ -1247,4 +1247,7 @@
 #define ROWOW_SKILL_GD_DEVELOPMENT                 10014
 #define ROWOW_SKILL_GD_ITEMEMERGENCYCALL           10015
 
+// MergedWorlds' own skills (the converter's WorldData\MergedWorlds\skill_db.yml), past every rAthena skill
+#define ROWOW_SKILL_MW_SAFESTEP                    9900    // Safe Step (Nathan 2026-11-12): every RO character knows it, to get unstuck
+
 #endif

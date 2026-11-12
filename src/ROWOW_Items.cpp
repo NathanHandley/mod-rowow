@@ -19,6 +19,7 @@
 //  For more information, see LICENCE in the main folder
 
 #include "Chat.h"
+#include "Creature.h"
 #include "GameTime.h"
 #include "Group.h"
 #include "Item.h"
@@ -1157,7 +1158,10 @@ void ROWOWMod::WarpPlayerToCell(Player* player, std::string const& mapName, int3
     if (BattleConfig.ReviveOnWarp != 0 && player->IsAlive() == false)
         PCSetRestartValue(player);
     if (mapName == "SavePoint" || mapName == "Save")
+    {
         TeleportToSavePoint(player);
+        PlayTeleportLooks(player); // buildin_warp's save point and random spot are CLR_TELEPORT (a map's cells are CLR_OUTSIGHT: no looks)
+    }
     else if (mapName == "Random")
         TeleportToRandomSpot(player);
     else
@@ -1206,6 +1210,10 @@ void ROWOWMod::PCUseItem(Player* player, ObjectGuid itemGUID)
 
     // Famous player's potions have 50% more efficiency
     identity->IsFamousPotion = creatorGUID != 0 && PCFameRank(creatorGUID, ROWOW_FAME_ALCHEMIST) != 0;
+
+    // clif_useitemack: the RO client plays the item's use effect (a potion's swirl, RO's client item table: the converter's RoItemUseEffects.csv) on the
+    // player for everyone around, before the script runs
+    PlayScriptLook(player, ROWOW_SCRIPT_LOOK_ITEM_USE, std::to_string(roItem->ItemID));
     ROWOWScriptContext context;
     context.AttachedPlayer = player;
     context.Identity = identity;
@@ -1450,7 +1458,46 @@ void ROWOWMod::TeleportToRandomSpot(Player* player)
         return;
     if (mapKey != player->GetMapId())
         GetIdentity(player)->IsArrivalFloorCheckPending = true; // A part's spot is a cell's ground (GetCellPosition), as a warp's
+    PlayTeleportLooks(player); // pc_randomwarp(sd, CLR_TELEPORT)
     player->NearTeleportTo(position.GetPositionX(), position.GetPositionY(), position.GetPositionZ(), player->GetOrientation());
+}
+
+void ROWOWMod::PlayTeleportLooks(Player* player)
+{
+    // clif_clearunit_area(CLR_TELEPORT) and the arrival's clif_spawn: the RO client plays EF_TELEPORTATION2 where the player vanishes, for those around, and
+    // EF_ENTRY2 on it where it appears.  The vanish is left on the spot by an unseen trigger (the player is gone at once), cast a moment after it's
+    // there so the clients around know it first.  The entry plays in the player's update once it has landed, seen by the player too (RO's client shows
+    // both to the others only, but here the player gets to see its own teleport go)
+    if (player == nullptr || player->IsInWorld() == false || IsInROForm(player) == false)
+        return;
+    GetIdentity(player)->IsTeleportEntryLookPending = true;
+    if (ScriptLookSpellIDsByKey.find(GetScriptLookKey(ROWOW_SCRIPT_LOOK_EFFECT, "TELEPORTATION2")) == ScriptLookSpellIDsByKey.end())
+        return;
+    Creature* trigger = player->SummonTrigger(player->GetPositionX(), player->GetPositionY(), player->GetPositionZ(), player->GetOrientation(),
+        ROWOW_TELEPORT_LOOK_TRIGGER_DURATION_IN_MS);
+    if (trigger == nullptr)
+        return;
+    trigger->m_Events.AddEventAtOffset([trigger]()
+    {
+        ROWOW->PlayScriptLook(trigger, ROWOW_SCRIPT_LOOK_EFFECT, "TELEPORTATION2");
+    }, Milliseconds(ROWOW_TELEPORT_LOOK_DELAY_IN_MS));
+}
+
+void ROWOWMod::UpdateTeleportEntryLook(Player* player)
+{
+    // The player's update (in the form): once the teleport has landed, the entry effect plays on it a moment later, when the clients around know it's there
+    ROWOWIdentity* identity = GetIdentity(player);
+    if (identity->IsTeleportEntryLookPending == false || player->IsBeingTeleported() == true || player->IsInWorld() == false)
+        return;
+    identity->IsTeleportEntryLookPending = false;
+    if (IsROMap(player->GetMapId()) == false)
+        return;
+    ObjectGuid playerGUID = player->GetGUID();
+    player->m_Events.AddEventAtOffset([player, playerGUID]()
+    {
+        if (player->IsInWorld() == true && player->GetGUID() == playerGUID && ROWOW->IsInROForm(player) == true)
+            ROWOW->PlayScriptLook(player, ROWOW_SCRIPT_LOOK_EFFECT, "ENTRY2");
+    }, Milliseconds(ROWOW_TELEPORT_LOOK_DELAY_IN_MS));
 }
 
 bool ROWOWMod::MapSearchRandomSpot(Map* map, uint32 mapKey, Position& positionOut) const

@@ -71,11 +71,27 @@ namespace
         ChatHandler::BuildChatPacket(data, CHAT_MSG_SYSTEM, LANG_ADDON, nullptr, nullptr, addonMessage);
         player->SendDirectMessage(&data);
     }
+
+    std::string GetAreaPlaceName(uint32 areaID)
+    {
+        // An area's name as the client shows it, up to its first comma ("Prontera City, Capitol of Rune-Midgarts" is "Prontera City"); empty for none
+        std::string name;
+        if (AreaTableEntry const* area = sAreaTableStore.LookupEntry(areaID))
+            name = area->area_name[sWorld->GetDefaultDbcLocale()];
+        size_t commaPosition = name.find(',');
+        if (commaPosition != std::string::npos)
+            name = name.substr(0, commaPosition);
+        for (char& character : name)
+            if (character == '\t')
+                character = ' ';
+        return name;
+    }
 }
 
 void ROWOWMod::ReturnToSavePoint(Player* player)
 {
-    // TeleportToSavePoint, leaving the tether at the spot it went from
+    // TeleportToSavePoint, leaving the tether at the spot it went from.  The place it went from is named now, while the player stands there (its own
+    // area, kept by the core: no lookup that could load terrain off this map's thread)
     ROWOWIdentity* identity = GetIdentity(player);
     ROWOWPosition savePoint = identity->SavePoint;
     if (savePoint.IsSet == false && GetCellPosition(StartMapID, StartCellX, StartCellY, savePoint) == false)
@@ -87,22 +103,47 @@ void ROWOWMod::ReturnToSavePoint(Player* player)
     origin.Y = player->GetPositionY();
     origin.Z = player->GetPositionZ();
     origin.O = player->GetOrientation();
+    std::string originPlaceName = GetAreaPlaceName(player->GetAreaId());
+    if (originPlaceName.empty() == true)
+    {
+        int32 cellX = 0, cellY = 0;
+        GetUnitCell(player, cellX, cellY);
+        originPlaceName = GetMapNameAt(origin.MapID, cellX, cellY);
+    }
     if (player->TeleportTo(savePoint.MapID, savePoint.X, savePoint.Y, savePoint.Z, savePoint.O) == false)
         return;
+    PlayTeleportLooks(player); // pc_setpos(..., CLR_TELEPORT): it's still at the spot it leaves (the move waits for the client)
     if (identity->IsInForm == true && IsROMap(origin.MapID) == true && HasMapFlag(GetPositionMapKey(origin), "nowarpto") == false)
-        SetReturnTether(player, origin);
+        SetReturnTether(player, origin, originPlaceName);
 }
 
-void ROWOWMod::SetReturnTether(Player* player, ROWOWPosition const& origin)
+void ROWOWMod::SetReturnTether(Player* player, ROWOWPosition const& origin, std::string const& placeName)
 {
     if (ReturnTetherSpellID == 0)
         return;
     ROWOWIdentity* identity = GetIdentity(player);
     identity->ReturnTetherOrigin = origin;
     identity->ReturnTetherRemainingMS = ROWOW_RETURN_TETHER_DURATION_IN_MS;
+    identity->ReturnTetherPlaceName = placeName;
     player->RemoveAurasDueToSpell(ReturnTetherSpellID); // A new one replaces the last, with its full time
     RefreshReturnTether(player);
-    ChatHandler(player->GetSession()).SendSysMessage("A return tether holds the way back for 30 minutes: click it off your buffs to return to where you teleported from.");
+    SendReturnTetherToClient(player, false);
+    if (placeName.empty() == true)
+        ChatHandler(player->GetSession()).SendSysMessage("A return tether holds the way back for 30 minutes: click it off your buffs to return to where you teleported from.");
+    else
+        ChatHandler(player->GetSession()).PSendSysMessage("A return tether holds the way back to {} for 30 minutes: click it off your buffs to return there.", placeName);
+}
+
+void ROWOWMod::SendReturnTetherToClient(Player* player, bool isNameLookupAllowed)
+{
+    // ROWOWTETHER\t<the tether's aura spell>\t<the place it goes back to>, the place empty when there's no tether (the RO_Identity addon puts it on the
+    // aura's tooltip)
+    ROWOWIdentity* identity = player->CustomData.Get<ROWOWIdentity>("ROWOWIdentity");
+    if (ReturnTetherSpellID == 0 || identity == nullptr)
+        return;
+    if (identity->ReturnTetherOrigin.IsSet == true && identity->ReturnTetherPlaceName.empty() == true && isNameLookupAllowed == true)
+        identity->ReturnTetherPlaceName = GetSavePlaceName(identity->ReturnTetherOrigin); // Loaded with the identity: named the way the save point is
+    SendAddonText(player, fmt::format("ROWOWTETHER\t{}\t{}", ReturnTetherSpellID, identity->ReturnTetherOrigin.IsSet == true ? identity->ReturnTetherPlaceName : ""));
 }
 
 void ROWOWMod::ClearReturnTether(Player* player)
@@ -113,8 +154,10 @@ void ROWOWMod::ClearReturnTether(Player* player)
     identity->ReturnTetherOrigin = ROWOWPosition();
     identity->ReturnTetherRemainingMS = 0;
     identity->IsReturnTetherUsePending = false;
+    identity->ReturnTetherPlaceName.clear();
     if (ReturnTetherSpellID != 0 && player->HasAura(ReturnTetherSpellID) == true)
         player->RemoveAurasDueToSpell(ReturnTetherSpellID);
+    SendReturnTetherToClient(player, false);
 }
 
 void ROWOWMod::RefreshReturnTether(Player* player)
@@ -176,6 +219,8 @@ void ROWOWMod::OnReturnTetherAuraRemoved(Player* player, bool isCancelled, bool 
     {
         identity->ReturnTetherOrigin = ROWOWPosition();
         identity->ReturnTetherRemainingMS = 0;
+        identity->ReturnTetherPlaceName.clear();
+        SendReturnTetherToClient(player, false);
         ChatHandler(player->GetSession()).SendSysMessage("Your return tether has faded.");
     }
 }
@@ -220,7 +265,8 @@ void ROWOWMod::UseReturnTether(Player* player)
             ChatHandler(player->GetSession()).SendNotification("The place your return tether led to can't be reached any more.");
             return;
         }
-        player->TeleportTo(origin.MapID, origin.X, origin.Y, origin.Z, origin.O);
+        if (player->TeleportTo(origin.MapID, origin.X, origin.Y, origin.Z, origin.O) == true)
+            PlayTeleportLooks(player); // As a wing's teleport looks
     }
 }
 
@@ -229,6 +275,7 @@ void ROWOWMod::LoadIdentityReturnTether(ROWOWIdentity& identity)
     // The identity's (its save slot's) tether, with the time it had left when it was last saved
     identity.ReturnTetherOrigin = ROWOWPosition();
     identity.ReturnTetherRemainingMS = 0;
+    identity.ReturnTetherPlaceName.clear(); // Named on the next .ro sync (SendReturnTetherToClient, the world thread)
     QueryResult result = CharacterDatabase.Query("SELECT `map`, `x`, `y`, `z`, `o`, `remaining_ms` FROM `mod_rowow_identity_tether` WHERE `guid` = {}", identity.IdentityID);
     if (!result)
         return;

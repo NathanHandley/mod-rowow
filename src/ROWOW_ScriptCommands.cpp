@@ -699,7 +699,7 @@ void ROWOWMod::RegisterNpcScriptCommands()
         {
             // The skill's flag: SKILL_FLAG_PERM_GRANTED, or SKILL_FLAG_PERMANENT again (learned as any skill, its points counted and reset)
             SetIdentityVariable(*GetIdentity(player), fmt::format(GrantedSkillVariableFormat, skillID), flag == ROWOW_ADDSKILL_PERMANENT_GRANTED ? 1 : 0);
-            PCSkill(player, skillID, uint16(std::max<int64>(0, GetArgument(arguments, 1, 1))));
+            PCSkill(player, skillID, uint16(std::max<int64>(0, GetArgument(arguments, 1, 1))), true); // Told in chat when it's new (First Aid, Play Dead)
         }
         else if (flag == ROWOW_ADDSKILL_TEMP || flag == ROWOW_ADDSKILL_TEMP_ADDLEVEL)
         {

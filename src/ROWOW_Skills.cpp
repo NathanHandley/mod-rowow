@@ -20,6 +20,9 @@
 #include "Log.h"
 #include "Player.h"
 #include "QueryResult.h"
+#include "SpellInfo.h"
+#include "SpellMgr.h"
+#include "World.h"
 #include "WorldPacket.h"
 #include "WorldSession.h"
 
@@ -770,6 +773,13 @@ void ROWOWMod::PCCalcSkillTree(ROWOWIdentity& identity) const
     identity.TempSkillLevelsByID.clear();
     identity.CloneSkillID = 0;
     identity.CloneSkillLevel = 0;
+    // Safe Step (MergedWorlds' own, Nathan 2026-11-12): every RO character knows it from level 1, whatever its job, on no tree.  Kept as a skill it has for now
+    // (SKILL_FLAG_TEMPORARY): never saved, raised, reset or counted in the skill points
+    if (GetSkill(ROWOW_SKILL_MW_SAFESTEP) != nullptr)
+    {
+        identity.TreeSkillIDs.insert(ROWOW_SKILL_MW_SAFESTEP);
+        identity.TempSkillLevelsByID[ROWOW_SKILL_MW_SAFESTEP] = 1;
+    }
     uint16 jobID = PCCalcSkillTreeNormalizeJob(identity);
     auto treeIter = SkillTreesByJobID.find(jobID);
     if (treeIter == SkillTreesByJobID.end())
@@ -883,20 +893,44 @@ bool ROWOWMod::PCSkillUp(Player* player, uint16 skillID)
     return true;
 }
 
-void ROWOWMod::PCSkill(Player* player, uint16 skillID, uint16 level)
+void ROWOWMod::PCSkill(Player* player, uint16 skillID, uint16 level, bool isAnnounced)
 {
-    // pc_skill with ADDSKILL_PERMANENT: sets the level, 0 taking the skill away
+    // pc_skill with ADDSKILL_PERMANENT: sets the level, 0 taking the skill away.  Only a grant the player didn't have (a new skill, or a higher
+    // level) is announced: a script giving a skill again at the level it has says nothing, and the identity's skills loaded at login or a
+    // reload never come through here
     ROWOWIdentity* identity = GetIdentity(player);
     ROWOWSkill const* skill = GetSkill(skillID);
     if (identity->Exists == false || skill == nullptr)
         return;
     level = std::min(level, skill->MaxLevel);
+    auto levelIter = identity->SkillLevelsByID.find(skillID);
+    uint16 oldLevel = levelIter != identity->SkillLevelsByID.end() ? levelIter->second : 0;
     if (level == 0)
         identity->SkillLevelsByID.erase(skillID);
     else
         identity->SkillLevelsByID[skillID] = level;
     identity->AreSkillsChanged = true;
     RefreshROForm(player);
+    if (isAnnounced == true && level > oldLevel && player->GetSession() != nullptr)
+    {
+        std::string name = GetSkillDisplayName(skillID);
+        if (skill->MaxLevel > 1)
+            ChatHandler(player->GetSession()).PSendSysMessage("You have learned {} (Level {}).", name, level);
+        else
+            ChatHandler(player->GetSession()).PSendSysMessage("You have learned {}.", name);
+    }
+}
+
+std::string ROWOWMod::GetSkillDisplayName(uint16 skillID) const
+{
+    // The spell of its first level carries the RO client's name of the skill (the converter's), which the RO skill window and the tooltips show
+    ROWOWSkill const* skill = GetSkill(skillID);
+    if (skill == nullptr)
+        return std::to_string(skillID);
+    if (SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(GetSkillSpellID(skillID, 1)))
+        if (char const* spellName = spellInfo->SpellName[sWorld->GetDefaultDbcLocale()]; spellName != nullptr && spellName[0] != '\0')
+            return spellName;
+    return skill->Description.empty() == false ? skill->Description : skill->Name;
 }
 
 void ROWOWMod::PCAddTempSkill(ROWOWIdentity& identity, uint16 skillID, int32 level, bool isAddLevel) const

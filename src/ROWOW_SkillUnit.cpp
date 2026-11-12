@@ -1416,8 +1416,8 @@ int32 ROWOWMod::SkillUnitOnPlace(Map* map, ROWOWSkillUnitGroup& group, int32 ind
                     working = 1; /* we break it because officials break it, lovely stuff. */
                 group.Val1 = (count << 16) | working;
                 ROWOWPosition destination;
-                if (GetCellPosition(m, x, y, destination) == true)
-                    sd->TeleportTo(destination.MapID, destination.X, destination.Y, destination.Z, sd->GetOrientation());
+                if (GetCellPosition(m, x, y, destination) == true && sd->TeleportTo(destination.MapID, destination.X, destination.Y, destination.Z, sd->GetOrientation()) == true)
+                    PlayTeleportLooks(sd); // pc_setpos(..., CLR_TELEPORT)
             }
             break;
         }

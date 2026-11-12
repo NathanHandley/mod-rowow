@@ -764,6 +764,7 @@ enum ROWOWStatusFlag : uint8
 #define ROWOW_SCRIPT_LOOK_EMOTION                   1
 #define ROWOW_SCRIPT_LOOK_EFFECT                    2
 #define ROWOW_SCRIPT_LOOK_SOUND                     3
+#define ROWOW_SCRIPT_LOOK_ITEM_USE                  4   // Not a look of its own: the effect look an RO item's use plays (by its item_db Id)
 
 // e_status_change_start_flags
 #define ROWOW_SCSTART_NONE                          0x00

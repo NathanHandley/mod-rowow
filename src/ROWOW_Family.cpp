@@ -546,7 +546,7 @@ bool ROWOWMod::PCAdoption(Player* p1, Player* p2, Player* baby)
     auto grantSkill = [this](Player* player, uint16 skillID)
     {
         SetIdentityVariable(*GetIdentity(player), fmt::format(GrantedSkillVariableFormat, skillID), 0);
-        PCSkill(player, skillID, 1);
+        PCSkill(player, skillID, 1, true);
     };
     grantSkill(baby, ROWOW_SKILL_WE_BABY);
     grantSkill(baby, ROWOW_SKILL_WE_CALLPARENT);
@@ -711,8 +711,9 @@ void ROWOWMod::UpdateFamily(Player* player)
         SendText(player, "Your marriage is over: your wedding ring is gone.");
         SendFamilyToClient(player);
     }
-    if (call.Destination.IsSet == true && player->IsAlive() == true && HasMapFlag(player, "nowarp") == false)
-        player->TeleportTo(call.Destination.MapID, call.Destination.X, call.Destination.Y, call.Destination.Z, call.Destination.O);
+    if (call.Destination.IsSet == true && player->IsAlive() == true && HasMapFlag(player, "nowarp") == false &&
+        player->TeleportTo(call.Destination.MapID, call.Destination.X, call.Destination.Y, call.Destination.Z, call.Destination.O) == true)
+        PlayTeleportLooks(player); // UNT_CALLFAMILY's pc_setpos(..., CLR_TELEPORT)
 }
 
 void ROWOWMod::SendFamilyToClient(Player* player)

@@ -389,6 +389,7 @@ public:
         ROWOW->CheckNoSaveArrival(player);
         ROWOW->UpdateMapKey(player);
         ROWOW->CheckArrivalFloor(player);
+        ROWOW->UpdateTeleportEntryLook(player);
         ROWOW->UpdateLoginDeath(player, p_time);
         ROWOW->UpdateSkillUnitMove(player);
         ROWOW->UpdateSkillCastMove(player);
@@ -1301,6 +1302,7 @@ public:
         ROWOW->SendROStatusToClient(player);
         ROWOW->SendHairToClient(player);
         ROWOW->SendSavePlaceToClient(player, true); // The tooltips' "Your save is in" (ROWOW_ReturnTether.cpp; a command is the world thread)
+        ROWOW->SendReturnTetherToClient(player, true); // ... and the return tether's place, on its aura's tooltip
         ROWOW->SendFamilyToClient(player); // The Ragnarok page's family (ROWOW_Family.cpp)
         if (ROWOW->IsInROForm(player) == true)
         {

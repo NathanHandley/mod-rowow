@@ -120,6 +120,12 @@ struct ROWOWItemVisual
 #define ROWOW_CELL_FLOOR_SEARCH_ABOVE               1.0f    // How far over the cell's RO ground the search starts
 #define ROWOW_CELL_FLOOR_SEARCH_BELOW               2.0f    // How far under it a floor may be; with none in between, the GAT's height itself
 #define ROWOW_CELL_FLOOR_SEARCH_STEPS               4       // Surfaces looked at, from the top, for the one nearest the RO ground
+// RO's teleport looks (PlayTeleportLooks) and Safe Step (FindSafeStepSpot)
+#define ROWOW_TELEPORT_LOOK_DELAY_IN_MS             300     // After the trigger (or the arrival) is there, so the clients around know it before its effect
+#define ROWOW_TELEPORT_LOOK_TRIGGER_DURATION_IN_MS  3000    // The vanish effect's unseen trigger lasts past the effect's 1.5 seconds
+#define ROWOW_SAFE_STEP_SEARCH_CELLS                20      // How far out (in cells, a square ring at a time) Safe Step looks for a spot
+#define ROWOW_SAFE_STEP_FLOOR_TOLERANCE             1.5f    // How far a spot's floor may be from its cell's RO ground (GAT) to be a normal standing point
+#define ROWOW_SAFE_STEP_HEADROOM                    2.0f    // Room above the floor a spot needs (nothing solid between its floor and this high)
 
 // A cell of an RO map, as the server keeps its GAT (map_gat2cell's walkable and shootable), and what a path search stops at
 #define ROWOW_CELL_WALL                             0       // Not walkable, and shots don't pass
@@ -2137,6 +2143,7 @@ struct ROWOWIdentity : public DataMap::Base
     ROWOWPosition ReturnTetherOrigin;
     uint32 ReturnTetherRemainingMS = 0;
     bool IsReturnTetherUsePending = false; // Its aura was clicked off: the player's next update takes it back (UseReturnTether)
+    std::string ReturnTetherPlaceName; // The origin's place, as the save point's is named ("Mt. Mjolnir"): empty until it's looked up (not saved)
     ROWOWPosition SentSavePlacePoint; // The save point the client was last told the place of (ROWOWSAVE; world thread)
     bool IsSavePlaceSent = false;
     uint8 HairStyle = 1;
@@ -2279,6 +2286,7 @@ struct ROWOWIdentity : public DataMap::Base
     uint64 WorldTravelRequestTick = 0; // When the Ragnarok page's Enter button asked for the world travel spell (.ro enter), the only way into the RO world
     bool IsLeavingForReset = false; // .ro identity reset takes the form off, on an RO map too, where CompleteROFormChange would put it back on
     bool IsArrivalFloorCheckPending = false; // Arrived on an RO map: the next update checks it isn't left in the air (CheckArrivalFloor)
+    bool IsTeleportEntryLookPending = false; // An RO teleport (CLR_TELEPORT) is under way: its entry effect plays once it has landed (UpdateTeleportEntryLook)
     bool IsMidgardAchievementCheckPending = false; // A Midgard achievement was due while it couldn't be earned (GM mode, loading): UpdateMidgardAchievementCheck
     uint32 MapKey = 0; // The map key it was last on (GetMapKey), 0 for none yet: a change on the same WoW map is RO's map change (UpdateMapKey)
     uint32 LoginDeathTimer = 0; // Logged in after logging out dead: dies again where it lies when this runs out (UpdateLoginDeath)
@@ -2816,6 +2824,18 @@ public:
     bool MapSearchRandomSpot(Map* map, uint32 mapKey, Position& positionOut) const; // map_search_freecell over the whole map: a monster's home (a part's: a free cell of it)
     void TeleportToSavePoint(Player* player); // The identity's save point (AL_TELEPORT level 2 and up)
 
+    // RO's teleport looks (pc_setpos and unit_warp with CLR_TELEPORT: the wings, Teleport, Warp Portal, a script's warp to the save point or a random
+    // spot).  The RO client shows the vanish effect (EF_TELEPORTATION2) where the player was and its new entry effect (EF_ENTRY2) where it lands, each
+    // the converter's look (ROWOW_SCRIPT_LOOK_EFFECT): called just before the move, it leaves the first on the spot and has the player's update play the
+    // second once it's landed
+    void PlayTeleportLooks(Player* player);
+    void UpdateTeleportEntryLook(Player* player);
+
+    // Safe Step (MergedWorlds' own skill, Nathan 2026-11-12; ROWOW_SKILL_MW_SAFESTEP): every RO character knows it (PCCalcSkillTree), and its cast moves
+    // the player to the nearest RO cell it can stand on (walkable, a floor near the GAT's ground with room to stand), to get out of a wall or the ground
+    bool FindSafeStepSpot(Player* player, Position& spotOut) const;
+    void SafeStep(Player* player);
+
     // Return-to-save teleports (ROWOW_ReturnTether.cpp, Nathan 2026-11-10): the items' and skills' tooltips say where the save point is (ROWOWSAVE), and
     // a teleport to it leaves a 30 minute return tether aura that, clicked off, goes back to where it was used.  Its 30 minutes are the save slot's and
     // count down only while that slot is played in the RO world (Nathan 2026-11-11)
@@ -2825,7 +2845,10 @@ public:
     std::string ReturnToSaveSpellIDsText; // AL_TELEPORT's spells of level 2 and up
     uint32 SavePlaceUpdateTimer = 0;
     void ReturnToSavePoint(Player* player); // TeleportToSavePoint for a Butterfly Wing or Teleport's save point, with the tether
-    void SetReturnTether(Player* player, ROWOWPosition const& origin);
+    void SetReturnTether(Player* player, ROWOWPosition const& origin, std::string const& placeName);
+    // ROWOWTETHER, the place the tether goes back to, for its aura's tooltip.  isNameLookupAllowed only in the world thread (GetSavePlaceName), for a
+    // tether loaded with the identity, whose place isn't known yet
+    void SendReturnTetherToClient(Player* player, bool isNameLookupAllowed);
     void ClearReturnTether(Player* player);
     void RefreshReturnTether(Player* player); // Its aura as the identity's tether says (only in the form, in the RO world)
     void OnReturnTetherAuraRemoved(Player* player, bool isCancelled, bool isExpired);
@@ -2905,7 +2928,10 @@ public:
     void GetSkillUpLimitPoints(ROWOWIdentity const& identity, int32& firstJobSkillPointsOut, int32& secondJobSkillPointsOut) const; // skillup_limit's
     void PCCalcSkillTree(ROWOWIdentity& identity) const; // pc_calc_skilltree
     bool PCSkillUp(Player* player, uint16 skillID); // pc_skillup
-    void PCSkill(Player* player, uint16 skillID, uint16 level); // pc_skill (ADDSKILL_PERMANENT): a quest NPC or a GM sets a skill's level
+    // pc_skill (ADDSKILL_PERMANENT): a quest NPC or a GM sets a skill's level.  isAnnounced (a script's grant: a quest NPC, a wedding): a level it
+    // didn't have is told in chat, "You have learned First Aid." (Nathan 2026-11-12)
+    void PCSkill(Player* player, uint16 skillID, uint16 level, bool isAnnounced = false);
+    std::string GetSkillDisplayName(uint16 skillID) const; // The skill's name as its spells and the RO skill window show it (the RO client's), else skill_db's
     void PCAddTempSkill(ROWOWIdentity& identity, uint16 skillID, int32 level, bool isAddLevel) const; // pc_skill's ADDSKILL_TEMP and ADDSKILL_TEMP_ADDLEVEL
     void PCRefreshItemSkills(Player* player, ROWOWIdentity& identity); // After a status calculation: the skills equipment grants, to its spells and window
     bool PCCheckSkillIsGranted(ROWOWIdentity const& identity, uint16 skillID) const; // pc_checkskill_flag > SKILL_FLAG_PERMANENT
