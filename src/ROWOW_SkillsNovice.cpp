@@ -27,6 +27,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 using namespace std;
 
@@ -61,16 +64,110 @@ namespace
     };
 }
 
+namespace
+{
+    // FindSafeStepSpot's look at the cells around the player: each cell's standing point once, and which cells a walk can leave
+    class ROWOWSafeStepSearch
+    {
+    public:
+        ROWOWSafeStepSearch(ROWOWMod const& mod, Map* map, uint32 phaseMask, ROWOWMapGrid const& mapGrid) : Mod(mod), MapPtr(map), PhaseMask(phaseMask), Grid(mapGrid) { }
+
+        // A normal standing point: walkable (the GAT's, as a Fly Wing's landing), its floor (GetCellFloorZ: the collision surface nearest the cell's RO
+        // ground) a real surface near that ground, and nothing solid over the floor up to head height.  floorOut is its floor
+        bool IsStandable(int32 cellX, int32 cellY, float& floorOut)
+        {
+            auto [iter, isNew] = Cells.try_emplace(Key(cellX, cellY));
+            CellState& state = iter->second;
+            if (isNew == true)
+            {
+                state.IsStandable = false;
+                if (Grid.IsCellInGrid(cellX, cellY) == true && Grid.IsCellWalkable(cellX, cellY) == true)
+                {
+                    float x = Grid.GetCellCenterWorldX(cellY);
+                    float y = Grid.GetCellCenterWorldY(cellX);
+                    float roGroundZ = Grid.GetCellGroundZ(cellX, cellY) - ROWOW_GAT_GROUND_Z_LIFT;
+                    float floorZ = Mod.GetCellFloorZ(MapPtr, PhaseMask, Grid, cellX, cellY, x, y);
+                    // A surface really there (GetCellFloorZ gives the GAT's height when it finds none), and room to stand on it: not inside a wall, a
+                    // rock or a roof's underside
+                    float surfaceZ = MapPtr->GetHeight(PhaseMask, x, y, floorZ + 0.5f, true, 1.0f);
+                    state.IsStandable = std::fabs(floorZ - roGroundZ) <= ROWOW_SAFE_STEP_FLOOR_TOLERANCE && surfaceZ > INVALID_HEIGHT && std::fabs(surfaceZ - floorZ) <= 0.5f
+                        && MapPtr->isInLineOfSight(x, y, floorZ + 0.3f, x, y, floorZ + ROWOW_SAFE_STEP_HEADROOM, PhaseMask, LINEOFSIGHT_CHECK_VMAP,
+                            VMAP::ModelIgnoreFlags::Nothing) == true;
+                    state.FloorZ = floorZ;
+                }
+            }
+            floorOut = state.FloorZ;
+            return state.IsStandable;
+        }
+
+        // A spot a walk can leave: from it, over standable cells a step apart (no higher than a step up or down, nothing solid between them at waist
+        // height), ROWOW_SAFE_STEP_OPEN_CELLS cells or more can be reached.  A floor shut in by walls (the inside of a model RO walks through, which
+        // Bits stood in on the Training Ground, Nathan 2026-11-12) reaches only its few cells.  The cells one search reached share its answer
+        bool IsOpen(int32 cellX, int32 cellY)
+        {
+            CellState& start = Cells[Key(cellX, cellY)];
+            if (start.Openness != 0)
+                return start.Openness > 0;
+            std::vector<std::pair<int32, int32>> reached = { { cellX, cellY } };
+            std::unordered_set<int64> seen = { Key(cellX, cellY) };
+            for (size_t i = 0; i < reached.size() && reached.size() < ROWOW_SAFE_STEP_OPEN_CELLS; i++)
+            {
+                auto [fromX, fromY] = reached[i];
+                float fromFloorZ = 0;
+                IsStandable(fromX, fromY, fromFloorZ);
+                for (int32 dy = -1; dy <= 1; dy++)
+                {
+                    for (int32 dx = -1; dx <= 1; dx++)
+                    {
+                        int32 toX = fromX + dx;
+                        int32 toY = fromY + dy;
+                        float toFloorZ = 0;
+                        if ((dx == 0 && dy == 0) || seen.count(Key(toX, toY)) != 0 || IsStandable(toX, toY, toFloorZ) == false
+                            || std::fabs(toFloorZ - fromFloorZ) > ROWOW_SAFE_STEP_MAX_STEP_HEIGHT)
+                            continue;
+                        if (MapPtr->isInLineOfSight(Grid.GetCellCenterWorldX(fromY), Grid.GetCellCenterWorldY(fromX), fromFloorZ + ROWOW_SAFE_STEP_WALK_CHECK_HEIGHT,
+                            Grid.GetCellCenterWorldX(toY), Grid.GetCellCenterWorldY(toX), toFloorZ + ROWOW_SAFE_STEP_WALK_CHECK_HEIGHT, PhaseMask,
+                            LINEOFSIGHT_CHECK_VMAP, VMAP::ModelIgnoreFlags::Nothing) == false)
+                            continue;
+                        seen.insert(Key(toX, toY));
+                        reached.push_back({ toX, toY });
+                    }
+                }
+            }
+            int8 openness = reached.size() >= ROWOW_SAFE_STEP_OPEN_CELLS ? 1 : -1;
+            for (auto const& [x, y] : reached)
+                Cells[Key(x, y)].Openness = openness;
+            return openness > 0;
+        }
+
+    private:
+        struct CellState
+        {
+            bool IsStandable = false;
+            float FloorZ = 0;
+            int8 Openness = 0; // 1 a walk can leave it, -1 shut in, 0 not looked at
+        };
+
+        static int64 Key(int32 cellX, int32 cellY) { return (int64(cellX) << 32) | uint32(cellY); }
+
+        ROWOWMod const& Mod;
+        Map* MapPtr;
+        uint32 PhaseMask;
+        ROWOWMapGrid const& Grid;
+        std::unordered_map<int64, CellState> Cells;
+    };
+}
+
 bool ROWOWMod::FindSafeStepSpot(Player* player, Position& spotOut) const
 {
-    // The nearest RO cell (its middle) around the player, its own cell first, that's a normal standing point: walkable (the GAT's, as a Fly Wing's landing),
-    // on the map (not in a stitched map's gap), its floor (GetCellFloorZ: the collision surface nearest the cell's RO ground) a real surface near that
-    // ground, and nothing solid over the floor up to head height.  Cells are tried nearest first, out to ROWOW_SAFE_STEP_SEARCH_CELLS
+    // A standing point near the player that a walk can leave (ROWOWSafeStepSearch): never the player's own cell or one next to it, so Safe Step always
+    // moves it (cast again it moves again), and a floor shut in by walls is passed over however good it is.  The cells are looked at nearest first, out to
+    // ROWOW_SAFE_STEP_SEARCH_CELLS; of the good ones about as near as the nearest (ROWOW_SAFE_STEP_PICK_SPREAD) one is taken at random
     Map* map = player->GetMap();
     ROWOWMapGrid const* mapGrid = map != nullptr ? GetMapGrid(player->GetMapId()) : nullptr;
     if (mapGrid == nullptr || mapGrid->HasCells() == false)
         return false;
-    uint32 phaseMask = player->GetPhaseMask();
+    ROWOWSafeStepSearch search(*this, map, player->GetPhaseMask(), *mapGrid);
     int32 centerX = mapGrid->GetCellX(player->GetPositionY());
     int32 centerY = mapGrid->GetCellY(player->GetPositionX());
     std::vector<std::pair<float, std::pair<int32, int32>>> candidates;
@@ -80,36 +177,34 @@ bool ROWOWMod::FindSafeStepSpot(Player* player, Position& spotOut) const
         {
             int32 cellX = centerX + dx;
             int32 cellY = centerY + dy;
-            if (mapGrid->IsCellInGrid(cellX, cellY) == false || mapGrid->IsCellWalkable(cellX, cellY) == false)
+            if (std::max(std::abs(dx), std::abs(dy)) < ROWOW_SAFE_STEP_MIN_CELLS || mapGrid->IsCellInGrid(cellX, cellY) == false
+                || mapGrid->IsCellWalkable(cellX, cellY) == false)
                 continue;
             float deltaX = mapGrid->GetCellCenterWorldX(cellY) - player->GetPositionX();
             float deltaY = mapGrid->GetCellCenterWorldY(cellX) - player->GetPositionY();
-            candidates.push_back({ deltaX * deltaX + deltaY * deltaY, { cellX, cellY } });
+            candidates.push_back({ std::sqrt(deltaX * deltaX + deltaY * deltaY), { cellX, cellY } });
         }
     }
     std::sort(candidates.begin(), candidates.end());
-    for (auto const& candidate : candidates)
+    std::vector<Position> picks;
+    float nearestDistance = -1.0f;
+    for (auto const& [distance, cell] : candidates)
     {
-        int32 cellX = candidate.second.first;
-        int32 cellY = candidate.second.second;
-        float x = mapGrid->GetCellCenterWorldX(cellY);
-        float y = mapGrid->GetCellCenterWorldY(cellX);
-        float roGroundZ = mapGrid->GetCellGroundZ(cellX, cellY) - ROWOW_GAT_GROUND_Z_LIFT;
-        float floorZ = GetCellFloorZ(map, phaseMask, *mapGrid, cellX, cellY, x, y);
-        if (std::fabs(floorZ - roGroundZ) > ROWOW_SAFE_STEP_FLOOR_TOLERANCE)
+        if (nearestDistance >= 0.0f && distance > nearestDistance + ROWOW_SAFE_STEP_PICK_SPREAD)
+            break;
+        float floorZ = 0;
+        if (search.IsStandable(cell.first, cell.second, floorZ) == false || search.IsOpen(cell.first, cell.second) == false)
             continue;
-        // A surface really there (GetCellFloorZ gives the GAT's height when it finds none)
-        float surfaceZ = map->GetHeight(phaseMask, x, y, floorZ + 0.5f, true, 1.0f);
-        if (surfaceZ <= INVALID_HEIGHT || std::fabs(surfaceZ - floorZ) > 0.5f)
-            continue;
-        // Room to stand: not inside a wall, a rock or a roof's underside
-        if (map->isInLineOfSight(x, y, floorZ + 0.3f, x, y, floorZ + ROWOW_SAFE_STEP_HEADROOM, phaseMask, LINEOFSIGHT_CHECK_VMAP,
-            VMAP::ModelIgnoreFlags::Nothing) == false)
-            continue;
-        spotOut.Relocate(x, y, std::max(floorZ, map->GetWaterLevel(x, y)));
-        return true;
+        if (nearestDistance < 0.0f)
+            nearestDistance = distance;
+        float x = mapGrid->GetCellCenterWorldX(cell.second);
+        float y = mapGrid->GetCellCenterWorldY(cell.first);
+        picks.emplace_back(x, y, std::max(floorZ, map->GetWaterLevel(x, y)));
     }
-    return false;
+    if (picks.empty() == true)
+        return false;
+    spotOut = picks[urand(0, uint32(picks.size()) - 1)];
+    return true;
 }
 
 void ROWOWMod::SafeStep(Player* player)

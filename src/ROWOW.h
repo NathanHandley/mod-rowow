@@ -127,6 +127,11 @@ struct ROWOWItemVisual
 #define ROWOW_SAFE_STEP_SEARCH_CELLS                20      // How far out (in cells, a square ring at a time) Safe Step looks for a spot
 #define ROWOW_SAFE_STEP_FLOOR_TOLERANCE             1.5f    // How far a spot's floor may be from its cell's RO ground (GAT) to be a normal standing point
 #define ROWOW_SAFE_STEP_HEADROOM                    2.0f    // Room above the floor a spot needs (nothing solid between its floor and this high)
+#define ROWOW_SAFE_STEP_MIN_CELLS                   2       // A spot is at least this many cells from the player's own (never it or the ones next to it)
+#define ROWOW_SAFE_STEP_OPEN_CELLS                  40      // Cells a walk from a spot must reach for it to count as open (not a floor shut in by walls)
+#define ROWOW_SAFE_STEP_MAX_STEP_HEIGHT             1.5f    // Floor height two cells next to each other may differ by and still be walked between
+#define ROWOW_SAFE_STEP_WALK_CHECK_HEIGHT           1.0f    // Height over the floors the way between two cells must be clear at (waist height)
+#define ROWOW_SAFE_STEP_PICK_SPREAD                 1.5f    // Yards past the nearest good spot the others it picks from at random may be
 
 // A cell of an RO map, as the server keeps its GAT (map_gat2cell's walkable and shootable), and what a path search stops at
 #define ROWOW_CELL_WALL                             0       // Not walkable, and shots don't pass
