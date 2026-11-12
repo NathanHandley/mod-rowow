@@ -30,10 +30,13 @@
 #include "SpellAuras.h"
 #include "SpellInfo.h"
 #include "SpellMgr.h"
+#include "WhoListCacheMgr.h"
 #include "WorldPacket.h"
 #include "WorldSession.h"
 
 #include "ROWOW.h"
+
+#include <algorithm>
 
 using namespace std;
 
@@ -706,6 +709,42 @@ public:
     }
 };
 
+// The who list (Nathan 2026-11-12): a player on an RO map is in Midgard, and shows the RO map it is on, which inside a stitched map (Midgard, a
+// dungeon group) is the member's own area under the stitched map's zone (Izlude Town, not Midgard).  In the RO form the primary class is the job
+// and the secondary the character's own class.  Norrath and the EverQuest secondary class are mod-everquest's (it leaves a game identity form's
+// classes alone).  The world thread, as the who list's cache is rebuilt
+class ROWOW_WorldIdentityPlayerScript : public PlayerScript
+{
+public:
+    ROWOW_WorldIdentityPlayerScript() : PlayerScript("ROWOW_WorldIdentityPlayerScript", { PLAYERHOOK_ON_WHO_LIST_INFO }) {}
+
+    void OnPlayerWhoListInfo(Player* player, WhoListWorldInfo& info) override
+    {
+        if (ROWOW->IsEnabled == false || ROWOW->IsROMap(player->GetMapId()) == false)
+            return;
+        info.World = WorldNames[ROWOW_WORLD_MIDGARD];
+        uint32 zoneID = player->GetZoneId();
+        AreaTableEntry const* area = sAreaTableStore.LookupEntry(player->GetAreaId());
+        for (uint8 depth = 0; area != nullptr && area->zone != 0 && area->zone != zoneID && depth < 8; depth++)
+            area = sAreaTableStore.LookupEntry(area->zone);
+        if (area != nullptr && area->zone == zoneID)
+            info.ZoneID = area->ID;
+        if (ROWOW->IsInROForm(player) == true)
+        {
+            ROWOWIdentity const* identity = player->CustomData.Get<ROWOWIdentity>("ROWOWIdentity");
+            ROWOWJob const* job = identity != nullptr ? ROWOW->GetJob(identity->JobID) : nullptr;
+            if (job != nullptr)
+            {
+                std::string jobName = job->Name;
+                std::replace(jobName.begin(), jobName.end(), '_', ' '); // Lord_Knight as Lord Knight
+                info.IsPrimaryClassTheClass = false;
+                info.PrimaryClass = jobName;
+                info.IsSecondaryClassTheClass = true;
+            }
+        }
+    }
+};
+
 // .identity: the client's way to ask for and set the identities (the unit frame's menu, Options > Interface > Display).  Any player's
 class ROWOW_WorldIdentityCommandScript : public CommandScript
 {
@@ -755,4 +794,5 @@ void AddROWOWWorldIdentityScripts()
 {
     new ROWOW_WorldIdentityCommandScript();
     new ROWOW_WorldIdentityWorldObjectScript();
+    new ROWOW_WorldIdentityPlayerScript();
 }
