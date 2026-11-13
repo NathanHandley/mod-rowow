@@ -33,6 +33,7 @@
 #include "ObjectAccessor.h"
 #include "ObjectMgr.h"
 #include "Player.h"
+#include "Spell.h"
 #include "SpellInfo.h"
 #include "SpellMgr.h"
 #include "Unit.h"
@@ -734,6 +735,10 @@ void ROWOWMod::SendSkillDelayToClient(Unit* unit, uint16 skillID) const
         return;
     uint64 tick = GetTick();
     uint64 delay = ud->CanActTime > tick ? ud->CanActTime - tick : 0;
+    // A short delay isn't shown: WoW's client would refuse the button during it ("Spell is not ready yet"), where the server holds the request
+    // and casts it once the delay ends (UnitSkillUse's queue).  A skill's own cooldown, and a long delay, still are
+    if (delay <= ROWOW_SKILL_QUEUE_MAX_WAIT)
+        delay = 0;
     auto cooldownIter = ud->CooldownEndTimesBySkillID.find(skillID);
     uint64 cooldown = (cooldownIter != ud->CooldownEndTimesBySkillID.end() && cooldownIter->second > tick) ? cooldownIter->second - tick : 0;
     std::vector<std::pair<uint32, uint32>> cooldownsBySpellID;
@@ -759,7 +764,61 @@ void ROWOWMod::SendSkillDelayToClient(Unit* unit, uint16 skillID) const
     player->SendDirectMessage(&data);
 }
 
-SpellCastResult ROWOWMod::UnitSkillUse(Unit* src, Unit* target, WorldLocation const* dest, uint16 skillID, uint16 skillLevel)
+void ROWOWMod::QueueSkill(Player* player, uint32 spellID, Unit* target, WorldLocation const* dest)
+{
+    // One request waits at a time: a newer one replaces it
+    ROWOWSkillUnitData* ud = GetSkillUnitData(player);
+    ud->QueuedSkillSpellID = spellID;
+    ud->QueuedSkillTargetGUID = target != nullptr ? target->GetGUID() : ObjectGuid::Empty;
+    ud->IsQueuedSkillDestSet = dest != nullptr;
+    ud->QueuedSkillMapID = player->GetMapId();
+    if (dest != nullptr)
+        ud->QueuedSkillDest.Relocate(dest->GetPositionX(), dest->GetPositionY(), dest->GetPositionZ());
+    ud->QueuedSkillTime = GetTick();
+}
+
+void ROWOWMod::UpdateQueuedSkill(Player* player)
+{
+    ROWOWSkillUnitData* ud = player->CustomData.Get<ROWOWSkillUnitData>("ROWOWSkillUnitData");
+    if (ud == nullptr || ud->QueuedSkillSpellID == 0)
+        return;
+    uint64 tick = GetTick();
+    bool isTooLate = tick > ud->QueuedSkillTime + ROWOW_SKILL_QUEUE_MAX_WAIT + 500;
+    if (tick < ud->CanActTime && isTooLate == false)
+        return;
+    uint32 spellID = ud->QueuedSkillSpellID;
+    ud->QueuedSkillSpellID = 0;
+    // The request lapses (quietly: it was the player's, and they moved on) when the player died, left the map, walked off, started another
+    // cast or its target is gone.  Waiting past the delay it was queued for, it fails as RO's would have
+    SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(spellID);
+    if (spellInfo == nullptr || player->IsAlive() == false || player->GetMapId() != ud->QueuedSkillMapID || player->isMoving() == true ||
+        player->IsNonMeleeSpellCast(false) == true || ud->SkillID != 0)
+        return;
+    if (isTooLate == true)
+    {
+        uint16 skillID = 0, skillLevel = 0;
+        if (GetSkillOfSpell(spellID, skillID, skillLevel) == true)
+            ClifSkillFail(player, skillID, ROWOW_USESKILL_FAIL_SKILLINTERVAL);
+        return;
+    }
+    SpellCastTargets targets;
+    if (ud->QueuedSkillTargetGUID.IsEmpty() == false)
+    {
+        Unit* target = ObjectAccessor::GetUnit(*player, ud->QueuedSkillTargetGUID);
+        if (target == nullptr || target->IsInWorld() == false || target->GetMap() != player->GetMap())
+            return;
+        targets.SetUnitTarget(target);
+    }
+    if (ud->IsQueuedSkillDestSet == true)
+        targets.SetDst(ud->QueuedSkillDest);
+    if (targets.GetUnitTarget() == nullptr && ud->IsQueuedSkillDestSet == false)
+        targets.SetUnitTarget(player);
+    ud->IsQueuedSkillCasting = true;
+    player->CastSpell(targets, spellInfo, nullptr, TRIGGERED_NONE);
+    ud->IsQueuedSkillCasting = false;
+}
+
+SpellCastResult ROWOWMod::UnitSkillUse(Unit* src, Unit* target, WorldLocation const* dest, uint16 skillID, uint16 skillLevel, bool* isQueueableOut)
 {
     // clif_parse_UseSkillToId and unit_skilluse_id2 (or unit_skilluse_pos2, target being the caster and dest the ground spot), up to the
     // cast time: whether the skill may start.  It has no side effects; UnitSkillCastTime starts it.  (The other jobs' checks of
@@ -820,6 +879,12 @@ SpellCastResult ROWOWMod::UnitSkillUse(Unit* src, Unit* target, WorldLocation co
         }
         else if (tick < ud->CanActTime && ud->SkillItemID != skillID && ud->EncoreSkillID != skillID)
         {
+            // RO's client holds a skill back itself until the delay ends; WoW's sends it, so a short delay (a normal attack's) has it wait
+            if (isQueueableOut != nullptr && ud->SkillID == 0 && ud->CanActTime - tick <= ROWOW_SKILL_QUEUE_MAX_WAIT)
+            {
+                *isQueueableOut = true;
+                return SPELL_FAILED_DONT_REPORT;
+            }
             ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_SKILLINTERVAL);
             return SPELL_FAILED_DONT_REPORT;
         }
@@ -3525,6 +3590,18 @@ int64 ROWOWMod::StatusHeal(Unit* bl, int64 hp, int64 sp, int32 flag, Unit* src, 
     }
     else
         sp = 0;
+    // pc_heal: flag&2 sends the player clif_heal's ZC_RECOVERY for what was healed (the regen skills' ticks, Kaahi, Soul Drain, ...), on which
+    // the RO client plays EF_HPTIME or EF_SPTIME (sparkles and a sound) on its own character, seen by that player alone
+    if ((flag & 2) != 0)
+    {
+        if (Player* sd = bl->ToPlayer())
+        {
+            if (hp > 0)
+                PlayScriptLookToPlayer(sd, ROWOW_SCRIPT_LOOK_EFFECT, "HPTIME");
+            if (sp > 0)
+                PlayScriptLookToPlayer(sd, ROWOW_SCRIPT_LOOK_EFFECT, "SPTIME");
+        }
+    }
     return hp + sp;
 }
 

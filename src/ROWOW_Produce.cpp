@@ -507,8 +507,9 @@ bool ROWOWMod::SkillProduceMix(Player* player, uint16 skillID, uint32 nameID, in
                 item->SetState(ITEM_CHANGED, player);
                 SendItemCardsToClient(player, *identity, true);
             }
-            // clif_produceeffect(0) and the refine success effect
+            // clif_produceeffect(0) and the refine success effect (clif_misceffect NOTIFYEFFECT_REFINE_SUCCESS)
             handler.PSendSysMessage("You have successfully forged {}.", itemName);
+            ClifMiscEffect(player, ROWOW_NOTIFYEFFECT_REFINE_SUCCESS);
             int32 wlv = roItem->IsWeapon == true ? roItem->WeaponLevel : 0;
             if (wlv >= 3 && ((ele != 0 ? 1 : 0) + sc) >= 3) // Fame point system [DracoRPG]
                 PCAddFame(player, BattleConfig.FameForge); // Success to forge a lv3 weapon with 3 additional ingredients = +10 fame point
@@ -579,14 +580,16 @@ bool ROWOWMod::SkillProduceMix(Player* player, uint16 skillID, uint32 nameID, in
                 case ROWOW_SKILL_AM_TWILIGHT2:
                 case ROWOW_SKILL_AM_TWILIGHT3:
                 case ROWOW_SKILL_ASC_CDP:
-                    // clif_produceeffect(2): the pharmacy success
+                    // clif_produceeffect(2): the pharmacy success, and clif_misceffect(NOTIFYEFFECT_PHARMACY_SUCCESS)
                     handler.PSendSysMessage(amount > 1 ? "You have successfully made {} x{}." : "You have successfully made {}.", itemName, amount);
+                    ClifMiscEffect(player, ROWOW_NOTIFYEFFECT_PHARMACY_SUCCESS);
                     break;
                 case ROWOW_SKILL_BS_IRON:
                 case ROWOW_SKILL_BS_STEEL:
                 case ROWOW_SKILL_BS_ENCHANTEDSTONE:
-                    // clif_produceeffect(0): the refine success
+                    // clif_produceeffect(0): the refine success, and clif_misceffect(NOTIFYEFFECT_REFINE_SUCCESS)
                     handler.PSendSysMessage("You have successfully made {}.", itemName);
+                    ClifMiscEffect(player, ROWOW_NOTIFYEFFECT_REFINE_SUCCESS);
                     break;
                 default: // Those that don't require a skill?
                     if (produce.ItemLevel > 10 && produce.ItemLevel <= 20)
@@ -611,14 +614,18 @@ bool ROWOWMod::SkillProduceMix(Player* player, uint16 skillID, uint32 nameID, in
         case ROWOW_SKILL_AM_TWILIGHT1:
         case ROWOW_SKILL_AM_TWILIGHT2:
         case ROWOW_SKILL_AM_TWILIGHT3:
-            // clif_produceeffect(3): the pharmacy failure
+            // clif_produceeffect(3): the pharmacy failure, and clif_misceffect(NOTIFYEFFECT_PHARMACY_FAILURE)
             handler.PSendSysMessage("You failed to make {}.", itemName);
+            ClifMiscEffect(player, ROWOW_NOTIFYEFFECT_PHARMACY_FAILURE);
             identity->PotionSuccessCounter = 0; // Fame point system [DracoRPG]
             break;
         default:
-            // clif_produceeffect(1): the refine failure (forging, smelting)
+            // clif_produceeffect(1): the refine failure (forging, smelting), and clif_misceffect(NOTIFYEFFECT_REFINE_FAILURE)
             if (isEquip == true || skillID == ROWOW_SKILL_BS_IRON || skillID == ROWOW_SKILL_BS_STEEL || skillID == ROWOW_SKILL_BS_ENCHANTEDSTONE)
+            {
                 handler.PSendSysMessage("You failed to make {}.", itemName);
+                ClifMiscEffect(player, ROWOW_NOTIFYEFFECT_REFINE_FAILURE);
+            }
             else if (produce.ItemLevel > 10 && produce.ItemLevel <= 20)
             {
                 // Cooking items.
@@ -887,6 +894,7 @@ void ROWOWMod::SkillWeaponRefine(Player* sd, ObjectGuid::LowType itemGUID)
         SetItemState(sd, item, refine + 1, IsItemBroken(item), IsItemIdentified(item));
         handler.PSendSysMessage("Upgrade success!! ({} is now +{})", itemName, refine + 1); // clif_upgrademessage(0), clif_refine success
         SendItemCardsToClient(sd, *identity, true);
+        ClifMiscEffect(sd, ROWOW_NOTIFYEFFECT_REFINE_SUCCESS); // clif_misceffect(NOTIFYEFFECT_REFINE_SUCCESS)
         if (refine + 1 == 10)
             PCFameRefine(sd, item);
     }
@@ -896,5 +904,7 @@ void ROWOWMod::SkillWeaponRefine(Player* sd, ObjectGuid::LowType itemGUID)
         count = 1;
         sd->DestroyItemCount(item, count, true);
         handler.PSendSysMessage("Upgrade failed!! {} was destroyed.", itemName); // clif_upgrademessage(1), clif_refine failure
+        ClifMiscEffect(sd, ROWOW_NOTIFYEFFECT_REFINE_FAILURE); // clif_misceffect(NOTIFYEFFECT_REFINE_FAILURE)
+        ClifEmotion(sd, 23); // clif_emotion(ET_HUK)
     }
 }

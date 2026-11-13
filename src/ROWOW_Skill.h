@@ -19,6 +19,7 @@
 
 #include "Define.h"
 #include "ObjectGuid.h"
+#include "Position.h"
 
 #include "DataMap.h"
 #include "ROWOW_SkillIDs.h"
@@ -256,6 +257,7 @@ enum ROWOWRequireState : uint8
 #define ROWOW_SKILL_VAR_PLAGIARISM_LV               "CLONE_SKILL_LV"
 
 #define ROWOW_SECURITY_CASTTIME                     100     // SECURITY_CASTTIME: kept on canact_tick between cast begin and cast end
+#define ROWOW_SKILL_QUEUE_MAX_WAIT                  1500    // A player's skill request waits for an after-cast delay this short (ms) instead of failing
 #define ROWOW_SKILL_NOCONSUME_REQ                   0x10000000 // SKILL_NOCONSUME_REQ: the castend already used up the requirements
 #define ROWOW_MAX_HEAL_SKILL_LEVEL_DEFAULT          11      // battle_config.max_heal_lv's default
 
@@ -382,6 +384,15 @@ struct ROWOWSkillUnitData : public DataMap::Base
     int32 PotionSP = 0;
     std::vector<ObjectGuid> SummonGUIDs; // The monsters it summoned that answer to it (master_id): an Alchemist's plants and Marine Spheres
     bool IsRunning = false; // state.running: a Taekwon's Sprint is moving it (unit_run)
+    // A player's skill asked for during a short after-cast delay (a normal attack's act delay, mostly), cast for it once the delay ends.  RO's
+    // client never sends a skill then, but WoW's client does whenever the button is pressed, so the request waits instead of failing
+    uint32 QueuedSkillSpellID = 0; // The skill level's spell, 0 when none waits
+    ObjectGuid QueuedSkillTargetGUID; // The unit it was asked for at (none for a ground or self skill)
+    bool IsQueuedSkillDestSet = false; // A ground skill's spot
+    uint32 QueuedSkillMapID = 0;
+    Position QueuedSkillDest;
+    uint64 QueuedSkillTime = 0; // When it was asked for
+    bool IsQueuedSkillCasting = false; // The queued skill is being cast now: it fails as any other request would, not queued again
 };
 
 // The Star Gladiator's places and hatreds, and the Taekwon's mission (pc.hpp): kept in character variables, as rAthena's

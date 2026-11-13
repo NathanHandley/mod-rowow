@@ -1708,6 +1708,7 @@ bool ROWOWMod::IsAttackCritical(ROWOWDamage& wd, Unit* src, Unit const* target, 
             // A normal attack under the Auto Counter status is Auto Counter's
             if (sc == nullptr || sc->HasSCE(ROWOW_SC_AUTOCOUNTER) == false)
                 break;
+            PlayScriptLook(src, ROWOW_SCRIPT_LOOK_EFFECT, "AUTOCOUNTER"); // clif_specialeffect(src, EF_AUTOCOUNTER, AREA)
             StatusChangeEnd(src, ROWOW_SC_AUTOCOUNTER);
             [[fallthrough]];
         case ROWOW_SKILL_KN_AUTOCOUNTER:
@@ -2968,8 +2969,12 @@ bool ROWOWMod::BattleStatusBlockDamage(Unit* src, Unit* target, ROWOWStatusChang
         Player* tsd = target->ToPlayer();
         if (tsd != nullptr && tsd->IsSitState() == true)
             tsd->SetStandState(UNIT_STAND_STATE_STAND);
-        // A devoted player's guard is its Crusader's (rAthena shows it on the Crusader): no Shrink then
-        if (GetDevotionSource(target, true) == nullptr && sc->HasSCE(ROWOW_SC_SHRINK) == true && int32(urand(0, 99)) < 5 * sce->Val1)
+        // A devoted player's guard is its Crusader's (rAthena shows it on the Crusader): no Shrink then.  The guard's look:
+        // clif_skill_nodamage(CR_AUTOGUARD) on the Crusader, else on the target
+        Unit* devotionSource = GetDevotionSource(target, true);
+        ClifSkillNoDamage(devotionSource != nullptr ? devotionSource : target, devotionSource != nullptr ? devotionSource : target, ROWOW_SKILL_CR_AUTOGUARD,
+            uint16(sce->Val1));
+        if (devotionSource == nullptr && sc->HasSCE(ROWOW_SC_SHRINK) == true && int32(urand(0, 99)) < 5 * sce->Val1)
         {
             ROWOWSkill const* shrink = GetSkill(ROWOW_SKILL_CR_SHRINK);
             SkillBlown(target, src, shrink != nullptr ? shrink->Knockback[0] : 0, -1, 0);
@@ -2986,6 +2991,7 @@ bool ROWOWMod::BattleStatusBlockDamage(Unit* src, Unit* target, ROWOWStatusChang
     if (ROWOWStatusChangeEntry const* sce = sc->GetSCE(ROWOW_SC_PARRYING); sce != nullptr && (flag & ROWOW_BF_WEAPON) != 0 &&
         skillID != ROWOW_SKILL_WS_CARTTERMINATION && int32(urand(0, 99)) < sce->Val2)
     {
+        ClifSkillNoDamage(target, target, ROWOW_SKILL_LK_PARRYING, uint16(sce->Val1)); // clif_skill_nodamage(LK_PARRYING): the parry's look
         // unit_set_attackdelay(DELAY_EVENT_PARRY): a player's next swing and skill wait as after its own attack
         if (Player* tsd = target->ToPlayer())
         {
@@ -3056,6 +3062,7 @@ void ROWOWMod::BattleCalcWeaponFinalAtkModifiers(ROWOWDamage& wd, Unit* src, Uni
             sstatus->RightWeaponType == ROWOW_WEAPON_TYPE_1HSWORD || sstatus->WeaponType == ROWOW_WEAPON_TYPE_2HSWORD) && int32(urand(0, 99)) < sce->Val2)
         {
             wd.Damage = wd.Damage * 50 / 100;
+            ClifSkillNoDamage(target, target, ROWOW_SKILL_ST_REJECTSWORD, uint16(sce->Val1)); // clif_skill_nodamage(ST_REJECTSWORD): the reflect's look
             BattleDamage(target, src, wd.Damage, wd.Div, uint16(sce->Val1), ROWOW_SKILL_ST_REJECTSWORD, ROWOW_ATK_DEF, 0, false, tick, false);
             if (target->IsAlive() == false)
                 return;

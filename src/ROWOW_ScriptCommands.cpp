@@ -1999,6 +1999,7 @@ void ROWOWMod::RegisterNpcScriptCommands()
             return ROWOWScriptValue::FromNumber(0);
         SetItemState(player, item, GetItemRefine(item), false, IsItemIdentified(item));
         ChatHandler(player->GetSession()).PSendSysMessage("{} has been repaired.", item->GetTemplate()->Name1);
+        ClifMiscEffect(player, ROWOW_NOTIFYEFFECT_REFINE_SUCCESS); // clif_misceffect(NOTIFYEFFECT_REFINE_SUCCESS)
         return ROWOWScriptValue::FromNumber(0);
     });
     engine->RegisterCommand("repairall", [this, getBrokenItem, getCharIDPlayer](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
@@ -2007,11 +2008,15 @@ void ROWOWMod::RegisterNpcScriptCommands()
         Player* player = getCharIDPlayer(context, arguments, 0, "repairall");
         if (player == nullptr)
             return ROWOWScriptValue::FromNumber(0);
+        bool isRepaired = false;
         while (Item* item = getBrokenItem(player, 1))
         {
             SetItemState(player, item, GetItemRefine(item), false, IsItemIdentified(item));
             ChatHandler(player->GetSession()).PSendSysMessage("{} has been repaired.", item->GetTemplate()->Name1);
+            isRepaired = true;
         }
+        if (isRepaired == true)
+            ClifMiscEffect(player, ROWOW_NOTIFYEFFECT_REFINE_SUCCESS); // clif_misceffect(NOTIFYEFFECT_REFINE_SUCCESS), once for them all
         return ROWOWScriptValue::FromNumber(0);
     });
     engine->RegisterCommand("preg_match", [](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const& arguments)

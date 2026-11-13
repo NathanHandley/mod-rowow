@@ -343,6 +343,12 @@ struct ROWOWDataTable
 #define ROWOW_DATA_TABLE_SKILL_TREE                 "mod_rowow_db_skill_tree"
 #define ROWOW_DATA_TABLE_STATUS                     "mod_rowow_db_status"
 
+// clif_misceffect's types (e_notify_effect, ZC_NOTIFY_EFFECT): what the RO client plays on the unit
+#define ROWOW_NOTIFYEFFECT_REFINE_FAILURE           2   // EF_REFINEFAIL
+#define ROWOW_NOTIFYEFFECT_REFINE_SUCCESS           3   // EF_REFINEOK
+#define ROWOW_NOTIFYEFFECT_PHARMACY_SUCCESS         5   // EF_PHARMACY_OK
+#define ROWOW_NOTIFYEFFECT_PHARMACY_FAILURE         6   // EF_PHARMACY_FAIL
+
 // The fixed RO spells (200000-200099, the converter's RO_SPELL_ID_* values)
 #define ROWOW_SPELL_WORLD_TRAVEL                    200000  // Every character's 8 second cast into the RO world and back
 #define ROWOW_SPELL_BASE_LEVEL_UP                   200001  // RO's base level up effect (the angel and levelup.wav)
@@ -2520,8 +2526,10 @@ public:
     // emotion over its head, RO's effect or RO's sound (mod_rowow_script_look).  False when the converter made none for it
     static std::string GetScriptLookKey(uint8 kind, std::string const& name) { return fmt::format("{}:{}", kind, name); }
     bool PlayScriptLook(Unit* unit, uint8 kind, std::string const& name);
+    bool PlayScriptLookToPlayer(Player* player, uint8 kind, std::string const& name); // On the player, seen and heard by that player only (RO's self-only packets)
     bool PlayScriptSoundToPlayer(Player* player, std::string const& fileName); // The sound heard by that player only, wherever it is (soundeffectall on a map)
     bool ClifEmotion(Unit* unit, int32 type); // clif_emotion
+    bool ClifMiscEffect(Unit* unit, int32 type); // clif_misceffect (ROWOW_NOTIFYEFFECT_*): the refine and pharmacy results' effects (level ups are CastLevelUpEffect's)
 
     // A table of rAthena data (ROWOW_DATA_TABLE_*), or null when the converter hasn't written it
     ROWOWDataTable const* GetDataTable(std::string const& tableName) const;
@@ -3131,7 +3139,10 @@ public:
 
     // The cast as ROWOW_SkillSpellScript drives it: unit_skilluse_id2/unit_skilluse_pos2 when it starts (the cast time comes from the core's
     // cast time hook), then skill_castend_id/skill_castend_pos when it ends.  Damage taken stops it (unit_skillcastcancel)
-    SpellCastResult UnitSkillUse(Unit* src, Unit* target, WorldLocation const* dest, uint16 skillID, uint16 skillLevel);
+    // isQueueableOut, when given (a player's own request), is set instead of failing when only a short after-cast delay holds the skill back
+    SpellCastResult UnitSkillUse(Unit* src, Unit* target, WorldLocation const* dest, uint16 skillID, uint16 skillLevel, bool* isQueueableOut = nullptr);
+    void QueueSkill(Player* player, uint32 spellID, Unit* target, WorldLocation const* dest); // Hold a request until the after-cast delay ends
+    void UpdateQueuedSkill(Player* player); // Cast the held request once the after-cast delay is over (each player update)
     Unit* UnitSkillTarget(Unit* src, Unit* target, Unit* pickedTarget, uint16 skillID); // unit_skilluse_id2's target: a combo's (auto-target), Blade Stop's
     int32 UnitSkillCastTimeFix(Unit* src, Unit* target, uint16 skillID, uint16 skillLevel, int32 casttime); // unit_skilluse_id2's cast time switch (-1: instant)
     int32 UnitSkillCastTime(Unit* src, Unit* target, uint16 skillID, uint16 skillLevel); // The cast time, and the delays set at cast begin

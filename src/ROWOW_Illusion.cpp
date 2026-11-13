@@ -17,11 +17,15 @@
 
 #include "Chat.h"
 #include "DatabaseEnv.h"
+#include "GameTime.h"
 #include "Item.h"
 #include "Log.h"
+#include "Opcodes.h"
 #include "Player.h"
 #include "QueryResult.h"
+#include "Spell.h"
 #include "SpellAuraEffects.h"
+#include "WorldPacket.h"
 
 #include "ROWOW.h"
 
@@ -666,6 +670,30 @@ bool ROWOWMod::PlayScriptLook(Unit* unit, uint8 kind, std::string const& name)
     return true;
 }
 
+bool ROWOWMod::PlayScriptLookToPlayer(Player* player, uint8 kind, std::string const& name)
+{
+    // The look for that player alone (a packet RO sends only to its own client, as clif_heal's ZC_RECOVERY): the SMSG_SPELL_GO the look's cast
+    // sends (PlayScriptLook: triggered, no cast time, no target but itself), sent to the player only, with no cast on the server
+    if (player == nullptr || player->IsInWorld() == false)
+        return false;
+    auto spellIter = ScriptLookSpellIDsByKey.find(GetScriptLookKey(kind, name));
+    if (spellIter == ScriptLookSpellIDsByKey.end())
+        return false;
+    WorldPacket data(SMSG_SPELL_GO, 40);
+    data << player->GetPackGUID(); // Caster (no item)
+    data << player->GetPackGUID();
+    data << uint8(0); // Cast count
+    data << uint32(spellIter->second);
+    data << uint32(CAST_FLAG_PENDING | CAST_FLAG_UNKNOWN_9 | CAST_FLAG_NO_GCD);
+    data << uint32(GameTime::GetGameTimeMS().count());
+    data << uint8(1); // Hit: the player
+    data << player->GetGUID();
+    data << uint8(0); // Missed: none
+    data << uint32(TARGET_FLAG_NONE); // Self
+    player->SendDirectMessage(&data);
+    return true;
+}
+
 bool ROWOWMod::PlayScriptSoundToPlayer(Player* player, std::string const& fileName)
 {
     // The sound itself (not its spell), sent to the player alone, so a map-wide soundeffectall is heard once by each player wherever it is
@@ -684,6 +712,21 @@ bool ROWOWMod::ClifEmotion(Unit* unit, int32 type)
     if (type < 0)
         return false;
     return PlayScriptLook(unit, ROWOW_SCRIPT_LOOK_EMOTION, std::to_string(type));
+}
+
+bool ROWOWMod::ClifMiscEffect(Unit* unit, int32 type)
+{
+    // clif_misceffect: ZC_NOTIFY_EFFECT to the area, on which the RO client plays the type's effect on the unit (the STR and its sound)
+    char const* effectName = nullptr;
+    switch (type)
+    {
+        case ROWOW_NOTIFYEFFECT_REFINE_FAILURE: effectName = "REFINEFAIL"; break;
+        case ROWOW_NOTIFYEFFECT_REFINE_SUCCESS: effectName = "REFINEOK"; break;
+        case ROWOW_NOTIFYEFFECT_PHARMACY_SUCCESS: effectName = "PHARMACY_OK"; break;
+        case ROWOW_NOTIFYEFFECT_PHARMACY_FAILURE: effectName = "PHARMACY_FAIL"; break;
+        default: return false;
+    }
+    return PlayScriptLook(unit, ROWOW_SCRIPT_LOOK_EFFECT, effectName);
 }
 
 bool ROWOWMod::SetIdentityHair(Player* player, uint32 style, uint32 color)

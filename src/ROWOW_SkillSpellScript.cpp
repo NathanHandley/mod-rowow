@@ -79,13 +79,24 @@ class ROWOW_SkillSpellScript : public SpellScript
         if (caster->IsPlayer() == true && caster->IsSitState() == true && GetSpell()->IsTriggered() == false && GetSpell()->m_CastItem == nullptr)
             return SPELL_FAILED_NOT_STANDING;
         // Nor in an outfit (clif_parse_UseSkillToId and _ToPos: if( sd->sc.option&OPTION_COSTUME ) return;): the Wedding, Xmas and Summer statuses
-        if (caster->IsPlayer() == true && GetSpell()->IsTriggered() == false && GetSpell()->m_CastItem == nullptr)
+        bool isPlayerRequest = caster->IsPlayer() == true && GetSpell()->IsTriggered() == false && GetSpell()->m_CastItem == nullptr;
+        if (isPlayerRequest == true)
         {
             ROWOWStatusChange const* sc = ROWOW->GetStatusChange(static_cast<Unit const*>(caster));
             if (sc != nullptr && (sc->Option & ROWOW_OPTION_COSTUME) != 0)
                 return SPELL_FAILED_DONT_REPORT;
         }
-        return ROWOW->UnitSkillUse(caster, target, GetExplTargetDest(), skillID, skillLevel);
+        // A player's newer request replaces one waiting for the after-cast delay, and one asked for during a short delay (a normal attack's)
+        // waits for it to end (ROWOWMod::UpdateQueuedSkill casts it then).  The queued cast itself fails as any other would
+        ROWOWSkillUnitData* ud = isPlayerRequest == true ? caster->CustomData.Get<ROWOWSkillUnitData>("ROWOWSkillUnitData") : nullptr;
+        bool canQueue = ud != nullptr && ud->IsQueuedSkillCasting == false;
+        if (canQueue == true)
+            ud->QueuedSkillSpellID = 0;
+        bool isQueueable = false;
+        SpellCastResult result = ROWOW->UnitSkillUse(caster, target, GetExplTargetDest(), skillID, skillLevel, canQueue == true ? &isQueueable : nullptr);
+        if (isQueueable == true)
+            ROWOW->QueueSkill(caster->ToPlayer(), GetSpellInfo()->Id, GetExplTargetUnit(), GetExplTargetDest());
+        return result;
     }
 
     void HandleSkillCast()

@@ -37,6 +37,9 @@ public:
         // Unequipping, hiding the helm and the core putting the transform's own display back (after a shapeshift, for one) have no
         // hooks, so the display is checked each update.  It's cheap: nothing happens unless an RO illusion is the transform
         ROWOW->RefreshIllusionDisplay(player);
+        // A skill asked for during a normal attack's after-cast delay starts once it ends
+        if (ROWOW->IsEnabled == true)
+            ROWOW->UpdateQueuedSkill(player);
     }
 };
 
