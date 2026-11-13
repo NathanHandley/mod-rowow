@@ -2147,6 +2147,20 @@ void ROWOWMod::RegisterNpcScriptCommands()
             PCResetSkill(player);
         return ROWOWScriptValue::FromNumber(0);
     });
+    engine->RegisterCommand("resetstatus", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const&)
+    {
+        // resetstatus{ <char id>}: pc_resetstate, every stat 1 and the base level's status points back (the Hypnotist's, Nathan 2026-11-13)
+        if (Player* player = GetAttachedPlayer(context, "resetstatus"))
+        {
+            ROWOWIdentity* identity = GetIdentity(player);
+            if (identity->Exists == true)
+            {
+                PCResetState(*identity);
+                RefreshROForm(player);
+            }
+        }
+        return ROWOWScriptValue::FromNumber(0);
+    });
     engine->RegisterCommand("resetlvl", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
     {
         // resetlvl <action type>{,<char id>}: pc_resetlvl (the Valkyrie's rebirth is type 1, after the change to High Novice)

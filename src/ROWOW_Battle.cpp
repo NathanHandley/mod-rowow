@@ -506,7 +506,9 @@ bool ROWOWMod::CalculateMeleeDamage(Unit* attacker, Unit* victim, CalcDamageInfo
         {
             damageInfo->damages[0].damage = uint32(std::clamp<int64>(wd.Damage + wd.Damage2, 0, std::numeric_limits<uint32>::max()));
             damageInfo->TargetState = VICTIMSTATE_HIT;
-            damageInfo->HitInfo |= HITINFO_AFFECTS_VICTIM;
+            // The victim's hurt pose (the client's wound animation, RO's damage action): none when it endures, as RO's DMG_ENDURE hit shows none
+            if (StatusIsEndure(victim) == false)
+                damageInfo->HitInfo |= HITINFO_AFFECTS_VICTIM;
             if (IsAttackCritical(wd, attacker, victim, 0, 0, false) == true)
             {
                 damageInfo->hitOutCome = MELEE_HIT_CRIT;

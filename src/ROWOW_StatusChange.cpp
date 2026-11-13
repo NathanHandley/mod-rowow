@@ -3070,10 +3070,10 @@ void ROWOWMod::UpdateStatusChanges(Unit* unit)
     uint64 tick = GetTick();
     if (sc->LastEffect != -1 && sc->LastEffectTime <= tick)
         sc->LastEffect = -1;
-    // A hit's flinch ends (MergedWorlds ro-flinch)
-    if (sc->FlinchEndTime != 0 && sc->FlinchEndTime <= tick)
+    // A hit's flinch ends (MergedWorlds ro-flinch).  Its end time stays, for the immunity after it (PCDamageFlinch)
+    if (sc->IsFlinching == true && sc->FlinchEndTime <= tick)
     {
-        sc->FlinchEndTime = 0;
+        sc->IsFlinching = false;
         UpdateStatusChangeOptions(unit, *sc);
     }
     if (sc->IsEmpty() == true)

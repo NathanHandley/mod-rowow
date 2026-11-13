@@ -944,23 +944,21 @@ int64 ROWOWMod::BattleCalcWalkDelay(Unit const* bl, int64 damage, int16 div) con
 
 void ROWOWMod::PCDamageFlinch(Unit* target, int64 damage, int16 div, uint64 tick)
 {
-    // MergedWorlds ro-flinch (Nathan 2026-11-13): status_damage's walk delay for a player.  RO's client freezes its character for its damage
-    // motion (player_damage_delay_rate of it, and the multi-hit delay for a skill of many hits) when the damage packet comes, unless it
-    // endures (the packet's DMG_ENDURE: status_isendure, so Endure, Concentration, Berserk, bNoWalkDelay, running).  Here the server roots the
-    // WoW player for that long, a new hit holding it on; the server's own stop (pc_damage_walk_delay_rate, a fifth of it) is within it
+    // MergedWorlds ro-flinch (Nathan 2026-11-13): status_damage's unit_set_walkdelay for a player, unless it endures (the packet's DMG_ENDURE:
+    // status_isendure, so Endure, Concentration, Berserk, bNoWalkDelay, running).  Officially a hit only stops a walking player on its next cell
+    // center (damage_walk_delay off), and it walks on when the client asks again; the client's player can't be stopped on a cell, so it's held
+    // for the walk delay instead, battle_calc_walkdelay's pc_damage_walk_delay_rate (a fifth) of its damage motion and the multi-hit delay.
+    // And as unit_set_walkdelay, it's immune to being stopped again for as long once it can move, so a Hydra's 800 ms shots slow a walk past it
+    // to stages rather than hold it (the whole damage motion, 796 ms at 1 AGI, held it in place).  The hurt pose is the client's, from the swing
+    int64 delay = 0;
     Player* sd = target != nullptr ? target->ToPlayer() : nullptr;
-    if (sd == nullptr || sd->IsAlive() == false || damage < 1 || div == 0 || StatusIsEndure(sd) == true)
-        return;
-    ROWOWStatus const* status = GetROStatus(sd);
-    if (status == nullptr)
-        return;
-    int64 delay = status->DamageMotion; // (player_damage_delay_rate is in it already)
-    if (div > 1)
-        delay += BattleConfig.MultihitDelay * ((div > 10 ? 2 : div) - 1);
-    if (delay <= 0)
+    if (sd == nullptr || sd->IsAlive() == false || StatusIsEndure(sd) == true || (delay = BattleCalcWalkDelay(sd, damage, div)) <= 0)
         return;
     ROWOWStatusChange* sc = sd->CustomData.GetDefault<ROWOWStatusChange>("ROWOWStatusChange");
-    sc->FlinchEndTime = std::max<uint64>(sc->FlinchEndTime, tick + uint64(delay));
+    if (int64(sc->FlinchEndTime) - (int64(tick) - delay) > 0)
+        return; // Immune to being stopped for double the flinch time
+    sc->FlinchEndTime = tick + uint64(delay);
+    sc->IsFlinching = true;
     UpdateStatusChangeOptions(sd, *sc);
 }
 
