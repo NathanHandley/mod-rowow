@@ -546,10 +546,14 @@ public:
             money = uint32(ROWOW->PCModifySellValue(player, int32(money)));
     }
 
-    bool OnPlayerCanBuybackItem(Player* /*player*/, Item* item) override
+    bool OnPlayerCanBuybackItem(Player* player, Item* item) override
     {
-        // RO has no buyback: in the form the packet is refused, and out of it an RO item sold for zeny would come back for gold, which never crosses
-        return ROWOW->IsEnabled == false || ROWOW->IsROItemTemplate(item->GetEntry()) == false;
+        // An item comes back for the money it sold for, which never crosses between zeny and the character's money: an RO item (only an RO shop buys
+        // one, and only in the form) only in the form, for zeny, and the character's own things only out of it (Nathan 2026-11-13: RO buyback, which
+        // RO itself has none of).  What the form sold is dropped when it ends (LeaveROForm), so another identity's zeny can't buy it back either
+        if (ROWOW->IsEnabled == false)
+            return true;
+        return ROWOW->IsROItemTemplate(item->GetEntry()) == ROWOW->IsInROForm(player);
     }
 
     bool OnPlayerBeforeTeleport(Player* player, uint32 mapid, float x, float y, float z, float orientation, uint32 /*options*/, Unit* /*target*/) override
@@ -890,7 +894,6 @@ public:
                 player->PlayerTalkClass->SendCloseGossip();
                 return false;
             }
-            case CMSG_BUYBACK_ITEM: // RO shops have no buyback
             // Money that would cross between zeny and the character's money, or pay for the character's things with zeny (plan section 8 item 13)
             case CMSG_SEND_MAIL:
             case CMSG_MAIL_TAKE_MONEY:

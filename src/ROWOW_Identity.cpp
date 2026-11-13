@@ -2992,6 +2992,14 @@ void ROWOWMod::LeaveROForm(Player* player)
     PartyRemoveMember(player);
     ForgetNpcTouches(player); // The OnTouch_ NPC it stands on is free for the next player
     identity->Zeny = player->GetMoney();
+    // What RO shops bought for zeny comes back only in the form (OnPlayerCanBuybackItem): it goes now, so the next identity in the form can't buy
+    // it back with its own zeny.  The character's own sales stay
+    for (uint32 slot = BUYBACK_SLOT_START; slot < BUYBACK_SLOT_END; slot++)
+    {
+        Item* soldItem = player->GetItemFromBuyBackSlot(slot);
+        if (soldItem != nullptr && IsROItemTemplate(soldItem->GetEntry()) == true)
+            player->RemoveItemFromBuyBackSlot(slot, true);
+    }
     if (player->IsAlive() == true)
     {
         identity->HP = player->GetHealth();
