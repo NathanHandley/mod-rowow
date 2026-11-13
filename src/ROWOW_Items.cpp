@@ -1471,12 +1471,39 @@ void ROWOWMod::PlayTeleportLooks(Player* player)
     if (player == nullptr || player->IsInWorld() == false || IsInROForm(player) == false)
         return;
     GetIdentity(player)->IsTeleportEntryLookPending = true;
+    LeaveTeleportVanishLook(player);
+}
+
+void ROWOWMod::PlayUnitTeleportLooks(Unit* unit)
+{
+    // unit_warp(..., CLR_TELEPORT) for any unit: a player as PlayTeleportLooks; a monster, homunculus or mercenary (Creamy's Teleport, a follower
+    // jumping back to its master) leaves EF_TELEPORTATION2 and its sound where it vanishes, by the same unseen trigger (Nathan 2026-11-12: only the
+    // landing side showed, the skill's own look, which goes with the unit)
+    if (unit == nullptr || unit->IsInWorld() == false)
+        return;
+    if (Player* player = unit->ToPlayer())
+    {
+        PlayTeleportLooks(player);
+        return;
+    }
+    if (IsROMap(unit->GetMapId()) == true)
+        LeaveTeleportVanishLook(unit);
+}
+
+void ROWOWMod::LeaveTeleportVanishLook(Unit* unit)
+{
+    // EF_TELEPORTATION2 at the spot a unit vanishes from, by an unseen trigger left there (the unit itself is gone at once), cast a moment after it's
+    // there so the clients around know it first.  The trigger is given the invisible model outright (the core picks it for a trigger too, but the
+    // World Trigger template's other model is a plain human, CreatureDisplayInfo 17519).  A GM sees the invisible model as a figure with its name;
+    // players see only the effect
     if (ScriptLookSpellIDsByKey.find(GetScriptLookKey(ROWOW_SCRIPT_LOOK_EFFECT, "TELEPORTATION2")) == ScriptLookSpellIDsByKey.end())
         return;
-    Creature* trigger = player->SummonTrigger(player->GetPositionX(), player->GetPositionY(), player->GetPositionZ(), player->GetOrientation(),
+    Creature* trigger = unit->SummonTrigger(unit->GetPositionX(), unit->GetPositionY(), unit->GetPositionZ(), unit->GetOrientation(),
         ROWOW_TELEPORT_LOOK_TRIGGER_DURATION_IN_MS);
     if (trigger == nullptr)
         return;
+    trigger->SetDisplayId(CreatureModel::DefaultInvisibleModel.CreatureDisplayID);
+    trigger->SetNativeDisplayId(CreatureModel::DefaultInvisibleModel.CreatureDisplayID);
     trigger->m_Events.AddEventAtOffset([trigger]()
     {
         ROWOW->PlayScriptLook(trigger, ROWOW_SCRIPT_LOOK_EFFECT, "TELEPORTATION2");

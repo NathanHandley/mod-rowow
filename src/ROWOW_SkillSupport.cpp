@@ -1617,6 +1617,7 @@ bool ROWOWMod::UnitWarpRandom(Unit* bl, Position& destOut)
     if (mapKey != bl->GetMapId() && bl->IsPlayer() == true && IsInROForm(bl->ToPlayer()) == true)
         GetIdentity(bl->ToPlayer())->IsArrivalFloorCheckPending = true; // A part's spot is a cell's ground (GetCellPosition), as a warp's
     UnitRemoveMap(bl);
+    PlayUnitTeleportLooks(bl); // CLR_TELEPORT: the vanish where it was
     bl->NearTeleportTo(destOut.GetPositionX(), destOut.GetPositionY(), destOut.GetPositionZ(), bl->GetOrientation());
     return true;
 }
@@ -1652,6 +1653,7 @@ bool ROWOWMod::UnitWarpNear(Unit* bl, Position const& center)
         break;
     }
     UnitRemoveMap(bl);
+    PlayUnitTeleportLooks(bl); // CLR_TELEPORT: the vanish where it was
     bl->NearTeleportTo(x, y, z, bl->GetOrientation());
     return true;
 }

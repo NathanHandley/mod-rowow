@@ -2839,6 +2839,8 @@ public:
     // the converter's look (ROWOW_SCRIPT_LOOK_EFFECT): called just before the move, it leaves the first on the spot and has the player's update play the
     // second once it's landed
     void PlayTeleportLooks(Player* player);
+    void PlayUnitTeleportLooks(Unit* unit); // unit_warp's CLR_TELEPORT for any unit (a monster's vanish effect at the spot it leaves)
+    void LeaveTeleportVanishLook(Unit* unit); // EF_TELEPORTATION2 at the unit's spot, by an unseen trigger left there
     void UpdateTeleportEntryLook(Player* player);
 
     // Safe Step (MergedWorlds' own skill, Nathan 2026-11-12; ROWOW_SKILL_MW_SAFESTEP): every RO character knows it (PCCalcSkillTree), and its cast moves
