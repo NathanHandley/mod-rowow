@@ -652,7 +652,7 @@ namespace
             {
                 // If target enemy player has Magic Rod, then 20% of your SP is transferred to that player
                 int64 sp = ROWOW->StatusPercentChange(target, src, 0, -20, 2);
-                ROWOW->StatusHeal(target, 0, sp, 2, target, 0);
+                ROWOW->StatusHeal(target, 0, sp, 2, target, ROWOW->GetSkillSpellID(ROWOW_SKILL_SA_MAGICROD, uint16(ROWOW->GetSCE(target, ROWOW_SC_MAGICROD)->Val1)));
                 return;
             }
             ROWOWSkillUnitData const* ud = target->CustomData.Get<ROWOWSkillUnitData>("ROWOWSkillUnitData");
@@ -676,7 +676,7 @@ namespace
             ROWOW->UnitSkillCastCancel(target, 0);
             ROWOW->StatusZap(target, 0, uint32(sp));
             // Recover some of the SP used
-            ROWOW->StatusHeal(src, 0, sp * (25 * (skillLevel - 1)) / 100, 2, src, 0);
+            ROWOW->StatusHeal(src, 0, sp * (25 * (skillLevel - 1)) / 100, 2, src, ROWOW->GetSkillSpellID(SkillID, skillLevel));
             // If damage would be lethal, it does not deal damage
             if (hp != 0 && uint32(hp) < target->GetHealth())
             {
@@ -1122,7 +1122,7 @@ namespace
                     ROWOW->ClifSkillFail(sd, SkillID, ROWOW_USESKILL_FAIL_LEVEL);
                 return;
             }
-            ROWOW->StatusHeal(target, 0, sp, 2, src, 0);
+            ROWOW->StatusHeal(target, 0, sp, 2, src, ROWOW->GetSkillSpellID(SkillID, skillLevel));
         }
     };
 
@@ -1132,7 +1132,7 @@ namespace
     public:
         ROWOWSkillSoulExhale() : ROWOWSkillImpl(ROWOW_SKILL_PF_SOULCHANGE) { }
 
-        void CastendNoDamageID(Unit* src, Unit* target, uint16 /*skillLevel*/, uint64 /*tick*/, int32& /*flag*/) const override
+        void CastendNoDamageID(Unit* src, Unit* target, uint16 skillLevel, uint64 /*tick*/, int32& /*flag*/) const override
         {
             if (Creature* dstmd = target->ToCreature())
             {
@@ -1144,7 +1144,7 @@ namespace
                     return;
                 }
                 soulChangeState->IsSoulChangeFlag = true;
-                ROWOW->StatusHeal(src, 0, src->GetMaxPower(POWER_MANA) * 3 / 100, 2, src, 0);
+                ROWOW->StatusHeal(src, 0, src->GetMaxPower(POWER_MANA) * 3 / 100, 2, src, ROWOW->GetSkillSpellID(SkillID, skillLevel));
                 return;
             }
             uint32 sp1 = src->GetPower(POWER_MANA);

@@ -223,7 +223,7 @@ void ROWOWMod::LoadStatusData()
         readValue("over_def_bonus", BattleConfig.OverDefBonus);
         readValue("weapon_defense_type", BattleConfig.WeaponDefenseType);
         readValue("magic_defense_type", BattleConfig.MagicDefenseType);
-        readValue("pc_damage_delay_rate", BattleConfig.PCDamageDelayRate);
+        readValue("player_damage_delay_rate", BattleConfig.PCDamageDelayRate); // (rAthena's key: it was read as pc_damage_delay_rate, which no conf has)
         readValue("natural_healhp_interval", BattleConfig.NaturalHealHPInterval);
         readValue("natural_healsp_interval", BattleConfig.NaturalHealSPInterval);
         readValue("enable_baseatk", BattleConfig.EnableBaseAtk);
@@ -861,6 +861,10 @@ void ROWOWMod::CalculateIdentityStatus(Player* player, ROWOWIdentity& identity) 
         status.Def2 += BattleConfig.OverDefBonus * (status.Def - BattleConfig.MaxDef);
         status.Def = BattleConfig.MaxDef;
     }
+
+    // bNoWalkDelay (Eddga Card): endure, which also gives Endure's +1 MDEF (special_state.no_walk_delay's base_status->mdef++)
+    if (std::any_of(bonus.Deferred.begin(), bonus.Deferred.end(), [](ROWOWDeferredBonus const& deferred) { return StringEqualI(deferred.Type, "bNoWalkDelay"); }))
+        status.MDef++;
 
     // ----- EQUIPMENT-MDEF CALCULATION -----
     if (bonus.MdefRate < 0)
@@ -1641,23 +1645,34 @@ void ROWOWMod::UpdateNaturalRegen(Player* player, uint32 diff)
         flag = 0;
     int32 multi = player->IsSitState() == true ? 2 : 1;
 
+    // The regen skill a tick is named for in its recovery number (StatusHeal's flag&2: the first of the player's skills that give it)
+    auto regenSpellID = [this, player](std::initializer_list<uint16> skillIDs) -> uint32
+    {
+        for (uint16 skillID : skillIDs)
+            if (int32 level = PCCheckSkill(player, skillID); level > 0)
+                return GetSkillSpellID(skillID, uint16(level));
+        return 0;
+    };
+
     // Apply sitting regen bonus (ssregen), every natural_heal_skill_interval of rate-scaled time
-    auto skillRegen = [this, player](uint32& timer, uint32 diffTime, int32 rate, int32 hp, int32 sp)
+    auto skillRegen = [this, player](uint32& timer, uint32 diffTime, int32 rate, int32 hp, int32 sp, uint32 spellID)
     {
         timer += uint32(diffTime * (rate / 100.));
         while (timer >= uint32(BattleConfig.NaturalHealSkillInterval))
         {
             timer -= uint32(BattleConfig.NaturalHealSkillInterval);
-            if (StatusHeal(player, hp, sp, 3, player, 0) < hp + sp)
+            if (StatusHeal(player, hp, sp, 3, player, spellID) < hp + sp)
                 break; // Full
         }
     };
     if (player->IsSitState() == true && player->isMoving() == false)
     {
         if ((flag & ROWOW_RGN_SHP) != 0 && status.SitSkillRegenHP != 0)
-            skillRegen(identity->SitSkillRegenHPTimer, diff, 100, status.SitSkillRegenHP, 0);
+            skillRegen(identity->SitSkillRegenHPTimer, diff, 100, status.SitSkillRegenHP, 0,
+                regenSpellID({ ROWOW_SKILL_MO_SPIRITSRECOVERY, ROWOW_SKILL_TK_HPTIME }));
         if ((flag & ROWOW_RGN_SSP) != 0 && status.SitSkillRegenSP != 0)
-            skillRegen(identity->SitSkillRegenSPTimer, diff, 100, 0, status.SitSkillRegenSP);
+            skillRegen(identity->SitSkillRegenSPTimer, diff, 100, 0, status.SitSkillRegenSP,
+                regenSpellID({ ROWOW_SKILL_MO_SPIRITSRECOVERY, ROWOW_SKILL_TK_SPTIME }));
     }
     // Walking stops the skill regen, and HP regen but with Moving HP-Recovery
     if (player->isMoving() == true)
@@ -1684,7 +1699,7 @@ void ROWOWMod::UpdateNaturalRegen(Player* player, uint32 diff)
 
     // Skill regen (sregen)
     if ((flag & ROWOW_RGN_SHP) != 0 && status.SkillRegenHP != 0)
-        skillRegen(identity->SkillRegenHPTimer, diff, 100, status.SkillRegenHP, 0);
+        skillRegen(identity->SkillRegenHPTimer, diff, 100, status.SkillRegenHP, 0, regenSpellID({ ROWOW_SKILL_SM_RECOVERY }));
     if ((flag & ROWOW_RGN_SSP) != 0 && status.SkillRegenSP != 0)
     {
         identity->SkillRegenSPTimer += diff;
@@ -1705,7 +1720,7 @@ void ROWOWMod::UpdateNaturalRegen(Player* player, uint32 diff)
                     PCResetFeel(player);
                 }
             }
-            if (StatusHeal(player, 0, val, 3, player, 0) < val)
+            if (StatusHeal(player, 0, val, 3, player, regenSpellID({ ROWOW_SKILL_MG_SRECOVERY, ROWOW_SKILL_NJ_NINPOU })) < val)
                 break; // Full
         }
     }

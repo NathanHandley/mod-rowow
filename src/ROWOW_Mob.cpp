@@ -172,6 +172,16 @@ bool ROWOWMod::CheckDistanceBL(Unit const* src, Unit const* target, int32 distan
     return DistanceBL(src, target) <= distance;
 }
 
+bool ROWOWMod::CheckDistanceClientBL(Unit const* src, Unit const* target, int32 distance) const
+{
+    // check_distance_client_bl: the RO client's round distance in cells (distance_client: less its 0.1 bonus factor), a player's attack range
+    int32 x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+    GetUnitCell(src, x0, y0);
+    GetUnitCell(target, x1, y1);
+    double dist = std::sqrt(double((x1 - x0) * (x1 - x0) + (y1 - y0) * (y1 - y0))) - 0.1;
+    return int32(std::max(0.0, dist)) <= std::max(0, distance);
+}
+
 bool ROWOWMod::BattleCheckRange(Unit const* src, Unit const* bl, int32 range) const
 {
     // battle_check_range, for a monster: within range, and within sight when more than a cell off
@@ -932,6 +942,28 @@ int64 ROWOWMod::BattleCalcWalkDelay(Unit const* bl, int64 damage, int16 div) con
     return delay > 0 ? delay : 1; // Return 1 to specify there should be no noticeable delay, but you should stop walking.
 }
 
+void ROWOWMod::PCDamageFlinch(Unit* target, int64 damage, int16 div, uint64 tick)
+{
+    // MergedWorlds ro-flinch (Nathan 2026-11-13): status_damage's walk delay for a player.  RO's client freezes its character for its damage
+    // motion (player_damage_delay_rate of it, and the multi-hit delay for a skill of many hits) when the damage packet comes, unless it
+    // endures (the packet's DMG_ENDURE: status_isendure, so Endure, Concentration, Berserk, bNoWalkDelay, running).  Here the server roots the
+    // WoW player for that long, a new hit holding it on; the server's own stop (pc_damage_walk_delay_rate, a fifth of it) is within it
+    Player* sd = target != nullptr ? target->ToPlayer() : nullptr;
+    if (sd == nullptr || sd->IsAlive() == false || damage < 1 || div == 0 || StatusIsEndure(sd) == true)
+        return;
+    ROWOWStatus const* status = GetROStatus(sd);
+    if (status == nullptr)
+        return;
+    int64 delay = status->DamageMotion; // (player_damage_delay_rate is in it already)
+    if (div > 1)
+        delay += BattleConfig.MultihitDelay * ((div > 10 ? 2 : div) - 1);
+    if (delay <= 0)
+        return;
+    ROWOWStatusChange* sc = sd->CustomData.GetDefault<ROWOWStatusChange>("ROWOWStatusChange");
+    sc->FlinchEndTime = std::max<uint64>(sc->FlinchEndTime, tick + uint64(delay));
+    UpdateStatusChangeOptions(sd, *sc);
+}
+
 void ROWOWMod::MobBattleAttacked(Unit* src, Unit* target, int64 damage, int16 div, uint64 tick, int32 amotion, bool isNormAttacked, int32 attackType, uint16 skillID)
 {
     // battle_damage's end, when an attack connects: the monster stops (status_damage's unit_set_walkdelay, damage_walk_delay being off) and the
@@ -951,7 +983,7 @@ void ROWOWMod::MobBattleAttacked(Unit* src, Unit* target, int64 damage, int16 di
     }
     ROWOWMobData* mob = GetMobData(md);
     int64 delay = BattleCalcWalkDelay(target, damage, div);
-    if (delay > 0)
+    if (delay > 0 && StatusIsEndure(md) == false) // status_damage: an enduring unit isn't stopped (MergedWorlds ro-flinch)
         UnitSetWalkDelay(md, mob, tick, delay);
     ROWOWMobAttackedEvent attackedEvent;
     attackedEvent.Tick = tick + uint64(std::max(0, amotion)) + uint64(delay);

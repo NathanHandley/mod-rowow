@@ -144,11 +144,11 @@ namespace
     public:
         ROWOWSkillMercenaryScapegoat() : ROWOWSkillImpl(ROWOW_SKILL_MER_SCAPEGOAT) { }
 
-        void CastendNoDamageID(Unit* src, Unit* /*target*/, uint16 /*skillLevel*/, uint64 /*tick*/, int32& /*flag*/) const override
+        void CastendNoDamageID(Unit* src, Unit* /*target*/, uint16 skillLevel, uint64 /*tick*/, int32& /*flag*/) const override
         {
             if (Player* master = ROWOW->GetFollowerMaster(src))
             {
-                ROWOW->StatusHeal(master, src->GetHealth(), 0, 2, src, 0);
+                ROWOW->StatusHeal(master, src->GetHealth(), 0, 2, src, ROWOW->GetSkillSpellID(SkillID, skillLevel));
                 ROWOW->StatusKill(src);
             }
         }

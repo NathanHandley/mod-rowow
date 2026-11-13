@@ -2956,7 +2956,7 @@ void ROWOWMod::UpdateStatusChangeOptions(Unit* bl, ROWOWStatusChange& sc)
     // Walk) are stealthed, so only detectors (and Ruwach and Sight, which end it) find them
     bool isDead = bl->IsAlive() == false;
     Player* player = bl->ToPlayer();
-    bool shouldRoot = (sc.Cant.Move == true || (player != nullptr && PCCanMoveAt(player) == false)) && isDead == false;
+    bool shouldRoot = (sc.Cant.Move == true || (player != nullptr && (PCCanMoveAt(player) == false || sc.FlinchEndTime > GetTick()))) && isDead == false;
     if (shouldRoot != sc.IsRootSet)
     {
         sc.IsRootSet = shouldRoot;
@@ -3070,6 +3070,12 @@ void ROWOWMod::UpdateStatusChanges(Unit* unit)
     uint64 tick = GetTick();
     if (sc->LastEffect != -1 && sc->LastEffectTime <= tick)
         sc->LastEffect = -1;
+    // A hit's flinch ends (MergedWorlds ro-flinch)
+    if (sc->FlinchEndTime != 0 && sc->FlinchEndTime <= tick)
+    {
+        sc->FlinchEndTime = 0;
+        UpdateStatusChangeOptions(unit, *sc);
+    }
     if (sc->IsEmpty() == true)
         return;
     if (unit->IsAlive() == false)

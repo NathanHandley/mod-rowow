@@ -646,10 +646,12 @@ int32 ROWOWMod::GetDeferredBonus(Unit const* unit, char const* type) const
     ROWOWStatus const* status = GetROStatus(unit);
     if (status == nullptr || status->IsPlayer == false)
         return 0;
+    // A flag bonus (bNoWalkDelay, bNoCastCancel, bNoGemStone, bNoKnockback...: "bonus bNoWalkDelay;") has no value, and counts as 1, as
+    // rAthena's pc_bonus sets its flag
     int32 total = 0;
     for (ROWOWDeferredBonus const& bonus : status->Bonus.Deferred)
-        if (bonus.Values.empty() == false && IsSameName(bonus.Type, type) == true)
-            total += int32(bonus.Values.back());
+        if (IsSameName(bonus.Type, type) == true)
+            total += bonus.Values.empty() == true ? 1 : int32(bonus.Values.back());
     return total;
 }
 
@@ -704,6 +706,10 @@ void ROWOWMod::UnitSetAttackDelay(Unit* unit, uint64 tick, bool isCastBegin)
         return;
     ROWOWSkillUnitData* ud = GetSkillUnitData(unit);
     if (isCastBegin == true && ud->SkillID == 0)
+        return;
+    // MergedWorlds wow-style-attack (Nathan 2026-11-13): a player's skills go as WoW's abilities do beside its auto attack, so its normal
+    // attack (or parry) holds no skill back; only a cast's start and the skills' own after-cast delays do
+    if (sd != nullptr && isCastBegin == false)
         return;
     int64 actDelay = status->AttackMotion + BattleConfig.MaxAspdAmotion / 2; // pc_maxaspd / AMOTION_DIVIDER_PC
     if (followerType != 0)
@@ -845,6 +851,12 @@ SpellCastResult ROWOWMod::UnitSkillUse(Unit* src, Unit* target, WorldLocation co
         if (GetPositionMapKey(destPosition) != GetUnitMapKey(src))
             return SPELL_FAILED_OUT_OF_RANGE;
     }
+    // unit_skilluse_id2's range check for a player's skill at another unit (not a combo, which has its attack's reach): the skill's range in
+    // cells with a line of attack, 2D.  MergedWorlds ro-attack-range (Nathan 2026-11-13): WoW's spell range is in yards and 3D, and a melee
+    // skill's is WoW's 5 yard combat range, further than RO's cell
+    if (src->IsPlayer() == true && target != src && GetSkillUnitData(src)->SkillItemID != skillID && (GetSCE(src, ROWOW_SC_COMBO) == nullptr || SkillIsCombo(skillID) == 0) &&
+        BattleCheckRange(src, target, SkillGetRange2(src, skillID, skillLevel, true)) == false)
+        return SPELL_FAILED_OUT_OF_RANGE;
     Player* sd = src->ToPlayer();
     ROWOWSkillUnitData* ud = GetSkillUnitData(src);
     uint64 tick = GetTick();
@@ -879,7 +891,7 @@ SpellCastResult ROWOWMod::UnitSkillUse(Unit* src, Unit* target, WorldLocation co
         }
         else if (tick < ud->CanActTime && ud->SkillItemID != skillID && ud->EncoreSkillID != skillID)
         {
-            // RO's client holds a skill back itself until the delay ends; WoW's sends it, so a short delay (a normal attack's) has it wait
+            // RO's client holds a skill back itself until the delay ends; WoW's sends it, so a short delay (a cast start's) has it wait
             if (isQueueableOut != nullptr && ud->SkillID == 0 && ud->CanActTime - tick <= ROWOW_SKILL_QUEUE_MAX_WAIT)
             {
                 *isQueueableOut = true;
@@ -1074,7 +1086,9 @@ int32 ROWOWMod::UnitSkillCastTime(Unit* src, Unit* target, uint16 skillID, uint1
     uint64 tick = GetTick();
     bool isCombo = (GetSCE(src, ROWOW_SC_COMBO) != nullptr && SkillIsCombo(skillID) != 0) ||
         (skill != nullptr && (skill->Inf & ROWOW_INF_SELF_SKILL) != 0 && skill->Inf2[ROWOW_INF2_NOTARGETSELF] == true);
-    if (isCombo == false) // Stop attack on non-combo skills [Skotlex]
+    // MergedWorlds wow-style-attack: a player's skill leaves its auto attack going, as WoW's abilities do (a skill with a cast time pauses the
+    // swings while it casts, WoW's own rule)
+    if (isCombo == false && src->IsPlayer() == false) // Stop attack on non-combo skills [Skotlex]
         src->AttackStop();
     ud->IsSkillCastCancel = skill != nullptr && skill->IsCastCancel == true;
 
@@ -2795,7 +2809,7 @@ int64 ROWOWMod::SkillAttack(int32 attackType, Unit* src, Unit* dsrc, Unit* bl, u
             sp = sp * magicRod->Val2 / 100;
             if (skillID == ROWOW_SKILL_WZ_WATERBALL && skillLevel > 1)
                 sp = sp / ((skillLevel | 1) * (skillLevel | 1)); // Estimate SP cost of a single water-ball
-            StatusHeal(bl, 0, sp, 2, bl, 0);
+            StatusHeal(bl, 0, sp, 2, bl, GetSkillSpellID(ROWOW_SKILL_SA_MAGICROD, uint16(magicRod->Val1)));
         }
     }
     int64 damage = dmg.Damage + dmg.Damage2;
@@ -3444,7 +3458,7 @@ int32 ROWOWMod::SkillCounterAdditionalEffect(Unit* src, Unit* bl, uint16 skillID
         if (sd->IsSitState() == true)
             sd->SetStandState(UNIT_STAND_STATE_STAND); // Character stuck in attacking animation while 'sitting' fix. [Skotlex]
         if (ROWOWStatus const* tstatus = GetROStatus(bl))
-            StatusHeal(src, 0, int64(tstatus->Level) * (95 + 15 * rate) / 100, 2, src, 0);
+            StatusHeal(src, 0, int64(tstatus->Level) * (95 + 15 * rate) / 100, 2, src, GetSkillSpellID(ROWOW_SKILL_HW_SOULDRAIN, uint16(rate)));
     }
 
     // HP and SP gained on a kill
@@ -3570,10 +3584,13 @@ int64 ROWOWMod::StatusHeal(Unit* bl, int64 hp, int64 sp, int32 flag, Unit* src, 
         if (ROWOWStatusChangeEntry const* sce = GetSCE(bl, ROWOW_SC_BERSERK); sce != nullptr)
             hp = 0;
     }
+    // MergedWorlds ro-recovery-numbers: what pc_heal's flag&2 shows (below) goes to the player alone, so the heal itself is logged as the use
+    // item spell's, which the client shows nowhere
+    Player* recoverySD = (flag & 2) != 0 ? bl->ToPlayer() : nullptr;
     if (hp > 0)
     {
         uint32 missingHP = bl->GetMaxHealth() - bl->GetHealth();
-        SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(spellID != 0 ? spellID : ROWOW_SPELL_USE_ITEM);
+        SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(spellID != 0 && recoverySD == nullptr ? spellID : ROWOW_SPELL_USE_ITEM);
         if (spellInfo != nullptr)
         {
             HealInfo healInfo(src != nullptr ? src : bl, bl, uint32(std::min<int64>(hp, std::numeric_limits<uint32>::max())), spellInfo, SPELL_SCHOOL_MASK_NORMAL);
@@ -3591,15 +3608,41 @@ int64 ROWOWMod::StatusHeal(Unit* bl, int64 hp, int64 sp, int32 flag, Unit* src, 
     else
         sp = 0;
     // pc_heal: flag&2 sends the player clif_heal's ZC_RECOVERY for what was healed (the regen skills' ticks, Kaahi, Soul Drain, ...), on which
-    // the RO client plays EF_HPTIME or EF_SPTIME (sparkles and a sound) on its own character, seen by that player alone
-    if ((flag & 2) != 0)
+    // the RO client plays EF_HPTIME or EF_SPTIME (sparkles and a sound) on its own character and shows the amount over it, green for HP and
+    // blue for SP, seen by that player alone.  MergedWorlds ro-recovery-numbers (Nathan 2026-11-13): the amount is the spell's heal or
+    // energize log sent to the player alone, which the client shows as RO's number and on the portrait; with no spell to name, none shows
+    if (recoverySD != nullptr)
     {
-        if (Player* sd = bl->ToPlayer())
+        if (hp > 0)
         {
-            if (hp > 0)
-                PlayScriptLookToPlayer(sd, ROWOW_SCRIPT_LOOK_EFFECT, "HPTIME");
-            if (sp > 0)
-                PlayScriptLookToPlayer(sd, ROWOW_SCRIPT_LOOK_EFFECT, "SPTIME");
+            PlayScriptLookToPlayer(recoverySD, ROWOW_SCRIPT_LOOK_EFFECT, "HPTIME");
+            if (spellID != 0)
+            {
+                WorldPacket data(SMSG_SPELLHEALLOG, (8 + 8 + 4 + 4 + 4 + 4 + 1 + 1));
+                data << recoverySD->GetPackGUID();
+                data << (src != nullptr ? src : bl)->GetPackGUID();
+                data << uint32(spellID);
+                data << uint32(std::min<int64>(hp, std::numeric_limits<uint32>::max()));
+                data << uint32(0); // Overheal
+                data << uint32(0); // Absorb
+                data << uint8(0); // Critical
+                data << uint8(0);
+                recoverySD->SendDirectMessage(&data);
+            }
+        }
+        if (sp > 0)
+        {
+            PlayScriptLookToPlayer(recoverySD, ROWOW_SCRIPT_LOOK_EFFECT, "SPTIME");
+            if (spellID != 0)
+            {
+                WorldPacket data(SMSG_SPELLENERGIZELOG, (8 + 8 + 4 + 4 + 4));
+                data << recoverySD->GetPackGUID();
+                data << (src != nullptr ? src : bl)->GetPackGUID();
+                data << uint32(spellID);
+                data << uint32(POWER_MANA);
+                data << uint32(std::min<int64>(sp, std::numeric_limits<uint32>::max()));
+                recoverySD->SendDirectMessage(&data);
+            }
         }
     }
     return hp + sp;
@@ -3690,7 +3733,10 @@ void ROWOWMod::BattleDamage(Unit* src, Unit* target, int64 damage, int16 div, ui
 
     // These events trigger when the attack connects
     if (dmgLv > ROWOW_ATK_BLOCK)
+    {
         MobBattleAttacked(src, target, damage, div, tick, 0, false, attackType, skillID);
+        PCDamageFlinch(target, damage, div, tick);
+    }
 }
 
 bool ROWOWMod::BattleCheckComa(Unit const* src, Unit const* target, int32 attackType) const

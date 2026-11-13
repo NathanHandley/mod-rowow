@@ -431,6 +431,21 @@ float ROWOWMod::GetAutoAttackExtraRange(Player* player, Unit const* victim) cons
     ROWOWStatus const* status = GetROStatus(player);
     if (status == nullptr || victim == nullptr)
         return 0.0f;
+
+    // MergedWorlds ro-attack-range (Nathan 2026-11-13): against an RO combatant on an RO map the swing reaches as unit_attack_timer_sub has a
+    // player's: its weapon's range in cells by the RO client's distance, one more on a walking target, then a line of attack, in 2D as the
+    // monster's own reach is (WoW's 5 yards, 3D, and its leeway let a player hit monsters that couldn't hit back, backing off before them,
+    // and the height let monsters hit a player that couldn't swing back).  No extra cell while the player itself moves: RO can't swing on
+    // the move, and it gave a backing player its free hits again.  WoW's check (distance under its melee range and leeway plus this) is made
+    // to pass or fail by what's returned
+    float wowReach = player->GetMeleeRange(victim) + player->GetLeewayBonusRange(victim);
+    if (GetMapGrid(player->GetMapId()) != nullptr && IsROCombatant(victim) == true)
+    {
+        int32 range = status->Range + ((victim->isMoving() == true && player->isMoving() == false) ? 1 : 0);
+        if (CheckDistanceClientBL(player, victim, range) == false || BattleCheckRange(player, victim, range) == false)
+            return -wowReach; // Out of range: the core says so and tries again in 100 ms
+        return std::max(0.0f, player->GetExactDist(victim) - wowReach + 0.1f);
+    }
     float rangeYards = float(status->Range) * CellSize + player->GetCombatReach() + victim->GetCombatReach();
     return std::max(0.0f, rangeYards - player->GetMeleeRange(victim));
 }
@@ -628,10 +643,8 @@ uint8 ROWOWMod::BattleWeaponAttack(Unit* src, Unit* target, ROWOWDamage& wdOut)
         }
         if (int32(urand(0, 99)) < tripleRate)
         {
-            // Need to apply canact_tick here because it doesn't go through skill_castend_id
-            ROWOWSkillUnitData* ud = GetSkillUnitData(sd);
-            ud->CanActTime = std::max<uint64>(tick + uint64(SkillDelayFix(src, ROWOW_SKILL_MO_TRIPLEATTACK, uint16(skillv))), ud->CanActTime);
-            SendSkillDelayToClient(sd, ROWOW_SKILL_MO_TRIPLEATTACK);
+            // rAthena applies canact_tick here, as it doesn't go through skill_castend_id.  MergedWorlds wow-style-attack (Nathan
+            // 2026-11-13): a player's auto attack's procs hold no skill back (the Chain Combo window is its combo status's, which stays)
             if (SkillAttack(ROWOW_BF_WEAPON, src, src, target, ROWOW_SKILL_MO_TRIPLEATTACK, uint16(skillv), tick, 0) != 0)
                 return ROWOW_ATK_DEF;
             return ROWOW_ATK_MISS;
@@ -726,8 +739,13 @@ uint8 ROWOWMod::BattleWeaponAttack(Unit* src, Unit* target, ROWOWDamage& wdOut)
     ObjectGuid srcGUID = src->GetGUID();
     int32 attackType = wdOut.Flag;
     uint8 dmgLv = wdOut.DmgLv;
-    target->m_Events.AddEventAtOffset([this, target, srcGUID, attackType, dmgLv]()
+    int64 swingDamage = wdOut.Damage + wdOut.Damage2;
+    int16 swingDiv = wdOut.Div;
+    target->m_Events.AddEventAtOffset([this, target, srcGUID, attackType, dmgLv, swingDamage, swingDiv]()
     {
+        // A player hit flinches (status_damage's walk delay, MergedWorlds ro-flinch), once WoW has dealt the swing
+        if (dmgLv > ROWOW_ATK_BLOCK && target->IsAlive() == true)
+            PCDamageFlinch(target, swingDamage, swingDiv, GetTick());
         Unit* delayedSrc = ObjectAccessor::GetUnit(*target, srcGUID);
         if (delayedSrc == nullptr || delayedSrc->IsInWorld() == false || delayedSrc->GetMap() != target->GetMap())
             return;
@@ -783,9 +801,10 @@ uint8 ROWOWMod::BattleWeaponAttack(Unit* src, Unit* target, ROWOWDamage& wdOut)
                     SkillCastendDamageID(src, target, skillID, skillLevel, tick, 0);
                     break;
             }
+            // MergedWorlds wow-style-attack: a player's auto attack's procs hold no skill back
             ROWOWSkillUnitData* ud = GetSkillUnitData(src);
             int32 autospellTick = SkillDelayFix(src, skillID, skillLevel);
-            if (ud != nullptr && ud->CanActTime < tick + uint64(autospellTick))
+            if (ud != nullptr && src->IsPlayer() == false && ud->CanActTime < tick + uint64(autospellTick))
             {
                 ud->CanActTime = std::max<uint64>(tick + uint64(autospellTick), ud->CanActTime);
                 SendSkillDelayToClient(src, skillID);

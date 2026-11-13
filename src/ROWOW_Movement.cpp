@@ -713,7 +713,9 @@ void ROWOWMod::UnitSetWalkDelay(Creature* md, ROWOWMobData* mob, uint64 tick, in
         return; // Mob needs to escape, don't stop it
     if (UnitCanMove(md, mob, tick) == false || (BattleConfig.DamageWalkDelay & ROWOW_BL_MOB) == 0)
     {
-        UnitStopWalking(md);
+        // USW_MOVE_FULL_CELL: on to the next cell center, not where it stands (MergedWorlds ro-attack-range: at once, each hit cost a
+        // chasing monster ground on a player backing away)
+        UnitStopWalkingSoon(md, tick);
         return;
     }
     if (int64(mob->CanMoveTime) - (int64(tick) - delay) > 0)

@@ -3405,6 +3405,7 @@ public:
     void MobAddSpotted(ROWOWMobData* mob, ObjectGuid const& guid) const; // mob_add_spotted
     void MobCleanSpotted(Creature* md, ROWOWMobData* mob) const; // mob_clean_spotted
     bool CheckDistanceBL(Unit const* src, Unit const* target, int32 distance) const; // check_distance_bl
+    bool CheckDistanceClientBL(Unit const* src, Unit const* target, int32 distance) const; // check_distance_client_bl, a player's attack range
     bool BattleCheckRange(Unit const* src, Unit const* bl, int32 range) const; // battle_check_range, for a monster
     bool MobCheckVisibility(Creature* md, Unit const* target, bool isCheckBlind) const; // status_check_visibility
     bool MobCanReach(Creature* md, Unit const* bl, int32 range) const; // mob_can_reach
@@ -3493,6 +3494,7 @@ public:
     bool MobIsNearPC(Creature* md, ROWOWMobData* mob) const; // mob_ai_sub_foreachclient
     void MobSetAttackedID(Creature* md, Unit* src, uint64 tick, bool isNormAttacked); // mob_set_attacked_id
     int64 BattleCalcWalkDelay(Unit const* bl, int64 damage, int16 div) const; // battle_calc_walkdelay
+    void PCDamageFlinch(Unit* target, int64 damage, int16 div, uint64 tick); // A player's hit flinch: rooted for its damage motion unless it endures
     void MobBattleAttacked(Unit* src, Unit* target, int64 damage, int16 div, uint64 tick, int32 amotion, bool isNormAttacked, int32 attackType, uint16 skillID); // battle_damage's monster events
     void MobReleaseCombat(Creature* md, ROWOWMobData* mob); // Leaves WoW's combat state, RO having none
     void MobSyncVictim(Creature* md, ROWOWMobData* mob); // The WoW victim follows the RO target

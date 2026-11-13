@@ -897,6 +897,7 @@ struct ROWOWStatusChange : public DataMap::Base
     bool IsSilenceSet = false;
     bool IsPacifySet = false;
     bool IsStealthSet = false;
+    uint64 FlinchEndTime = 0; // A player rooted by a hit until then (PCDamageFlinch, MergedWorlds ro-flinch), 0 when not
     int32 LastSpeed = 0; // The walk speed the unit's WoW speed was last set for (status_data's speed), 0 before any
     bool IsPassiveDamage = false; // A status_zap is being dealt (passive damage, status_damage's flag&1)
     int32 CloakCellX = 0; // The cell Cloaking last checked its wall at
