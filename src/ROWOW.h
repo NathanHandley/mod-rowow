@@ -2819,6 +2819,7 @@ public:
     static uint32 GetItemRefine(Item const* item);
     static bool IsItemBroken(Item const* item);
     static bool IsItemIdentified(Item const* item);
+    void SendNewROItem(Player* player, Item* item, uint32 count) const; // SendNewItem, with an unidentified item named by a link that carries its state
     static void SetItemState(Player* player, Item* item, uint32 refine, bool isBroken, bool isIdentified);
     uint32 GetIdentityEquipPosition(ROWOWIdentity const& identity, ObjectGuid::LowType itemGUID) const; // Where an item is worn, 0 for not
     uint8 PCIsEquip(Player* player, ROWOWIdentity const& identity, Item const* item) const; // pc_isequip

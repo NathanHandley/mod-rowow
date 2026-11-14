@@ -1631,8 +1631,25 @@ void ROWOWMod::UpdateNaturalRegen(Player* player, uint32 diff)
     // often sitting and as fast as the statuses' regen rates.  Walking stops HP regen (and starts its interval over), not SP.  Statuses stop
     // either (status_calc_regen_rate's flag), and nothing regenerates while hidden or cloaked
     ROWOWIdentity* identity = player->CustomData.Get<ROWOWIdentity>("ROWOWIdentity");
-    if (identity == nullptr || identity->IsInForm == false || player->IsAlive() == false)
+    if (identity == nullptr || identity->IsInForm == false)
         return;
+    if (player->IsAlive() == false)
+    {
+        // status_damage's death resets every regen tick, the skills' too.  (Walking only pauses the skills' ticks, as status_natural_heal does)
+        identity->RegenHPTimer = 0;
+        identity->RegenSPTimer = 0;
+        identity->SkillRegenHPTimer = 0;
+        identity->SkillRegenSPTimer = 0;
+        identity->SitSkillRegenHPTimer = 0;
+        identity->SitSkillRegenSPTimer = 0;
+        return;
+    }
+    // pc_setstand: standing up starts the sitting regen's ticks over
+    if (player->IsSitState() == false)
+    {
+        identity->SitSkillRegenHPTimer = 0;
+        identity->SitSkillRegenSPTimer = 0;
+    }
     ROWOWStatus const& status = identity->Status;
     uint8 flag = status.RegenFlag;
     // Only skill-based regen is disabled at max HP/SP

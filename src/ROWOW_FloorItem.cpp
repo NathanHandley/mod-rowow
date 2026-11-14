@@ -678,7 +678,7 @@ bool ROWOWMod::PCAddItem(Player* player, uint32 itemTemplateID, uint32 amount, b
         *itemOut = item;
     if (isIdentified == false)
         SetItemState(player, item, 0, false, false);
-    player->SendNewItem(item, amount, true, false);
+    SendNewROItem(player, item, amount);
     return true;
 }
 
@@ -763,7 +763,7 @@ Item* ROWOWMod::StoreROItem(Player* player, uint32 itemTemplateID, uint32 amount
                 if ((*enchantments)[enchantmentSlot] != 0)
                     item->SetEnchantment(EnchantmentSlot(enchantmentSlot), (*enchantments)[enchantmentSlot], 0, 0);
         item->SetState(ITEM_CHANGED, player);
-        player->SendNewItem(item, count, true, false);
+        SendNewROItem(player, item, count);
         storedItem = item;
     }
     return storedItem;
