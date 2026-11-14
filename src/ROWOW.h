@@ -2661,6 +2661,7 @@ public:
     bool HasByHandLook(Player const* player) const; // A transform no identity put on (a guise spell, a polymorph): it shows over the identity's look
     void OnEverQuestIdentityLookHidden(Player* player); // The identity's EverQuest look was put on: mod-everquest's faction reactions made right again
     void RefreshEverQuestIdentityLookDisplay(Player* player); // The EverQuest look's display taken back from whatever set another under it (the core, at every arrival)
+    void EndEverQuestMentorshipForROWorld(Player* player); // mod-everquest's mentorship ended before a trip into the RO world
     uint8 GetWorldIdentity(Player* player, uint8 world); // The identity shown in the world: the one picked while it may be shown, else the world's own
     bool SetWorldIdentity(Player* player, uint8 world, uint8 worldIdentity, std::string& errorOut); // .identity
     uint32 GetWorldIdentityRagnarokLookSpellID(Player* player); // The Ragnarok identity's body: the RO illusion spell of the job sprite shown (or of the outfit on)

@@ -104,3 +104,16 @@ void ROWOWMod::RefreshEverQuestIdentityLookDisplay(Player* player)
     (void)player;
 #endif
 }
+
+void ROWOWMod::EndEverQuestMentorshipForROWorld(Player* player)
+{
+    // No mentorship in the RO world (Nathan 2026-11-14): it's ended before the trip there, while the character still stands on its Warcraft map.
+    // The arrival keeps the character's level to give back on leaving (EnterROForm's WoWLevel), so a borrowed level has to be handed back first,
+    // or the character would come back out at it.  The partner's half ends at their next check.  mod-everquest refuses to start one in the form
+#if ROWOW_HAS_MOD_EVERQUEST
+    if (player != nullptr && EverQuest->IsEnabled == true)
+        EverQuest->EndMentorshipForPlayer(player, "a mentorship cannot be carried into Midgard", true);
+#else
+    (void)player;
+#endif
+}

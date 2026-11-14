@@ -636,6 +636,8 @@ public:
         if (player->IsInWorld() == false)
             return true;
         ROWOW->StopViewingROSet(player); // The Ragnarok page's bags are put away before any arrival
+        if (ROWOW->IsROMap(mapid) == true && ROWOW->IsInROForm(player) == false)
+            ROWOW->EndEverQuestMentorshipForROWorld(player); // No mentorship in the RO world, ended before the arrival keeps the character's level
         if (ROWOW->IsInROForm(player) == true)
         {
             // A warp off the map takes the player's ground skills and its shop with it (clear_skills_on_warp); a warp on the map ends in the
