@@ -203,6 +203,51 @@ bool ROWOWMod::BattleCheckRange(Unit const* src, Unit const* bl, int32 range) co
     return PathSearchLong(*mapGrid, x0, y0, x1, y1);
 }
 
+// MergedWorlds ro-melee-range (Nathan 2026-11-13): melee reach is 50% longer than RO's for players, monsters and followers alike.  RO's reach of n
+// cells is the square of cells around the attacker's (distance_bl, so 3x3 for a melee 1), which RO's integer cells can't make half again as long.
+// So a melee reach is a circle instead: from cell center to cell center, of the radius whose circle is as big as that square ((2n + 1) / sqrt(pi)
+// cells), times 1.5.  A melee 1 then reaches 2.54 cells: two cells straight out, and one across and two out, where it reached one (21 cells
+// around it rather than 9).  Melee is battle_range_type's short range, under 4 cells (a 1 plus the extra cell on a moving target, a spear's 2 or
+// 3); longer reaches (bows, guns, a ranged monster's) are RO's own
+static constexpr float RO_MELEE_RANGE_RATE = 1.5f;
+static constexpr int32 RO_MELEE_RANGE_MAX = 3;
+
+static float GetMeleeReachRadius(int32 range)
+{
+    return RO_MELEE_RANGE_RATE * float(2 * std::max(1, range) + 1) / std::sqrt(float(M_PI));
+}
+
+int32 ROWOWMod::GetAttackReachCells(int32 range) const
+{
+    if (range > RO_MELEE_RANGE_MAX)
+        return range;
+    return int32(std::floor(GetMeleeReachRadius(range)));
+}
+
+bool ROWOWMod::BattleCheckAttackRange(Unit const* src, Unit const* bl, int32 range) const
+{
+    if (range > RO_MELEE_RANGE_MAX)
+        return BattleCheckRange(src, bl, range);
+    if (src->GetMap() != bl->GetMap())
+        return false;
+    int32 x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+    GetUnitCell(src, x0, y0);
+    GetUnitCell(bl, x1, y1);
+    float radius = GetMeleeReachRadius(range);
+    if (float((x1 - x0) * (x1 - x0) + (y1 - y0) * (y1 - y0)) > radius * radius)
+        return false;
+    // battle_check_range's line of attack past the next cell
+    int32 d = std::max(std::abs(x1 - x0), std::abs(y1 - y0));
+    if (d < 2)
+        return true;
+    if (d > BattleConfig.AreaSize)
+        return false;
+    ROWOWMapGrid const* mapGrid = GetMapGrid(src->GetMapId());
+    if (mapGrid == nullptr)
+        return true;
+    return PathSearchLong(*mapGrid, x0, y0, x1, y1);
+}
+
 bool ROWOWMod::MobCheckVisibility(Creature* md, Unit const* target, bool isCheckBlind) const
 {
     // status_check_visibility for a monster: within its chase range (1 while blind), on its map, and not hidden from it
@@ -300,7 +345,7 @@ bool ROWOWMod::MobRandomTarget(Creature* md, Unit*& target)
     if (status == nullptr || (status->Mode & ROWOW_MODE_RANDOMTARGET) == 0)
         return true; // Keep current target
     std::vector<Unit*> enemies;
-    MapForEachInRange(md, status->Range, [this, md, &enemies](Unit* bl)
+    MapForEachInRange(md, GetAttackReachCells(status->Range), [this, md, &enemies](Unit* bl)
     {
         if (bl != md && BattleCheckTarget(md, bl, ROWOW_BCT_ENEMY) > 0 && StatusCheckVisibility(md, bl) == true)
             enemies.push_back(bl);
@@ -309,7 +354,7 @@ bool ROWOWMod::MobRandomTarget(Creature* md, Unit*& target)
     if (enemies.empty() == true)
         return false;
     Unit* enemy = enemies[urand(0, uint32(enemies.size() - 1))];
-    if (BattleCheckRange(md, enemy, status->Range) == false)
+    if (BattleCheckAttackRange(md, enemy, status->Range) == false)
         return false;
     target = enemy;
     return true;
@@ -450,7 +495,7 @@ void ROWOWMod::MobAISubHardChangeChase(Creature* md, ROWOWMobData* mob, Unit* bl
     // mob_ai_sub_hard_changechase.  If can't seek yet, not an enemy, or you can't attack it, skip
     if (target == bl || bl == md || BattleCheckTarget(md, bl, ROWOW_BCT_ENEMY) <= 0 || StatusCheckSkillUse(md, bl, 0, 0) == false)
         return;
-    if (BattleCheckRange(md, bl, attackRange) == true)
+    if (BattleCheckAttackRange(md, bl, attackRange) == true)
     {
         target = bl;
         mob->TargetID = bl->GetGUID();
@@ -656,7 +701,7 @@ bool ROWOWMod::MobAISubHard(Creature* md, uint64 tick)
         {
             // But don't do this if they stopped because target is already in attack range.  If target is no longer visible, target is dropped
             // and the monster waits for next iteration to continue
-            if (BattleCheckRange(md, tbl, attackRange) == false && MobCheckVisibility(md, tbl, true) == false)
+            if (BattleCheckAttackRange(md, tbl, attackRange) == false && MobCheckVisibility(md, tbl, true) == false)
             {
                 MobUnlockTarget(md, tick);
                 return true;
@@ -671,7 +716,7 @@ bool ROWOWMod::MobAISubHard(Creature* md, uint64 tick)
         {
             // Rude attacked check: can't attack back and can't reach back
             bool isTrapped = canMove == false && mob->CanMoveTime < tick && ((BattleConfig.MobAI & 0x2) != 0 || GetSCE(md, ROWOW_SC_SPIDERWEB) != nullptr);
-            if (tbl != nullptr && BattleCheckRange(md, tbl, attackRange) == false && (isTrapped == true || MobCanReach(md, tbl, status->Range3) == false) &&
+            if (tbl != nullptr && BattleCheckAttackRange(md, tbl, attackRange) == false && (isTrapped == true || MobCanReach(md, tbl, status->Range3) == false) &&
                 ++mob->AttackedCount > RUDE_ATTACKED_COUNT)
                 MobSkillUse(md, tick, ROWOW_MSC_RUDEATTACKED);
         }
@@ -682,7 +727,7 @@ bool ROWOWMod::MobAISubHard(Creature* md, uint64 tick)
                 (dist = DistanceBL(md, abl)) > BattleConfig.AreaSize || // Attacker longer than visual area
                 BattleCheckTarget(md, abl, ROWOW_BCT_ENEMY) <= 0 || // Attacker is not enemy of mob
                 ((BattleConfig.MobAI & 0x2) != 0 && StatusCheckSkillUse(md, abl, 0, 0) == false) || // Cannot normal attack back to Attacker
-                (BattleCheckRange(md, abl, attackRange) == false && // Not on Melee Range and ...
+                (BattleCheckAttackRange(md, abl, attackRange) == false && // Not on Melee Range and ...
                     ((canMove == false && mob->CanMoveTime < tick && ((BattleConfig.MobAI & 0x2) != 0 || GetSCE(md, ROWOW_SC_SPIDERWEB) != nullptr)) ||
                         MobCanReach(md, abl, dist + status->Range3) == false))) // Reach check
             {
@@ -751,7 +796,7 @@ bool ROWOWMod::MobAISubHard(Creature* md, uint64 tick)
 
         // If a monster finds a new target that is already in attack range it immediately switches to rush mode.  This behavior overrides even
         // angry mode and other mode-specific behavior
-        if (tbl != nullptr && prevID != mob->TargetID && BattleCheckRange(md, tbl, attackRange) == true)
+        if (tbl != nullptr && prevID != mob->TargetID && BattleCheckAttackRange(md, tbl, attackRange) == true)
         {
             mob->IsAggressive = false;
             MobSetState(md, mob, ROWOW_MSS_RUSH);
@@ -759,7 +804,7 @@ bool ROWOWMod::MobAISubHard(Creature* md, uint64 tick)
     }
     else if ((mode & ROWOW_MODE_CHANGECHASE) != 0 && (mob->SkillState == ROWOW_MSS_RUSH || mob->SkillState == ROWOW_MSS_FOLLOW))
     {
-        int32 searchSize = std::min(viewRange, attackRange);
+        int32 searchSize = std::min(viewRange, GetAttackReachCells(attackRange));
         MobForEachEnemyInRange(md, searchSize, [this, md, mob, &tbl, attackRange](Unit* bl)
         {
             MobAISubHardChangeChase(md, mob, bl, tbl, attackRange);
@@ -793,7 +838,7 @@ bool ROWOWMod::MobAISubHard(Creature* md, uint64 tick)
         return MobAISubHardLoot(md, mob, fitem, mode, canMove, tick);
 
     // At this point we know the target is attackable, attempt to attack.  Normal attack / berserk skill is only used when target is in range
-    if (BattleCheckRange(md, tbl, attackRange) == true)
+    if (BattleCheckAttackRange(md, tbl, attackRange) == true)
     {
         bool isStop = true;
 

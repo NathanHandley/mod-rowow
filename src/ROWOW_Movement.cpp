@@ -796,7 +796,7 @@ void ROWOWMod::UnitAttackTimerSub(Creature* md, ROWOWMobData* mob, uint64 tick)
     int32 range = sstatus->Range;
     if (target->isMoving() == true)
         range++; // Extra range when chasing
-    if (CheckDistanceBL(md, target, range) == false || BattleCheckRange(md, target, range) == false)
+    if (BattleCheckAttackRange(md, target, range) == false) // MergedWorlds ro-melee-range: melee reaches 50% further
     {
         mob->AttackTargetID.Clear(); // Monster: chase if required, which its next think does (or drops the target, if it can't move)
         return;

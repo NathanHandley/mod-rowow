@@ -1766,12 +1766,14 @@ void ROWOWMod::SendROStatusToClient(Player* player)
     }
     // R9.5: then "\t<1 when the Star Gladiator's Devil blinds it>" (pc_setnewpc / pc_jobchange's EFST_DEVIL1 at the max job level with SG_DEVIL)
     bool isDevilBlind = PCCheckSkill(*identity, ROWOW_SKILL_SG_DEVIL) > 0 && PCIsMaxJobLevel(*identity) == true;
-    std::string addonMessage = fmt::format("ROWOWSTATUS\t{}\t{},{},{},{},{},{},{},{}\t{}\t{}\t{}\t{},{},{},{},{},{},{},{},{},{},{},{},{}\t{}",
+    // MergedWorlds ro-approach (Nathan 2026-11-13): then "\t<normal attack range in cells>" (status->rhw.range: 1 for melee, a bow's), which the
+    // addon gives the client (roAttackRange) for walking into range of an attack
+    std::string addonMessage = fmt::format("ROWOWSTATUS\t{}\t{},{},{},{},{},{},{},{}\t{}\t{}\t{}\t{},{},{},{},{},{},{},{},{},{},{},{},{}\t{}\t{}",
         job != nullptr ? job->Name : "?", identity->BaseLevel, identity->BaseExp, PCNextBaseExp(*identity), identity->JobLevel, identity->JobExp, PCNextJobExp(*identity),
         identity->StatusPoints, identity->SkillPoints, stats, bonusStats, raiseCosts,
         status.BaseAttack + status.WeaponAttack + status.LeftWeaponAttack, status.WeaponRefineAttack + status.LeftWeaponRefineAttack, status.MagicAttackMin,
         status.MagicAttackMax, status.Def, status.Def2, status.MDef, status.MDef2 - (status.Stats[ROWOW_STAT_VIT] / 2), status.Hit, status.Flee, status.Flee2 / 10,
-        status.Critical / 10, (2000 - status.AttackMotion) / 10, isDevilBlind == true ? 1 : 0);
+        status.Critical / 10, (2000 - status.AttackMotion) / 10, isDevilBlind == true ? 1 : 0, std::max<int32>(1, status.Range));
     WorldPacket data;
     ChatHandler::BuildChatPacket(data, CHAT_MSG_SYSTEM, LANG_ADDON, nullptr, nullptr, addonMessage);
     player->SendDirectMessage(&data);

@@ -21,6 +21,8 @@
 #include "GossipDef.h"
 #include "Item.h"
 #include "Log.h"
+#include "Mail.h"
+#include "MailScript.h"
 #include "Map.h"
 #include "ObjectAccessor.h"
 #include "ObjectMgr.h"
@@ -107,6 +109,61 @@ namespace
                 return true;
         }
         return false;
+    }
+
+    // RO mail (Nathan 2026-11-13: free, zeny or items attached): a mail sent in the form carries MAIL_CHECK_MASK_MW_ZENY (ROWOW_IdentityMailScript), so
+    // its money is zeny, and comes out only in the form; any other mail's money is the character's own, and comes out only out of it.  An RO item
+    // comes out only in the form (into its carried set), anything else only out of it, and a cash-on-delivery mail's items not in the form (its
+    // zeny would pay the sender's money).  True when it's refused, which the client is told so its mail window lets go
+    bool IsMailTakeRefused(Player* player, WorldPacket const& packet)
+    {
+        if (packet.GetOpcode() != CMSG_MAIL_TAKE_MONEY && packet.GetOpcode() != CMSG_MAIL_TAKE_ITEM)
+            return false;
+        WorldPacket packetCopy(packet);
+        ObjectGuid mailboxGUID;
+        uint32 mailID = 0;
+        uint32 itemGUIDLow = 0;
+        packetCopy >> mailboxGUID >> mailID;
+        if (packet.GetOpcode() == CMSG_MAIL_TAKE_ITEM)
+            packetCopy >> itemGUIDLow;
+        Mail* mail = player->GetMail(mailID);
+        if (mail == nullptr)
+            return false; // The handler answers it
+        bool isInForm = ROWOW->IsInROForm(player);
+        char const* refusal = nullptr;
+        if (packet.GetOpcode() == CMSG_MAIL_TAKE_MONEY)
+        {
+            bool isZeny = (mail->checked & MAIL_CHECK_MASK_MW_ZENY) != 0;
+            if (isZeny == true && isInForm == false)
+                refusal = "That's zeny: it can only be taken in the Ragnarok Online world.";
+            else if (isZeny == false && isInForm == true)
+                refusal = "That money can't be taken as your Ragnarok Online self.";
+            if (refusal != nullptr)
+            {
+                ChatHandler(player->GetSession()).SendNotification(refusal);
+                player->SendMailResult(mailID, MAIL_MONEY_TAKEN, MAIL_ERR_INTERNAL_ERROR);
+                return true;
+            }
+            return false;
+        }
+        uint32 itemTemplateID = 0;
+        for (MailItemInfo const& mailItem : mail->items)
+            if (mailItem.item_guid == itemGUIDLow)
+                itemTemplateID = mailItem.item_template;
+        if (itemTemplateID == 0)
+            return false; // The handler answers it
+        bool isROItem = ROWOW->IsROItemTemplate(itemTemplateID);
+        if (isROItem == true && isInForm == false)
+            refusal = "Ragnarok Online items can only be taken from the mail in the Ragnarok Online world.";
+        else if (isROItem == false && isInForm == true)
+            refusal = "You can't take that as your Ragnarok Online self.";
+        else if (isInForm == true && mail->COD != 0)
+            refusal = "Cash on delivery can't be paid in zeny.";
+        if (refusal == nullptr)
+            return false;
+        ChatHandler(player->GetSession()).SendNotification(refusal);
+        player->SendMailResult(mailID, MAIL_ITEM_TAKEN, MAIL_ERR_INTERNAL_ERROR);
+        return true;
     }
 
     // A place in a carried set: the bag slots and the backpack, or any slot of a bag (NULL_SLOT for anywhere in it)
@@ -546,6 +603,14 @@ public:
             money = uint32(ROWOW->PCModifySellValue(player, int32(money)));
     }
 
+    void OnPlayerMailPostage(Player* player, uint32& cost) override
+    {
+        // RO mail is free (Nathan 2026-11-13): in the form no postage is taken, whatever's attached (RO's own 2500 zeny an item and 2% of the
+        // zeny sent included).  Out of the form it's the character's own mail, at WoW's postage
+        if (ROWOW->IsEnabled == true && ROWOW->IsInROForm(player) == true)
+            cost = 0;
+    }
+
     bool OnPlayerCanBuybackItem(Player* player, Item* item) override
     {
         // An item comes back for the money it sold for, which never crosses between zeny and the character's money: an RO item (only an RO shop buys
@@ -747,6 +812,9 @@ public:
         // The Ragnarok bank tab's Adventurer's Bags, for every character
         if (IsStorageBagMoveRefused(player, packet) == true)
             return false;
+        // RO mail's zeny and RO items only in the form, the character's money and its own things only out of it, for every character
+        if (IsMailTakeRefused(player, packet) == true)
+            return false;
         // An identity's look isn't a buff to cancel (it has no icon to click; this is for a macro or a made-up packet)
         if (packet.GetOpcode() == CMSG_CANCEL_AURA)
         {
@@ -894,10 +962,9 @@ public:
                 player->PlayerTalkClass->SendCloseGossip();
                 return false;
             }
-            // Money that would cross between zeny and the character's money, or pay for the character's things with zeny (plan section 8 item 13)
-            case CMSG_SEND_MAIL:
-            case CMSG_MAIL_TAKE_MONEY:
-            case CMSG_MAIL_TAKE_ITEM:
+            // Money that would cross between zeny and the character's money, or pay for the character's things with zeny (plan section 8 item 13).
+            // Mail is the form's own (IsMailTakeRefused, OnPlayerCanSendMail), but a mail's text made into a letter is a WoW item
+            case CMSG_MAIL_CREATE_TEXT_ITEM:
             case CMSG_AUCTION_SELL_ITEM:
             case CMSG_AUCTION_PLACE_BID:
             case CMSG_AUCTION_REMOVE_ITEM:
@@ -1208,6 +1275,9 @@ public:
             { "identify", HandleROIdentifyCommand, SEC_PLAYER,   Console::No },
             { "cardlist", HandleROCardListCommand, SEC_PLAYER,   Console::No },
             { "compound", HandleROCompoundCommand, SEC_PLAYER,   Console::No },
+            { "cardslots", HandleROCardSlotsCommand, SEC_PLAYER, Console::No },
+            { "cardinsert", HandleROCardInsertCommand, SEC_PLAYER, Console::No },
+            { "cardremove", HandleROCardRemoveCommand, SEC_PLAYER, Console::No },
             { "skillup",  HandleROSkillUpCommand, SEC_PLAYER,    Console::No },
             { "skillplan", HandleROSkillPlanCommand, SEC_PLAYER, Console::No },
             { "skills",   HandleROSkillsCommand, SEC_PLAYER,     Console::No },
@@ -3136,8 +3206,46 @@ public:
             return false;
         Item* card = ROWOWMod::GetItemByClientPosition(player, cardBag, cardSlot);
         Item* equipment = ROWOWMod::GetItemByClientPosition(player, bag, slot);
-        if (card == nullptr || equipment == nullptr || ROWOW->PCInsertCard(player, card, equipment) == false)
+        if (card == nullptr || equipment == nullptr || ROWOW->InsertCardFreely(player, card, equipment) == false)
             handler->SendSysMessage("Compounding has failed."); // clif_insert_card's failure (msgstringtable 494)
+        return true;
+    }
+
+    // MergedWorlds ro-card-slots (Nathan 2026-11-13): the RO Cards window's, cards in and out of the bags' RO items freely, worn or not
+    static bool HandleROCardSlotsCommand(ChatHandler* handler, uint32 bag, uint32 slot)
+    {
+        // An item's card slots and the cards in the bags that fit it (ROWOWCARDSLOTS)
+        Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
+        if (player == nullptr || ROWOW->IsInROForm(player) == false)
+            return false;
+        ROWOW->SendCardSlotsToClient(player, ROWOWMod::GetItemByClientPosition(player, bag, slot));
+        return true;
+    }
+
+    static bool HandleROCardInsertCommand(ChatHandler* handler, uint32 cardBag, uint32 cardSlot, uint32 bag, uint32 slot)
+    {
+        // A card from the bags into the item's first free slot, then the item's slots again
+        Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
+        if (player == nullptr || ROWOW->IsInROForm(player) == false)
+            return false;
+        Item* card = ROWOWMod::GetItemByClientPosition(player, cardBag, cardSlot);
+        Item* equipment = ROWOWMod::GetItemByClientPosition(player, bag, slot);
+        if (card == nullptr || equipment == nullptr || ROWOW->InsertCardFreely(player, card, equipment) == false)
+            handler->SendSysMessage("Compounding has failed."); // clif_insert_card's failure (msgstringtable 494)
+        ROWOW->SendCardSlotsToClient(player, equipment);
+        return true;
+    }
+
+    static bool HandleROCardRemoveCommand(ChatHandler* handler, uint32 bag, uint32 slot, uint32 cardSlot)
+    {
+        // The card in one of the item's slots (from 1) out into the bags, then the item's slots again
+        Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
+        if (player == nullptr || ROWOW->IsInROForm(player) == false)
+            return false;
+        Item* equipment = ROWOWMod::GetItemByClientPosition(player, bag, slot);
+        if (equipment == nullptr || cardSlot < 1 || ROWOW->RemoveCardFreely(player, equipment, uint8(cardSlot - 1)) == false)
+            handler->SendSysMessage("The card couldn't be removed.");
+        ROWOW->SendCardSlotsToClient(player, equipment);
         return true;
     }
 
@@ -4083,8 +4191,27 @@ public:
     }
 };
 
+// RO mail (Nathan 2026-11-13): a mail a player sends in the form is marked as the form's, so its money stays zeny (IsMailTakeRefused).  A returned
+// mail keeps its mark (the core's return paths); a COD payment can't come from the form (OnPlayerCanSendMail, IsMailTakeRefused)
+class ROWOW_IdentityMailScript : public MailScript
+{
+public:
+    ROWOW_IdentityMailScript() : MailScript("ROWOW_IdentityMailScript", { MAILHOOK_ON_BEFORE_MAIL_DRAFT_SEND_MAIL_TO }) {}
+
+    void OnBeforeMailDraftSendMailTo(MailDraft* /*mailDraft*/, MailReceiver const& /*receiver*/, MailSender const& sender, MailCheckMask& checked,
+        uint32& /*deliver_delay*/, uint32& /*custom_expiration*/, bool& /*deleteMailItemsFromDB*/, bool& /*sendMail*/) override
+    {
+        if (ROWOW->IsEnabled == false || sender.GetMailMessageType() != MAIL_NORMAL || (checked & MAIL_CHECK_MASK_RETURNED) != 0)
+            return;
+        Player* player = ObjectAccessor::FindPlayerByLowGUID(sender.GetSenderId());
+        if (player != nullptr && ROWOW->IsInROForm(player) == true)
+            checked = MailCheckMask(checked | MAIL_CHECK_MASK_MW_ZENY);
+    }
+};
+
 void AddROWOWIdentityScripts()
 {
+    new ROWOW_IdentityMailScript();
     new ROWOW_IdentityPlayerScript();
     new ROWOW_IdentityServerScript();
     new ROWOW_IdentityUnitScript();

@@ -1086,7 +1086,7 @@ void ROWOWMod::FollowerAttackTimerSub(Player* /*sd*/, ROWOWFollower& fd, Creatur
     int32 range = sstatus->Range;
     if (target->isMoving() == true)
         range++; // Extra range when chasing
-    if (BattleCheckRange(md, target, range) == false)
+    if (BattleCheckAttackRange(md, target, range) == false) // MergedWorlds ro-melee-range: melee reaches 50% further
         return;
     if (mob->IsWalking == true)
         UnitStopWalking(md);

@@ -2507,7 +2507,23 @@ void ROWOWMod::RegisterNpcScriptCommands()
 
     // Commands of systems that aren't here: the runs go on past them.  setunitdata and areamobuseskill are only in battlegrounds and instances,
     // openmail and openauction ask for windows an identity has none of, and freeloop only lifts the loop limit of guild castle scripts
-    for (char const* unusedCommandName : { "setunitdata", "areamobuseskill", "openmail", "openauction", "freeloop" })
+    engine->RegisterCommand("openmail", [this, getNpcUnit](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const&)
+    {
+        // openmail: the mailbox (MergedWorlds RO mail, Nathan 2026-11-13: a Kafra's Use Mail, free in the form).  The NPC's creature answers the
+        // mail's packets as a mailbox (UNIT_NPC_FLAG_MAILBOX), from RO's click range on an RO map (OnPlayerCreatureInteractionReach)
+        Player* player = GetAttachedPlayer(context, "openmail");
+        Unit* npcUnit = getNpcUnit(context, context.Npc);
+        Creature* creature = npcUnit != nullptr ? npcUnit->ToCreature() : nullptr;
+        if (player == nullptr || creature == nullptr)
+            return ROWOWScriptValue::FromNumber(0);
+        if (creature->HasNpcFlag(UNIT_NPC_FLAG_MAILBOX) == false)
+            creature->SetNpcFlag(UNIT_NPC_FLAG_MAILBOX);
+        WorldPacket data(SMSG_SHOW_MAILBOX, 8);
+        data << creature->GetGUID();
+        player->SendDirectMessage(&data);
+        return ROWOWScriptValue::FromNumber(0);
+    });
+    for (char const* unusedCommandName : { "setunitdata", "areamobuseskill", "openauction", "freeloop" })
     {
         engine->RegisterCommand(unusedCommandName, [](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const&) { return ROWOWScriptValue::FromNumber(0); });
         engine->SetStub(unusedCommandName);

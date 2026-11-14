@@ -853,9 +853,10 @@ SpellCastResult ROWOWMod::UnitSkillUse(Unit* src, Unit* target, WorldLocation co
     }
     // unit_skilluse_id2's range check for a player's skill at another unit (not a combo, which has its attack's reach): the skill's range in
     // cells with a line of attack, 2D.  MergedWorlds ro-attack-range (Nathan 2026-11-13): WoW's spell range is in yards and 3D, and a melee
-    // skill's is WoW's 5 yard combat range, further than RO's cell
+    // skill's is WoW's 5 yard combat range, further than RO's cell.  A melee one (under 4 cells) reaches 50% further, as the normal attack does
+    // (MergedWorlds ro-melee-range, BattleCheckAttackRange)
     if (src->IsPlayer() == true && target != src && GetSkillUnitData(src)->SkillItemID != skillID && (GetSCE(src, ROWOW_SC_COMBO) == nullptr || SkillIsCombo(skillID) == 0) &&
-        BattleCheckRange(src, target, SkillGetRange2(src, skillID, skillLevel, true)) == false)
+        BattleCheckAttackRange(src, target, SkillGetRange2(src, skillID, skillLevel, true)) == false)
         return SPELL_FAILED_OUT_OF_RANGE;
     Player* sd = src->ToPlayer();
     ROWOWSkillUnitData* ud = GetSkillUnitData(src);

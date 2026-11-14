@@ -441,8 +441,12 @@ float ROWOWMod::GetAutoAttackExtraRange(Player* player, Unit const* victim) cons
     float wowReach = player->GetMeleeRange(victim) + player->GetLeewayBonusRange(victim);
     if (GetMapGrid(player->GetMapId()) != nullptr && IsROCombatant(victim) == true)
     {
+        // MergedWorlds ro-melee-range (Nathan 2026-11-13): a melee reach is 50% longer, as a monster's is (BattleCheckAttackRange); a longer one
+        // is RO's
         int32 range = status->Range + ((victim->isMoving() == true && player->isMoving() == false) ? 1 : 0);
-        if (CheckDistanceClientBL(player, victim, range) == false || BattleCheckRange(player, victim, range) == false)
+        bool isInReach = range < 4 ? BattleCheckAttackRange(player, victim, range) :
+            (CheckDistanceClientBL(player, victim, range) == true && BattleCheckRange(player, victim, range) == true);
+        if (isInReach == false)
             return -wowReach; // Out of range: the core says so and tries again in 100 ms
         return std::max(0.0f, player->GetExactDist(victim) - wowReach + 0.1f);
     }

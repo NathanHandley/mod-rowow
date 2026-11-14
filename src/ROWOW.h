@@ -2921,6 +2921,12 @@ public:
     void SetItemCard(Player* player, Item* item, uint8 slot, uint32 cardItemID) const;
     bool PCInsertCard(Player* player, Item* card, Item* equipment); // pc_insert_card
     void SendCardTargetsToClient(Player* player, Item* card); // clif_use_card: the items a card can go into (ROWOWCARDLIST)
+    // MergedWorlds ro-card-slots (Nathan 2026-11-13): cards go into and come out of the RO items in the bags freely, worn or not, from the RO Cards
+    // window (no card remover NPC, no cost, no failure).  The fit rules are pc_insert_card's
+    bool IsCardFitFor(ROWOWItem const& roCard, Item* equipment, ROWOWItem const& roEquipment); // pc_insert_card's checks but the item being worn and a free slot
+    void SendCardSlotsToClient(Player* player, Item* equipment); // ROWOWCARDSLOTS: an item's slots and cards, and the cards in the bags that fit it
+    bool InsertCardFreely(Player* player, Item* card, Item* equipment); // Into the first free slot, a worn item taken off and put back on around it
+    bool RemoveCardFreely(Player* player, Item* equipment, uint8 cardSlot); // Out into the bags, a worn item taken off and put back on around it
     void SendItemCardsToClient(Player* player, ROWOWIdentity& identity, bool isForced); // The cards in the bags' items (ROWOWCARDS)
     int64 BattleCalcCardFix(int32 attackType, Unit* src, Unit* target, std::bitset<ROWOW_NK_MAX> nk, uint16 skillID, int32 rhEle, int32 lhEle, int64 damage, int32 left,
         int32 flag) const; // battle_calc_cardfix
@@ -3407,6 +3413,9 @@ public:
     bool CheckDistanceBL(Unit const* src, Unit const* target, int32 distance) const; // check_distance_bl
     bool CheckDistanceClientBL(Unit const* src, Unit const* target, int32 distance) const; // check_distance_client_bl, a player's attack range
     bool BattleCheckRange(Unit const* src, Unit const* bl, int32 range) const; // battle_check_range, for a monster
+    // MergedWorlds ro-melee-range (Nathan 2026-11-13): an attack's or skill's reach, BattleCheckRange's with a melee one (under 4 cells) 50% longer
+    bool BattleCheckAttackRange(Unit const* src, Unit const* bl, int32 range) const;
+    int32 GetAttackReachCells(int32 range) const; // The cells (as distance_bl counts) the reach can get to, for searching around
     bool MobCheckVisibility(Creature* md, Unit const* target, bool isCheckBlind) const; // status_check_visibility
     bool MobCanReach(Creature* md, Unit const* bl, int32 range) const; // mob_can_reach
     int32 MobLinkSearch(Creature* md, Unit* target, uint64 tick); // mob_linksearch over assist_range
