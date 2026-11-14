@@ -69,8 +69,8 @@ bool ROWOWMod::SkillAutoCast(Unit* src, Unit* target, uint16 skillID, uint16 ski
         return false;
     if (skillID == ROWOW_SKILL_PF_SPIDERWEB) // Special case, due to its nature of coding.
         type = ROWOW_CAST_GROUND;
-    else if (skillID == ROWOW_SKILL_AS_SONICBLOW) // Special case, Sonic Blow autospell should stop the player attacking.
-        src->AttackStop();
+    else if (skillID == ROWOW_SKILL_AS_SONICBLOW && src->IsPlayer() == false) // Special case, Sonic Blow autospell should stop the player attacking.
+        src->AttackStop(); // MergedWorlds wow-style-attack: a player's auto attack goes on
     bool wasAutoCast = ud->IsAutoCast;
     ud->IsAutoCast = true;
     if (sd != nullptr)
@@ -114,16 +114,9 @@ void ROWOWMod::SkillAutoSpellAdditionalEffect(Unit* src, Unit* bl, uint16 /*skil
         if (int32(urand(0, 999)) >= rate)
             continue;
         Unit* tbl = (autoSpell.Flag & ROWOW_AUTOSPELL_FORCE_TARGET) != 0 ? bl : src;
-        if (SkillAutoCast(src, tbl, skill, skillLevel, tick) == false)
-            continue;
-        // Set canact delay. [Skotlex]
-        ROWOWSkillUnitData* ud = GetSkillUnitData(src);
-        int32 delay = SkillDelayFix(src, skill, skillLevel);
-        if (ud->CanActTime < tick + uint64(delay))
-        {
-            ud->CanActTime = std::max<uint64>(tick + uint64(delay), ud->CanActTime);
-            SendSkillDelayToClient(src, skill);
-        }
+        // rAthena sets the canact delay here [Skotlex].  MergedWorlds wow-style-attack (Nathan 2026-11-13): this is always a player's, whose
+        // auto attack's procs hold no skill back
+        SkillAutoCast(src, tbl, skill, skillLevel, tick);
     }
 }
 
@@ -156,16 +149,9 @@ void ROWOWMod::SkillAutoSpellCounterAdditionalEffect(Unit* src, Unit* bl, uint16
             if (int32(urand(0, 999)) >= autoRate)
                 continue;
             Unit* tbl = (autoSpell.Flag & ROWOW_AUTOSPELL_FORCE_TARGET) != 0 ? src : bl;
-            if (SkillAutoCast(bl, tbl, autoSkillID, autoSkillLevel, tick) == false)
-                continue;
-            // Set canact delay. [Skotlex]
-            ROWOWSkillUnitData* ud = GetSkillUnitData(bl);
-            int32 delay = SkillDelayFix(bl, autoSkillID, autoSkillLevel);
-            if (ud->CanActTime < tick + uint64(delay))
-            {
-                ud->CanActTime = std::max<uint64>(tick + uint64(delay), ud->CanActTime);
-                SendSkillDelayToClient(bl, autoSkillID);
-            }
+            // rAthena sets the canact delay here [Skotlex].  MergedWorlds wow-style-attack: this is always a player's, whose procs hold no
+            // skill back
+            SkillAutoCast(bl, tbl, autoSkillID, autoSkillLevel, tick);
         }
     }
 

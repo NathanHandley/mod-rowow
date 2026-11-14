@@ -1452,16 +1452,132 @@ bool ROWOWMod::PCInsertCard(Player* player, Item* card, Item* equipment)
     return true;
 }
 
+bool ROWOWMod::IsCardFitFor(ROWOWItem const& roCard, Item* equipment, ROWOWItem const& roEquipment)
+{
+    // pc_insert_card's rules, but for the item being worn and having a free slot
+    if (roEquipment.Type != ROWOW_ITEM_TYPE_WEAPON && roEquipment.Type != ROWOW_ITEM_TYPE_ARMOR)
+        return false; // only weapons and armor are allowed
+    if (roCard.Type != ROWOW_ITEM_TYPE_CARD || roCard.CardEnchantmentID == 0)
+        return false; // must be a card
+    if (IsItemIdentified(equipment) == false)
+        return false; // target must be identified
+    int32 starCrumbs = 0, forgeElement = 0;
+    if (GetItemForge(equipment, starCrumbs, forgeElement) == true)
+        return false; // itemdb_isspecial: a forged weapon's card slots hold its forge
+    if ((roEquipment.Locations & roCard.Locations) == 0)
+        return false; // card cannot be compounded on this item type
+    if (roEquipment.Type == ROWOW_ITEM_TYPE_WEAPON && roCard.Locations == ROWOW_EQUIP_POSITION_HAND_L)
+        return false; // attempted to place shield card on left-hand weapon.
+    if (roEquipment.Type == ROWOW_ITEM_TYPE_ARMOR && (roCard.Locations & ROWOW_EQUIP_POSITION_ACC) != 0 && (roCard.Locations & ROWOW_EQUIP_POSITION_ACC) != ROWOW_EQUIP_POSITION_ACC
+        && (roEquipment.Locations & ROWOW_EQUIP_POSITION_ACC) != (roCard.Locations & ROWOW_EQUIP_POSITION_ACC))
+        return false; // specific accessory-card can only be inserted to specific accessory.
+    return true;
+}
+
+void ROWOWMod::SendCardSlotsToClient(Player* player, Item* equipment)
+{
+    // "ROWOWCARDSLOTS\t<bag>:<slot>:<slot count>:<card>:<card>:<card>:<card>\t<card bag>:<card slot>,...": the item's card slots (0 for an item
+    // that takes no cards: not a weapon or armor, unidentified, or forged) with the card item templates in them, and the cards in the bags that
+    // fit it, when it has a free slot
+    uint32 bag = 0;
+    uint32 slot = 0;
+    ROWOWItem const* roEquipment = GetROItem(equipment);
+    if (roEquipment == nullptr || GetClientItemPosition(equipment, bag, slot) == false)
+        return;
+    int32 starCrumbs = 0, forgeElement = 0;
+    bool takesCards = (roEquipment->Type == ROWOW_ITEM_TYPE_WEAPON || roEquipment->Type == ROWOW_ITEM_TYPE_ARMOR) && IsItemIdentified(equipment) == true
+        && GetItemForge(equipment, starCrumbs, forgeElement) == false;
+    uint8 slotCount = takesCards == true ? std::min<uint8>(roEquipment->Slots, ROWOW_MAX_SLOTS) : 0;
+    uint32 cardTemplateIDs[ROWOW_MAX_SLOTS] = { };
+    bool hasFreeSlot = false;
+    for (uint8 cardSlot = 0; cardSlot < slotCount; cardSlot++)
+    {
+        auto cardTemplateIDIter = ItemTemplateIDsByItemID.find(GetItemCard(equipment, cardSlot));
+        if (cardTemplateIDIter != ItemTemplateIDsByItemID.end())
+            cardTemplateIDs[cardSlot] = cardTemplateIDIter->second;
+        else
+            hasFreeSlot = true;
+    }
+    std::string cardPositions;
+    for (uint8 cardBag = 0; cardBag <= 4 && hasFreeSlot == true; cardBag++)
+    {
+        for (uint32 cardBagSlot = 1; cardBagSlot <= MAX_BAG_SIZE; cardBagSlot++)
+        {
+            Item* card = GetItemByClientPosition(player, cardBag, cardBagSlot);
+            ROWOWItem const* roCard = GetROItem(card);
+            if (roCard == nullptr || roCard->Type != ROWOW_ITEM_TYPE_CARD || IsCardFitFor(*roCard, equipment, *roEquipment) == false)
+                continue;
+            cardPositions += fmt::format("{}{}:{}", cardPositions.empty() == true ? "" : ",", cardBag, cardBagSlot);
+        }
+    }
+    WorldPacket data;
+    ChatHandler::BuildChatPacket(data, CHAT_MSG_SYSTEM, LANG_ADDON, nullptr, nullptr, fmt::format("ROWOWCARDSLOTS\t{}:{}:{}:{}:{}:{}:{}\t{}", bag, slot, slotCount,
+        cardTemplateIDs[0], cardTemplateIDs[1], cardTemplateIDs[2], cardTemplateIDs[3], cardPositions));
+    player->SendDirectMessage(&data);
+}
+
+bool ROWOWMod::InsertCardFreely(Player* player, Item* card, Item* equipment)
+{
+    // pc_insert_card, worn or not: a worn item comes off first (its equip scripts and bonuses go), and goes back on in the same positions with the
+    // card in it (its scripts run again, the card's with them)
+    ROWOWItem const* roEquipment = GetROItem(equipment);
+    ROWOWItem const* roCard = GetROItem(card);
+    if (roEquipment == nullptr || roCard == nullptr || IsCardFitFor(*roCard, equipment, *roEquipment) == false || PCCantAct(player) == true)
+        return false;
+    uint8 freeSlot = 0;
+    while (freeSlot < roEquipment->Slots && GetItemCard(equipment, freeSlot) != 0)
+        freeSlot++;
+    if (freeSlot >= roEquipment->Slots)
+        return false;
+    uint32 wornPositions = uint32(GetIdentityEquipPosition(*GetIdentity(player), equipment->GetGUID().GetCounter()));
+    if (wornPositions != 0 && PCUnequipItem(player, wornPositions & (~wornPositions + 1), 1) == false)
+        return false;
+    bool isInserted = PCInsertCard(player, card, equipment);
+    if (wornPositions != 0)
+        PCEquipItem(player, equipment, int32(wornPositions));
+    return isInserted;
+}
+
+bool ROWOWMod::RemoveCardFreely(Player* player, Item* equipment, uint8 cardSlot)
+{
+    // The card in a slot back into the bags (refused when it wouldn't fit there, rather than landing at the player's feet), worn or not: a worn item
+    // comes off first and goes back on in the same positions without it
+    ROWOWItem const* roEquipment = GetROItem(equipment);
+    int32 starCrumbs = 0, forgeElement = 0;
+    if (roEquipment == nullptr || (roEquipment->Type != ROWOW_ITEM_TYPE_WEAPON && roEquipment->Type != ROWOW_ITEM_TYPE_ARMOR) || cardSlot >= std::min<uint8>(roEquipment->Slots, ROWOW_MAX_SLOTS)
+        || GetItemForge(equipment, starCrumbs, forgeElement) == true || PCCantAct(player) == true)
+        return false;
+    uint32 cardItemID = GetItemCard(equipment, cardSlot);
+    auto cardTemplateIDIter = ItemTemplateIDsByItemID.find(cardItemID);
+    if (cardItemID == 0 || cardTemplateIDIter == ItemTemplateIDsByItemID.end())
+        return false;
+    ItemPosCountVec destination;
+    if (player->CanStoreNewItem(NULL_BAG, NULL_SLOT, destination, cardTemplateIDIter->second, 1) != EQUIP_ERR_OK)
+    {
+        ChatHandler(player->GetSession()).SendSysMessage("There's no room in your bags for the card.");
+        return false;
+    }
+    uint32 wornPositions = uint32(GetIdentityEquipPosition(*GetIdentity(player), equipment->GetGUID().GetCounter()));
+    if (wornPositions != 0 && PCUnequipItem(player, wornPositions & (~wornPositions + 1), 1) == false)
+        return false;
+    SetItemCard(player, equipment, cardSlot, 0);
+    GiveROItem(player, cardItemID, 1, true);
+    if (wornPositions != 0)
+        PCEquipItem(player, equipment, int32(wornPositions));
+    ChatHandler(player->GetSession()).SendSysMessage("The card was removed.");
+    SendItemCardsToClient(player, *GetIdentity(player), true);
+    return true;
+}
+
 void ROWOWMod::SendCardTargetsToClient(Player* player, Item* card)
 {
-    // clif_use_card: the identified, unworn equipment in the bags with a free slot the card fits ("ROWOWCARDLIST <card bag>:<card slot>\t
-    // <bag>:<slot>,...")
+    // clif_use_card: the identified equipment in the bags with a free slot the card fits ("ROWOWCARDLIST <card bag>:<card slot>\t
+    // <bag>:<slot>,..."), worn or not (MergedWorlds ro-card-slots: InsertCardFreely takes a worn item off and back on around it)
     uint32 cardBag = 0;
     uint32 cardSlot = 0;
     ROWOWItem const* roCard = GetROItem(card);
     if (roCard == nullptr || roCard->Type != ROWOW_ITEM_TYPE_CARD || GetClientItemPosition(card, cardBag, cardSlot) == false)
         return;
-    ROWOWIdentity* identity = GetIdentity(player);
     std::string positions;
     for (uint8 bag = 0; bag <= 4; bag++)
     {
@@ -1469,15 +1585,7 @@ void ROWOWMod::SendCardTargetsToClient(Player* player, Item* card)
         {
             Item* item = GetItemByClientPosition(player, bag, slot);
             ROWOWItem const* roItem = GetROItem(item);
-            int32 starCrumbs = 0, forgeElement = 0;
-            if (roItem == nullptr || (roItem->Type != ROWOW_ITEM_TYPE_WEAPON && roItem->Type != ROWOW_ITEM_TYPE_ARMOR) || IsItemIdentified(item) == false
-                || (roItem->Locations & roCard->Locations) == 0 || GetIdentityEquipPosition(*identity, item->GetGUID().GetCounter()) != 0 ||
-                GetItemForge(item, starCrumbs, forgeElement) == true)
-                continue;
-            if (roItem->Type == ROWOW_ITEM_TYPE_WEAPON && roCard->Locations == ROWOW_EQUIP_POSITION_HAND_L)
-                continue;
-            if (roItem->Type == ROWOW_ITEM_TYPE_ARMOR && (roCard->Locations & ROWOW_EQUIP_POSITION_ACC) != 0 && (roCard->Locations & ROWOW_EQUIP_POSITION_ACC) != ROWOW_EQUIP_POSITION_ACC
-                && (roItem->Locations & ROWOW_EQUIP_POSITION_ACC) != (roCard->Locations & ROWOW_EQUIP_POSITION_ACC))
+            if (roItem == nullptr || IsCardFitFor(*roCard, item, *roItem) == false)
                 continue;
             uint8 freeSlot = 0;
             while (freeSlot < roItem->Slots && GetItemCard(item, freeSlot) != 0)

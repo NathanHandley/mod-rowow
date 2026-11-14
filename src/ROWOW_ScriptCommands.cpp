@@ -2147,6 +2147,20 @@ void ROWOWMod::RegisterNpcScriptCommands()
             PCResetSkill(player);
         return ROWOWScriptValue::FromNumber(0);
     });
+    engine->RegisterCommand("resetstatus", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const&)
+    {
+        // resetstatus{ <char id>}: pc_resetstate, every stat 1 and the base level's status points back (the Hypnotist's, Nathan 2026-11-13)
+        if (Player* player = GetAttachedPlayer(context, "resetstatus"))
+        {
+            ROWOWIdentity* identity = GetIdentity(player);
+            if (identity->Exists == true)
+            {
+                PCResetState(*identity);
+                RefreshROForm(player);
+            }
+        }
+        return ROWOWScriptValue::FromNumber(0);
+    });
     engine->RegisterCommand("resetlvl", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
     {
         // resetlvl <action type>{,<char id>}: pc_resetlvl (the Valkyrie's rebirth is type 1, after the change to High Novice)
@@ -2493,7 +2507,23 @@ void ROWOWMod::RegisterNpcScriptCommands()
 
     // Commands of systems that aren't here: the runs go on past them.  setunitdata and areamobuseskill are only in battlegrounds and instances,
     // openmail and openauction ask for windows an identity has none of, and freeloop only lifts the loop limit of guild castle scripts
-    for (char const* unusedCommandName : { "setunitdata", "areamobuseskill", "openmail", "openauction", "freeloop" })
+    engine->RegisterCommand("openmail", [this, getNpcUnit](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const&)
+    {
+        // openmail: the mailbox (MergedWorlds RO mail, Nathan 2026-11-13: a Kafra's Use Mail, free in the form).  The NPC's creature answers the
+        // mail's packets as a mailbox (UNIT_NPC_FLAG_MAILBOX), from RO's click range on an RO map (OnPlayerCreatureInteractionReach)
+        Player* player = GetAttachedPlayer(context, "openmail");
+        Unit* npcUnit = getNpcUnit(context, context.Npc);
+        Creature* creature = npcUnit != nullptr ? npcUnit->ToCreature() : nullptr;
+        if (player == nullptr || creature == nullptr)
+            return ROWOWScriptValue::FromNumber(0);
+        if (creature->HasNpcFlag(UNIT_NPC_FLAG_MAILBOX) == false)
+            creature->SetNpcFlag(UNIT_NPC_FLAG_MAILBOX);
+        WorldPacket data(SMSG_SHOW_MAILBOX, 8);
+        data << creature->GetGUID();
+        player->SendDirectMessage(&data);
+        return ROWOWScriptValue::FromNumber(0);
+    });
+    for (char const* unusedCommandName : { "setunitdata", "areamobuseskill", "openauction", "freeloop" })
     {
         engine->RegisterCommand(unusedCommandName, [](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const&) { return ROWOWScriptValue::FromNumber(0); });
         engine->SetStub(unusedCommandName);

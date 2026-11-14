@@ -604,7 +604,7 @@ bool ROWOWMod::MobSkillUse(Creature* md, uint64 tick, int32 event, int64 damage,
                 MapSearchFreeCell(bl, j, x, y);
             }
             mob->SkillIdx = int32(i);
-            if (BattleCheckRange(md, bl, range) == true)
+            if (BattleCheckAttackRange(md, bl, range) == true) // MergedWorlds ro-melee-range: a melee skill reaches 50% further
             {
                 // unit_skilluse_id2 and unit_skilluse_pos2's monster part: a player's summons can't summon or teleport
                 bool isAllowed = true;
