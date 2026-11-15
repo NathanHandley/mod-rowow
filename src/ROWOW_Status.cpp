@@ -517,9 +517,20 @@ void ROWOWMod::LoadStatusData()
             }
         }
     }
+    // Without the job table (Ragnarok Online not converted, which LoadIdentityData already says) every job lacks them: one line, not one a job
+    bool const hasJobTable = GetDataTable(ROWOW_DATA_TABLE_JOB) != nullptr;
+    uint32 jobsWithoutBasePoints = 0;
     for (auto const& jobByID : JobsByID)
-        if (jobByID.second.BaseHPByLevel.size() < jobByID.second.MaxBaseLevel || jobByID.second.BaseSPByLevel.size() < jobByID.second.MaxBaseLevel)
+    {
+        if (jobByID.second.BaseHPByLevel.size() >= jobByID.second.MaxBaseLevel && jobByID.second.BaseSPByLevel.size() >= jobByID.second.MaxBaseLevel)
+            continue;
+        jobsWithoutBasePoints++;
+        if (hasJobTable == true)
             LOG_ERROR("module.ROWOW", "ROWOWMod::LoadStatusData found the RO job {} without base HP or SP for every level", jobByID.second.Name);
+    }
+    if (hasJobTable == false && jobsWithoutBasePoints > 0)
+        LOG_INFO("module.ROWOW", "ROWOWMod::LoadStatusData has no {} table, so none of the {} RO jobs has base HP or SP (Ragnarok Online isn't converted)",
+            ROWOW_DATA_TABLE_JOB, jobsWithoutBasePoints);
 
     // Each weapon type's damage against each size (size_fix.yml; a size left out is 100%)
     for (uint8 weaponType = 0; weaponType < ROWOW_WEAPON_TYPE_MAX; weaponType++)
