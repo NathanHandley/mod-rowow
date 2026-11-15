@@ -402,8 +402,11 @@ void ROWOWMod::RegisterNpcScriptCommands()
         int64 count = std::min(GetArgument(arguments, 1, size - first), size - first);
         if (count <= 0)
             return ROWOWScriptValue::FromNumber(0);
+        // The emptied end is unset: "" for a string array (a 0 there would be the text "0" and count in its size: the Izlude Kafra's menu kept two
+        // "0" destinations after Prontera's longer one; Nathan 2026-11-14)
+        ROWOWScriptValue unset = name.empty() == false && name.back() == '$' ? ROWOWScriptValue::FromText("") : ROWOWScriptValue::FromNumber(0);
         for (int64 index = first; index < size; index++)
-            ROWOWSCRIPT->SetVariable(context, name, uint32(index), index + count < size ? ROWOWSCRIPT->GetVariable(context, name, uint32(index + count)) : ROWOWScriptValue::FromNumber(0));
+            ROWOWSCRIPT->SetVariable(context, name, uint32(index), index + count < size ? ROWOWSCRIPT->GetVariable(context, name, uint32(index + count)) : unset);
         return ROWOWScriptValue::FromNumber(0);
     });
     engine->SetReferenceArguments("deletearray", 1);
