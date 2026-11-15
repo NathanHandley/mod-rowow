@@ -743,6 +743,10 @@ uint8 ROWOWMod::PCIsEquip(Player* player, ROWOWIdentity const& identity, Item co
     ROWOWItem const* roItem = GetROItem(item);
     if (roItem == nullptr || roItem->Locations == 0)
         return ROWOW_EQUIP_ACK_FAIL;
+    // Only equipment is worn (itemdb_isequip2): a card's Locations are where it's compounded, not a place to wear it (a Zombie Card was put on as
+    // shoes with ".ro wear"; Nathan 2026-11-14)
+    if (roItem->Type != ROWOW_ITEM_TYPE_WEAPON && roItem->Type != ROWOW_ITEM_TYPE_ARMOR && roItem->Type != ROWOW_ITEM_TYPE_AMMO)
+        return ROWOW_EQUIP_ACK_FAIL;
     if (identity.SpiritSkillID == ROWOW_SKILL_SL_SUPERNOVICE)
     {
         // Spirit of Super Novice equip bonuses. [Skotlex]
