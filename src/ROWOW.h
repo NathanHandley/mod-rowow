@@ -2058,11 +2058,17 @@ struct ROWOWIdentitySlot
 // can't be picked (the lock letters the client is sent in ROWOWIDENT)
 enum ROWOWWorld : uint8
 {
-    ROWOW_WORLD_AZEROTH = 0, // Every map that is neither of the others
-    ROWOW_WORLD_NORRATH = 1, // mod-everquest's maps
-    ROWOW_WORLD_MIDGARD = 2, // The RO maps
-    ROWOW_WORLD_COUNT   = 3
+    ROWOW_WORLD_AZEROTH = 0, // The core's map world 0 (MAP_WORLD_AZEROTH): every map no module registered
+    ROWOW_WORLD_NORRATH = 1, // mod-everquest's maps (its map world EVERQUEST_MAP_WORLD)
+    ROWOW_WORLD_MIDGARD = 2, // The RO maps (map world ROWOW_MAP_WORLD)
+    ROWOW_WORLD_COUNT   = 3,
+    ROWOW_WORLD_NONE    = 3  // Another game's map (Meridian 59's, ...): no identity is shown there, and none can be picked for it
 };
+
+// The RO maps' world id in the core's map worlds (MapWorlds.h; E:\MW\SHARED.md sections 1 and 8), and Norrath's (mod-everquest's
+// EVERQUEST_MAP_WORLD, named here too so mod-rowow builds without mod-everquest)
+#define ROWOW_MAP_WORLD                             1
+#define ROWOW_NORRATH_MAP_WORLD                     5
 enum ROWOWWorldIdentityType : uint8
 {
     ROWOW_WORLD_IDENTITY_WARCRAFT  = 0,
