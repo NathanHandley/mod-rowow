@@ -22,6 +22,7 @@
 #include "Item.h"
 #include "Log.h"
 #include "Map.h"
+#include "MapWorlds.h"
 #include "ObjectAccessor.h"
 #include "ObjectMgr.h"
 #include "Player.h"
@@ -93,11 +94,15 @@ namespace
 
 uint8 ROWOWMod::GetWorldOfMap(uint32 mapID) const
 {
-    if (IsROMap(mapID) == true)
-        return ROWOW_WORLD_MIDGARD;
-    if (IsNorrathMap(mapID) == true)
-        return ROWOW_WORLD_NORRATH;
-    return ROWOW_WORLD_AZEROTH;
+    // The core's map worlds say which game a map is (each module registers its own: SHARED.md section 8).  A map of a world with no identities
+    // (Meridian 59's, ...) is in none of the three: no identity look is put on there, so that game's own display stands
+    switch (MapWorlds::GetWorldOfMap(mapID))
+    {
+        case MAP_WORLD_AZEROTH: return ROWOW_WORLD_AZEROTH;
+        case ROWOW_MAP_WORLD: return ROWOW_WORLD_MIDGARD;
+        case ROWOW_NORRATH_MAP_WORLD: return IsNorrathMap(mapID) == true ? ROWOW_WORLD_NORRATH : ROWOW_WORLD_AZEROTH;
+        default: return ROWOW_WORLD_NONE;
+    }
 }
 
 ROWOWWorldIdentityState* ROWOWMod::GetWorldIdentityState(Player* player)
