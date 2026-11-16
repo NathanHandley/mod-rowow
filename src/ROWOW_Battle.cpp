@@ -3184,7 +3184,7 @@ void ROWOWMod::BattleDrain(Player* sd, Unit* /*tbl*/, int64 rdamage, int64 ldama
         StatusZap(sd, uint32(std::max(0, -thp)), uint32(std::max(0, -tsp)));
 }
 
-int64 ROWOWMod::BattleCalcReturnDamage(Unit* tbl, Unit* src, int64 damage, int32 flag, uint16 skillID, bool isStatusReflect) const
+int64 ROWOWMod::BattleCalcReturnDamage(Unit* tbl, Unit* /*src*/, int64 damage, int32 flag, uint16 skillID, bool isStatusReflect) const
 {
     // battle_calc_return_damage: what a hit bounces back onto its attacker, the gear's (bShortWeaponDamageReturn, bLongWeaponDamageReturn)
     // or Reflect Shield's, which Devotion passes on (val4: only skills, with devotion_rdamage_skill_only, and only within the link's

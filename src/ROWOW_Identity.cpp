@@ -2342,7 +2342,7 @@ void ROWOWMod::GiveStartItemOrMail(Player* player, uint32 itemTemplateID, uint32
     {
         item = player->StoreNewItem(itemDestination, itemTemplateID, true);
         if (item != nullptr)
-            player->SendNewItem(item, amount, true, false);
+            SendNewROItem(player, item, amount);
     }
     if (itemOut != nullptr)
         *itemOut = item;
@@ -2372,7 +2372,7 @@ void ROWOWMod::GiveStartBags(Player* player)
         {
             if (Item* bag = player->EquipNewItem(equipDestination, StartBagItemTemplateID, true))
             {
-                player->SendNewItem(bag, 1, true, false);
+                SendNewROItem(player, bag, 1);
                 continue;
             }
         }

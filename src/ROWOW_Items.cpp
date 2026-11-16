@@ -691,6 +691,32 @@ bool ROWOWMod::IsItemIdentified(Item const* item)
     return ((enchantmentID - ROWOW_ITEM_STATE_ENCHANTMENT_START) & ROWOW_ITEM_STATE_UNIDENTIFIED) == 0;
 }
 
+void ROWOWMod::SendNewROItem(Player* player, Item* item, uint32 count) const
+{
+    // The stock "You receive item" message only has the item's template, so it would name an unidentified item for what it is.  An unidentified one's
+    // message is sent here instead, with a link carrying its enchantments (its state among them), which the RO_Identity addon shows by its
+    // unidentified name, as the bags and tooltips do
+    if (player == nullptr || item == nullptr)
+        return;
+    if (IsItemIdentified(item) == true)
+    {
+        player->SendNewItem(item, count, true, false);
+        return;
+    }
+    player->SendNewItem(item, count, true, false, false, false);
+    ItemTemplate const* itemTemplate = item->GetTemplate();
+    if (itemTemplate == nullptr)
+        return;
+    std::string link = fmt::format("|c{:08x}|Hitem:{}:{}:{}:{}:{}:{}:{}:{}:{}|h[{}]|h|r", ItemQualityColors[std::min<uint32>(itemTemplate->Quality, MAX_ITEM_QUALITY - 1)],
+        item->GetEntry(), item->GetEnchantmentId(PERM_ENCHANTMENT_SLOT), item->GetEnchantmentId(SOCK_ENCHANTMENT_SLOT), item->GetEnchantmentId(SOCK_ENCHANTMENT_SLOT_2),
+        item->GetEnchantmentId(SOCK_ENCHANTMENT_SLOT_3), item->GetEnchantmentId(BONUS_ENCHANTMENT_SLOT), item->GetItemRandomPropertyId(), item->GetItemSuffixFactor(),
+        uint32(player->GetLevel()), itemTemplate->Name1);
+    std::string text = count > 1 ? fmt::format("You receive item: {}x{}.", link, count) : fmt::format("You receive item: {}.", link);
+    WorldPacket data;
+    ChatHandler::BuildChatPacket(data, CHAT_MSG_LOOT, LANG_UNIVERSAL, nullptr, nullptr, text);
+    player->SendDirectMessage(&data);
+}
+
 void ROWOWMod::SetItemState(Player* player, Item* item, uint32 refine, bool isBroken, bool isIdentified)
 {
     // The state is the enchantment's offset from the first state enchantment, which is never used itself (no state is no enchantment)
@@ -716,6 +742,10 @@ uint8 ROWOWMod::PCIsEquip(Player* player, ROWOWIdentity const& identity, Item co
     // pc_isequip
     ROWOWItem const* roItem = GetROItem(item);
     if (roItem == nullptr || roItem->Locations == 0)
+        return ROWOW_EQUIP_ACK_FAIL;
+    // Only equipment is worn (itemdb_isequip2): a card's Locations are where it's compounded, not a place to wear it (a Zombie Card was put on as
+    // shoes with ".ro wear"; Nathan 2026-11-14)
+    if (roItem->Type != ROWOW_ITEM_TYPE_WEAPON && roItem->Type != ROWOW_ITEM_TYPE_ARMOR && roItem->Type != ROWOW_ITEM_TYPE_AMMO)
         return ROWOW_EQUIP_ACK_FAIL;
     if (identity.SpiritSkillID == ROWOW_SKILL_SL_SUPERNOVICE)
     {
@@ -1396,7 +1426,7 @@ bool ROWOWMod::GiveROItem(Player* player, uint32 itemID, uint32 amount, bool isI
                 *itemOut = item;
             if (isIdentified == false)
                 SetItemState(player, item, 0, false, false);
-            player->SendNewItem(item, storedCount, true, false);
+            SendNewROItem(player, item, storedCount);
         }
     }
     if (noSpaceCount > 0)

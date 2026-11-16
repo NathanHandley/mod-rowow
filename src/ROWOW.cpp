@@ -20,6 +20,7 @@
 #include "QueryResult.h"
 #include "GridTerrainData.h"
 #include "Log.h"
+#include "MapWorlds.h"
 #include "Map.h"
 #include "Player.h"
 #include "SpellAuraEffects.h"
@@ -102,6 +103,7 @@ void ROWOWMod::LoadCreatureTemplateData()
 void ROWOWMod::LoadMapGridData()
 {
     MapGridsByMapID.clear();
+    MapWorlds::ClearWorld(ROWOW_MAP_WORLD);
     if (IsEnabled == false)
         return;
 
@@ -224,6 +226,9 @@ void ROWOWMod::LoadMapGridData()
         mapGrid.PartIndex.Build(partRects, 0);
         gridPartCount += mapGrid.Parts.size();
     }
+    // The RO maps are Midgard's, in the core's map worlds (SHARED.md section 8), for every module that asks which game a map is
+    for (auto const& mapGridByMapID : MapGridsByMapID)
+        MapWorlds::SetMapWorld(mapGridByMapID.first, ROWOW_MAP_WORLD);
     for (auto const& mapGridByMapID : MapGridsByMapID)
         if (mapGridByMapID.second.Width > 0 && mapGridByMapID.second.HasCells() == false)
             LOG_ERROR("module.ROWOW", "ROWOWMod::LoadMapGridData: map {} has a grid with no cells (no part grids), so all of it is walls", mapGridByMapID.first);

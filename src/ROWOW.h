@@ -2058,11 +2058,17 @@ struct ROWOWIdentitySlot
 // can't be picked (the lock letters the client is sent in ROWOWIDENT)
 enum ROWOWWorld : uint8
 {
-    ROWOW_WORLD_AZEROTH = 0, // Every map that is neither of the others
-    ROWOW_WORLD_NORRATH = 1, // mod-everquest's maps
-    ROWOW_WORLD_MIDGARD = 2, // The RO maps
-    ROWOW_WORLD_COUNT   = 3
+    ROWOW_WORLD_AZEROTH = 0, // The core's map world 0 (MAP_WORLD_AZEROTH): every map no module registered
+    ROWOW_WORLD_NORRATH = 1, // mod-everquest's maps (its map world EVERQUEST_MAP_WORLD)
+    ROWOW_WORLD_MIDGARD = 2, // The RO maps (map world ROWOW_MAP_WORLD)
+    ROWOW_WORLD_COUNT   = 3,
+    ROWOW_WORLD_NONE    = 3  // Another game's map (Meridian 59's, ...): no identity is shown there, and none can be picked for it
 };
+
+// The RO maps' world id in the core's map worlds (MapWorlds.h; E:\MW\SHARED.md sections 1 and 8), and Norrath's (mod-everquest's
+// EVERQUEST_MAP_WORLD, named here too so mod-rowow builds without mod-everquest)
+#define ROWOW_MAP_WORLD                             1
+#define ROWOW_NORRATH_MAP_WORLD                     5
 enum ROWOWWorldIdentityType : uint8
 {
     ROWOW_WORLD_IDENTITY_WARCRAFT  = 0,
@@ -2661,6 +2667,7 @@ public:
     bool HasByHandLook(Player const* player) const; // A transform no identity put on (a guise spell, a polymorph): it shows over the identity's look
     void OnEverQuestIdentityLookHidden(Player* player); // The identity's EverQuest look was put on: mod-everquest's faction reactions made right again
     void RefreshEverQuestIdentityLookDisplay(Player* player); // The EverQuest look's display taken back from whatever set another under it (the core, at every arrival)
+    void EndEverQuestMentorshipForROWorld(Player* player); // mod-everquest's mentorship ended before a trip into the RO world
     uint8 GetWorldIdentity(Player* player, uint8 world); // The identity shown in the world: the one picked while it may be shown, else the world's own
     bool SetWorldIdentity(Player* player, uint8 world, uint8 worldIdentity, std::string& errorOut); // .identity
     uint32 GetWorldIdentityRagnarokLookSpellID(Player* player); // The Ragnarok identity's body: the RO illusion spell of the job sprite shown (or of the outfit on)
@@ -2819,6 +2826,7 @@ public:
     static uint32 GetItemRefine(Item const* item);
     static bool IsItemBroken(Item const* item);
     static bool IsItemIdentified(Item const* item);
+    void SendNewROItem(Player* player, Item* item, uint32 count) const; // SendNewItem, with an unidentified item named by a link that carries its state
     static void SetItemState(Player* player, Item* item, uint32 refine, bool isBroken, bool isIdentified);
     uint32 GetIdentityEquipPosition(ROWOWIdentity const& identity, ObjectGuid::LowType itemGUID) const; // Where an item is worn, 0 for not
     uint8 PCIsEquip(Player* player, ROWOWIdentity const& identity, Item const* item) const; // pc_isequip
@@ -2966,6 +2974,7 @@ public:
     int64 PCJobIDToMapID(int32 jobID) const; // pc_jobid2mapid: the job's class (MAPID, EAJ_), -1 for none
     int32 PCMapIDToJobID(uint64 mapID, bool isMale) const; // pc_mapid2jobid: -1 for none
     int32 PCResetSkill(Player* player); // pc_resetskill (flag 1): the skill points it gave back
+    void RemoveForgottenSkillButtons(Player* player, ROWOWIdentity& identity, std::vector<uint16> const& skillIDs); // Off the form's action bars
     void PCResetState(ROWOWIdentity& identity) const; // pc_resetstate: the stats back to 1 and their points back (the caller refreshes the form)
     void PCResetLvl(Player* player, int32 type); // pc_resetlvl: rebirth (1), or base and job level 1 (2), base (3) or job (4) level 1
     std::vector<uint16> GetSkillTreeJobIDs(uint16 jobID) const; // The jobs whose skills the skill window shows, Novice first
@@ -3236,6 +3245,9 @@ public:
     void UpdateFameList(int32 fameType, ObjectGuid::LowType characterGUID, int32 fame, std::string const& name);
     bool PCAddFame(Player* player, int32 count); // pc_addfame
     void PCFameRefine(Player* player, Item const* item); // The Fame point system: +10 on a weapon of its own forge
+    // A failed refine (the refiners' failedrefitem, the Whitesmith's Weapon Refine): the item is kept, weaker by 1 refine level (75%) or 2 (25%),
+    // never below +0, instead of rAthena's destroying it (Nathan 2026-11-15).  Its new refine level
+    uint32 RefineFailed(Player* player, Item* item);
     uint8 PCFameRank(ObjectGuid::LowType characterGUID, int32 fameType) const; // pc_famerank
     bool PCIsTaekwonRanker(ROWOWIdentity const& identity) const; // pc_is_taekwon_ranker
     void ClifSubRanklist(Player* player, int32 fameType); // clif_sub_ranklist
@@ -3531,6 +3543,12 @@ public:
     bool MapGetCellNoPass(Map* map, ROWOWMapGrid const& mapGrid, int32 x, int32 y) const; // map_getcell(CELL_CHKNOPASS)
     bool PathSearchLong(ROWOWMapGrid const& mapGrid, int32 x0, int32 y0, int32 x1, int32 y1) const; // path_search_long(CELL_CHKWALL)
     bool PathSearch(std::vector<uint8>& pathOut, Map* map, ROWOWMapGrid const& mapGrid, int32 x0, int32 y0, int32 x1, int32 y1, uint8 cell) const; // path_search (A*), directions in pathOut
+    // MergedWorlds ro-approach (Nathan 2026-11-15): the client's Walk Into Range asks (.ro approachpath) for RO's path from the player to beside a
+    // target, as RO's client walks to what it's told to hit, rather than a straight line into the walls between.  path_search's A* on the cells,
+    // but with a player's limits (no step up a ledge higher than a player climbs) and further (40 cells round the box the two span).  The path's
+    // corners as WoW X,Y (cell centers), its straight stretches merged where a player can walk the line; the last is the cell beside the target.
+    // False when there's no such path
+    bool GetApproachPath(Player* player, Unit const* target, std::vector<std::pair<float, float>>& cornersOut) const;
     bool IsMobMovementBlocked(Creature* md, bool isIgnoreDisableMove = false) const; // Movement the core controls, or that's impossible right now
     bool UnitCanMove(Creature* md, ROWOWMobData const* mob, uint64 tick) const; // unit_can_move
     bool UnitCanReachBL(Creature* md, Unit const* tbl, int32 range, int32& xOut, int32& yOut) const; // unit_can_reach_bl

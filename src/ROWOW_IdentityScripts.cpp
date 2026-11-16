@@ -636,6 +636,8 @@ public:
         if (player->IsInWorld() == false)
             return true;
         ROWOW->StopViewingROSet(player); // The Ragnarok page's bags are put away before any arrival
+        if (ROWOW->IsROMap(mapid) == true && ROWOW->IsInROForm(player) == false)
+            ROWOW->EndEverQuestMentorshipForROWorld(player); // No mentorship in the RO world, ended before the arrival keeps the character's level
         if (ROWOW->IsInROForm(player) == true)
         {
             // A warp off the map takes the player's ground skills and its shop with it (clear_skills_on_warp); a warp on the map ends in the
@@ -1232,6 +1234,7 @@ public:
         {
             { "sync",     HandleROSyncCommand,   SEC_PLAYER,     Console::No },
             { "hair",     HandleROHairCommand,   SEC_PLAYER,     Console::No },
+            { "approachpath", HandleROApproachPathCommand, SEC_PLAYER, Console::No },
             { "view",     HandleROViewCommand,   SEC_PLAYER,     Console::No },
             { "create",   HandleROCreateCommand, SEC_PLAYER,     Console::No },
             { "spritejob", HandleROSpriteJobCommand, SEC_PLAYER, Console::No },
@@ -3418,6 +3421,29 @@ public:
             ROWOW->SendHairToClient(player);
             return false;
         }
+        return true;
+    }
+
+    static bool HandleROApproachPathCommand(ChatHandler* handler, std::string guidText)
+    {
+        // The client's Walk Into Range (Options > Interface > Ragnarok, MergedWorlds ro-approach): RO's path to beside the target (a unit's GUID, hex),
+        // sent back under the ROWOWPATH prefix as "<GUID>\t<x>,<y>;<x>,<y>;..." (the corners, WoW X,Y), with no corners when RO can't walk there
+        Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
+        if (player == nullptr)
+            return false;
+        uint64 rawGuid = std::strtoull(guidText.c_str(), nullptr, 16);
+        Unit* target = rawGuid != 0 ? ObjectAccessor::GetUnit(*player, ObjectGuid(rawGuid)) : nullptr;
+        std::vector<std::pair<float, float>> corners;
+        if (target != nullptr && target->IsInWorld() == true && player->IsWithinDistInMap(target, 80.0f) == true &&
+            ROWOW->GetApproachPath(player, target, corners) == false)
+            corners.clear();
+        // At most 10 corners, to keep within an addon message (the client asks again from the last one when the target isn't in range by then)
+        std::string text = fmt::format("ROWOWPATH\t{}\t", guidText.substr(0, 20));
+        for (size_t i = 0; i < corners.size() && i < 10; i++)
+            text += fmt::format("{}{:.1f},{:.1f}", i == 0 ? "" : ";", corners[i].first, corners[i].second);
+        WorldPacket data;
+        ChatHandler::BuildChatPacket(data, CHAT_MSG_SYSTEM, LANG_ADDON, nullptr, nullptr, text);
+        player->SendDirectMessage(&data);
         return true;
     }
 

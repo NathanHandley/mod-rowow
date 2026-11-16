@@ -573,7 +573,8 @@ void ROWOWMod::LoadBonusData()
     });
     ROWOWSCRIPT->RegisterCommand("failedrefitem", [this, getEquipIndexItem](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
     {
-        // failedrefitem <equip index>: the refine failed, and the item is gone (pc_unequipitem, pc_delitem)
+        // failedrefitem <equip index>: the refine failed.  rAthena destroys the item (pc_unequipitem, pc_delitem); here it stays worn, 1 or 2 refine
+        // levels weaker (RefineFailed)
         Item* item = getEquipIndexItem(context, arguments);
         if (item == nullptr)
         {
@@ -581,12 +582,7 @@ void ROWOWMod::LoadBonusData()
                 context.AttachedPlayer != nullptr ? context.AttachedPlayer->GetGUID().GetCounter() : 0);
             return ROWOWScriptValue::FromNumber(0);
         }
-        std::string itemName = item->GetTemplate()->Name1;
-        PCUnequipItem(context.AttachedPlayer, EquipIndexes[arguments[0].GetNumber()].second, 1);
-        uint32 count = 1;
-        context.AttachedPlayer->DestroyItemCount(item, count, true);
-        ChatHandler(context.AttachedPlayer->GetSession()).SendSysMessage(fmt::format("Upgrade failed!! {} was destroyed.", itemName)); // clif_refine failure
-        ClifMiscEffect(context.AttachedPlayer, ROWOW_NOTIFYEFFECT_REFINE_FAILURE); // clif_misceffect(NOTIFYEFFECT_REFINE_FAILURE)
+        RefineFailed(context.AttachedPlayer, item);
         return ROWOWScriptValue::FromNumber(1);
     });
     // The card remover's commands (npc/custom/card_remover.txt, the Wise Old Woman): the cards in what's worn in an equip index, and taking
@@ -1319,14 +1315,28 @@ void ROWOWMod::StatusCalcPCItems(Player* player, ROWOWIdentity const& identity, 
     if (identity.Pet != nullptr && identity.Pet->DB != nullptr)
         runScript(identity.Pet->DB->BonusScript.get(), nullptr, ROWOW_LR_FLAG_NONE, 0, 0);
 
-    // Item combos: every combo whose items are all worn
-    std::unordered_set<uint32> wornItemIDs;
+    // Item combos: every combo whose items are all worn, or are cards in the worn items (pc_checkcombo looks in both: the card sets, like Mage's
+    // or a weapon with its card, never came together while only the worn items were looked at).  An item or card worn twice counts twice, for a
+    // combo that names it twice.  The positions are where they're worn (current_equip_combo_pos), a card's its item's
+    std::unordered_map<uint32, uint32> wornCountsByItemID;
+    std::unordered_map<uint32, uint32> wornPositionsByItemID;
     for (WornItem const& wornItem : wornItems)
-        wornItemIDs.insert(wornItem.RO->ItemID);
-    std::unordered_set<size_t> ranComboIndexes;
-    for (uint32 wornItemID : wornItemIDs)
     {
-        auto comboIndexesIter = ItemComboIndexesByItemID.find(wornItemID);
+        wornCountsByItemID[wornItem.RO->ItemID]++;
+        wornPositionsByItemID[wornItem.RO->ItemID] |= wornItem.Positions;
+        for (uint8 slot = 0; slot < ROWOW_MAX_SLOTS; slot++)
+        {
+            uint32 cardItemID = GetItemCard(wornItem.ItemObject, slot);
+            if (cardItemID == 0)
+                continue;
+            wornCountsByItemID[cardItemID]++;
+            wornPositionsByItemID[cardItemID] |= wornItem.Positions;
+        }
+    }
+    std::unordered_set<size_t> ranComboIndexes;
+    for (auto const& wornCountByItemID : wornCountsByItemID)
+    {
+        auto comboIndexesIter = ItemComboIndexesByItemID.find(wornCountByItemID.first);
         if (comboIndexesIter == ItemComboIndexesByItemID.end())
             continue;
         for (size_t comboIndex : comboIndexesIter->second)
@@ -1334,14 +1344,19 @@ void ROWOWMod::StatusCalcPCItems(Player* player, ROWOWIdentity const& identity, 
             ROWOWItemCombo const& combo = ItemCombos[comboIndex];
             if (ranComboIndexes.insert(comboIndex).second == false)
                 continue;
-            bool isComplete = std::all_of(combo.ItemIDs.begin(), combo.ItemIDs.end(), [&wornItemIDs](uint32 itemID) { return wornItemIDs.count(itemID) != 0; });
+            std::unordered_map<uint32, uint32> neededCountsByItemID;
+            for (uint32 itemID : combo.ItemIDs)
+                neededCountsByItemID[itemID]++;
+            bool isComplete = std::all_of(neededCountsByItemID.begin(), neededCountsByItemID.end(), [&wornCountsByItemID](std::pair<uint32 const, uint32> const& needed)
+                {
+                    auto wornIter = wornCountsByItemID.find(needed.first);
+                    return wornIter != wornCountsByItemID.end() && wornIter->second >= needed.second;
+                });
             if (isComplete == false)
                 continue;
-            // current_equip_combo_pos: where the combo's items are worn
             uint32 comboPositions = 0;
-            for (WornItem const& wornItem : wornItems)
-                if (std::find(combo.ItemIDs.begin(), combo.ItemIDs.end(), wornItem.RO->ItemID) != combo.ItemIDs.end())
-                    comboPositions |= wornItem.Positions;
+            for (uint32 itemID : combo.ItemIDs)
+                comboPositions |= wornPositionsByItemID[itemID];
             runScript(combo.Script.get(), nullptr, ROWOW_LR_FLAG_NONE, comboPositions, 0);
         }
     }

@@ -765,7 +765,7 @@ int32 ROWOWMod::PetCatchRate(Player const* sd, ROWOWPetDB const& pet, Creature c
 void ROWOWMod::PetCatchProcessEnd(Player* sd, Creature* md, uint32 itemID, uint8 flag)
 {
     // pet_catch_process_end, and clif_pet_roulette's result for the pet window: "ROWOWPET\tR\t<1 caught, 0 not>"
-    auto rouletteFail = [this, sd]()
+    auto rouletteFail = [sd]()
     {
         SendAddonMessage(sd, "ROWOWPET\tR\t0");
         SendPetMessage(sd, "The capture failed.");

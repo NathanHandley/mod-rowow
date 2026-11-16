@@ -345,8 +345,8 @@ void ROWOWMod::MobSetDelay(Creature* md, uint64 tick, bool isCastEnd)
     ROWOWStatus const* status = GetROStatus(md);
     if (status == nullptr)
         return;
-    if (md->getAttackTimer(BASE_ATTACK) < uint32(status->AttackDelay))
-        md->setAttackTimer(BASE_ATTACK, uint32(status->AttackDelay));
+    if (md->getAttackTimer(BASE_ATTACK) < status->AttackDelay)
+        md->setAttackTimer(BASE_ATTACK, status->AttackDelay);
     if (isCastEnd == true && (BattleConfig.MobAI & 0x2000) == 0)
         mob->NextThinkTime = std::max<uint64>(tick + uint64(status->AttackMotion), mob->NextThinkTime);
     MobSkillDelay(md, mob, tick);

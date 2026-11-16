@@ -1631,8 +1631,25 @@ void ROWOWMod::UpdateNaturalRegen(Player* player, uint32 diff)
     // often sitting and as fast as the statuses' regen rates.  Walking stops HP regen (and starts its interval over), not SP.  Statuses stop
     // either (status_calc_regen_rate's flag), and nothing regenerates while hidden or cloaked
     ROWOWIdentity* identity = player->CustomData.Get<ROWOWIdentity>("ROWOWIdentity");
-    if (identity == nullptr || identity->IsInForm == false || player->IsAlive() == false)
+    if (identity == nullptr || identity->IsInForm == false)
         return;
+    if (player->IsAlive() == false)
+    {
+        // status_damage's death resets every regen tick, the skills' too.  (Walking only pauses the skills' ticks, as status_natural_heal does)
+        identity->RegenHPTimer = 0;
+        identity->RegenSPTimer = 0;
+        identity->SkillRegenHPTimer = 0;
+        identity->SkillRegenSPTimer = 0;
+        identity->SitSkillRegenHPTimer = 0;
+        identity->SitSkillRegenSPTimer = 0;
+        return;
+    }
+    // pc_setstand: standing up starts the sitting regen's ticks over
+    if (player->IsSitState() == false)
+    {
+        identity->SitSkillRegenHPTimer = 0;
+        identity->SitSkillRegenSPTimer = 0;
+    }
     ROWOWStatus const& status = identity->Status;
     uint8 flag = status.RegenFlag;
     // Only skill-based regen is disabled at max HP/SP
@@ -1767,13 +1784,16 @@ void ROWOWMod::SendROStatusToClient(Player* player)
     // R9.5: then "\t<1 when the Star Gladiator's Devil blinds it>" (pc_setnewpc / pc_jobchange's EFST_DEVIL1 at the max job level with SG_DEVIL)
     bool isDevilBlind = PCCheckSkill(*identity, ROWOW_SKILL_SG_DEVIL) > 0 && PCIsMaxJobLevel(*identity) == true;
     // MergedWorlds ro-approach (Nathan 2026-11-13): then "\t<normal attack range in cells>" (status->rhw.range: 1 for melee, a bow's), which the
-    // addon gives the client (roAttackRange) for walking into range of an attack
-    std::string addonMessage = fmt::format("ROWOWSTATUS\t{}\t{},{},{},{},{},{},{},{}\t{}\t{}\t{}\t{},{},{},{},{},{},{},{},{},{},{},{},{}\t{}\t{}",
+    // addon gives the client (roAttackRange) for walking into range of an attack.  Then "\t<Vulture's Eye level>\t<Snake Eye level>", the cells
+    // they add to the skills RO marks AlterRangeVulture and AlterRangeSnakeEye (skill_get_range2), which the addon gives the client (roVultureRange,
+    // roSnakeEyeRange) for those skills' range (Nathan 2026-11-14: Vulture's Eye reached further with attacks but not Double Strafe)
+    std::string addonMessage = fmt::format("ROWOWSTATUS\t{}\t{},{},{},{},{},{},{},{}\t{}\t{}\t{}\t{},{},{},{},{},{},{},{},{},{},{},{},{}\t{}\t{}\t{}\t{}",
         job != nullptr ? job->Name : "?", identity->BaseLevel, identity->BaseExp, PCNextBaseExp(*identity), identity->JobLevel, identity->JobExp, PCNextJobExp(*identity),
         identity->StatusPoints, identity->SkillPoints, stats, bonusStats, raiseCosts,
         status.BaseAttack + status.WeaponAttack + status.LeftWeaponAttack, status.WeaponRefineAttack + status.LeftWeaponRefineAttack, status.MagicAttackMin,
         status.MagicAttackMax, status.Def, status.Def2, status.MDef, status.MDef2 - (status.Stats[ROWOW_STAT_VIT] / 2), status.Hit, status.Flee, status.Flee2 / 10,
-        status.Critical / 10, (2000 - status.AttackMotion) / 10, isDevilBlind == true ? 1 : 0, std::max<int32>(1, status.Range));
+        status.Critical / 10, (2000 - status.AttackMotion) / 10, isDevilBlind == true ? 1 : 0, std::max<int32>(1, status.Range),
+        PCCheckSkill(*identity, ROWOW_SKILL_AC_VULTURE), PCCheckSkill(*identity, ROWOW_SKILL_GS_SNAKEEYE));
     WorldPacket data;
     ChatHandler::BuildChatPacket(data, CHAT_MSG_SYSTEM, LANG_ADDON, nullptr, nullptr, addonMessage);
     player->SendDirectMessage(&data);
