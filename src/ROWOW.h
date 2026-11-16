@@ -2289,6 +2289,8 @@ struct ROWOWIdentity : public DataMap::Base
     uint32 SkillRegenSPTimer = 0;
     uint32 SitSkillRegenHPTimer = 0;
     uint32 SitSkillRegenSPTimer = 0;
+    uint32 RestingHPTimer = 0; // Resting Restoration (HP) and (SP): time sat still out of combat with Basic Skill 3, scaled by the regen rate (UpdateRestingRestoration)
+    uint32 RestingSPTimer = 0;
 
     // A form change made before the character was in the world (arriving on a map), finished once it's in the world
     bool IsFormArrivalPending = false;
@@ -2764,6 +2766,8 @@ public:
 
     // RO natural HP and SP regen (status_natural_heal), in place of WoW's while in the form
     void UpdateNaturalRegen(Player* player, uint32 diff);
+    void UpdateRestingRestoration(Player* player, uint32 diff); // MergedWorlds' Basic Skill 3 sitting regen, in place of RO's doubled sitting regen
+    void UpdateRestingRestorationPart(Player* player, uint32 diff, bool isResting, int32 rate, uint32& timer, uint32 spellID, bool isSP);
 
     // RO battle (ROWOW_Battle.cpp): the port of rAthena's pre-renewal battle code (battle.cpp) for combat between RO combatants: the normal
     // attack and the weapon, magic and misc attacks of skills.  Statuses (R6.4) and the skill cases of rAthena's switches (R6.5) plug into
@@ -2868,6 +2872,8 @@ public:
     // a teleport to it leaves a 30 minute return tether aura that, clicked off, goes back to where it was used.  Its 30 minutes are the save slot's and
     // count down only while that slot is played in the RO world (Nathan 2026-11-11)
     uint32 ReturnTetherSpellID = 0; // mod_rowow_status_spell's Special_ReturnTether (0: no tether)
+    uint32 RestingRestorationHPSpellID = 0; // mod_rowow_status_spell's Special_RestingRestorationHP and _SP (0: no icon)
+    uint32 RestingRestorationSPSpellID = 0;
     bool IsReturnToSaveDataLoaded = false;
     std::string ReturnToSaveItemTemplateIDsText; // The items whose use goes to the save point (a Butterfly Wing), as the ROWOWSAVE list
     std::string ReturnToSaveSpellIDsText; // AL_TELEPORT's spells of level 2 and up

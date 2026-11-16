@@ -284,6 +284,8 @@ void ROWOWMod::LoadStatusChangeData()
     uint32 spellCount = 0;
     OptionIconSpellIDsByOption.clear();
     ReturnTetherSpellID = 0;
+    RestingRestorationHPSpellID = 0;
+    RestingRestorationSPSpellID = 0;
     if (QueryResult result = WorldDatabase.Query("SELECT `Status`, `SpellID` FROM `mod_rowow_status_spell`"))
     {
         do
@@ -297,6 +299,14 @@ void ROWOWMod::LoadStatusChangeData()
             {
                 if (sSpellMgr->GetSpellInfo(spellID) != nullptr)
                     ReturnTetherSpellID = spellID;
+                continue;
+            }
+
+            // Resting Restoration's auras, which aren't statuses (UpdateRestingRestoration)
+            if (statusName == "Special_RestingRestorationHP" || statusName == "Special_RestingRestorationSP")
+            {
+                if (sSpellMgr->GetSpellInfo(spellID) != nullptr)
+                    (statusName == "Special_RestingRestorationHP" ? RestingRestorationHPSpellID : RestingRestorationSPSpellID) = spellID;
                 continue;
             }
 
@@ -2243,8 +2253,8 @@ bool ROWOWMod::StatusChangeEnd(Unit* bl, int32 type, bool isTimer)
             }
             break;
         case ROWOW_SC_TENSIONRELAX:
-            if (sd != nullptr)
-                sd->SetStandState(UNIT_STAND_STATE_STAND); // pc_setstand
+            // (rAthena stands the player up here, pc_setstand.  MergedWorlds keeps them seated (Nathan 2026-11-16): Tension Relax ends once
+            // the HP is full, and standing would end Resting Restoration's SP with it, UpdateRestingRestoration)
             break;
         case ROWOW_SC_ENDURE:
         case ROWOW_SC_DEFENDER:

@@ -435,6 +435,7 @@ public:
             player->SaveToDB(false, false);
 
         ROWOW->UpdateNaturalRegen(player, p_time);
+        ROWOW->UpdateRestingRestoration(player, p_time);
         ROWOW->UpdateStatusChanges(player);
         ROWOW->UpdateWorldIdentity(player, p_time); // In every world: the look of the character's identity for it
         ROWOW->UpdateJobField(player); // In every world: the RO job other clients' tooltips name (0 out of the form)
@@ -926,12 +927,19 @@ public:
                 uint32 standState = 0;
                 packetCopy >> standState;
                 ROWOWStatusChangeEntry const* gravitation = ROWOW->GetSCE(player, ROWOW_SC_GRAVITATION);
-                if (standState == UNIT_STAND_STATE_SIT && (ROWOW->GetSCE(player, ROWOW_SC_DANCING) != nullptr || (gravitation != nullptr && gravitation->Val3 == ROWOW_BCT_SELF)))
+                // A refused sit sends the stand state back: the client has already sat the character down (its model and RO sprite) and
+                // otherwise shows it seated while the server has it standing
+                auto refuseSit = [player]()
+                {
+                    player->SetStandState(player->getStandState());
                     return false;
+                };
+                if (standState == UNIT_STAND_STATE_SIT && (ROWOW->GetSCE(player, ROWOW_SC_DANCING) != nullptr || (gravitation != nullptr && gravitation->Val3 == ROWOW_BCT_SELF)))
+                    return refuseSit();
                 if (standState != UNIT_STAND_STATE_SIT || ROWOW->BattleConfig.BasicSkillCheck == 0 || ROWOW->PCCheckSkill(player, ROWOW_SKILL_NV_BASIC) >= 3)
                     return true;
                 ChatHandler(session).SendNotification("You need Basic Skill level 3 to sit.");
-                return false;
+                return refuseSit();
             }
             case CMSG_OPEN_ITEM:
             {
