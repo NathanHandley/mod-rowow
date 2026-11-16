@@ -2510,7 +2510,7 @@ void ROWOWMod::RegisterNpcScriptCommands()
 
     // Commands of systems that aren't here: the runs go on past them.  setunitdata and areamobuseskill are only in battlegrounds and instances,
     // openmail and openauction ask for windows an identity has none of, and freeloop only lifts the loop limit of guild castle scripts
-    engine->RegisterCommand("openmail", [this, getNpcUnit](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const&)
+    engine->RegisterCommand("openmail", [getNpcUnit](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const&)
     {
         // openmail: the mailbox (MergedWorlds RO mail, Nathan 2026-11-13: a Kafra's Use Mail, free in the form).  The NPC's creature answers the
         // mail's packets as a mailbox (UNIT_NPC_FLAG_MAILBOX), from RO's click range on an RO map (OnPlayerCreatureInteractionReach)
@@ -2585,7 +2585,7 @@ void ROWOWMod::RegisterNpcScriptCommands()
         }
         return items;
     };
-    engine->RegisterCommand("countitem2", [this, findExactItems](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    engine->RegisterCommand("countitem2", [findExactItems](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
     {
         int64 count = 0;
         if (arguments.size() >= 8)
@@ -2593,7 +2593,7 @@ void ROWOWMod::RegisterNpcScriptCommands()
                 count += item->GetCount();
         return ROWOWScriptValue::FromNumber(count);
     });
-    engine->RegisterCommand("delitem2", [this, findExactItems](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    engine->RegisterCommand("delitem2", [findExactItems](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
     {
         // Stops the run when there aren't enough, as delitem
         Player* player = GetAttachedPlayer(context, "delitem2");
@@ -2637,7 +2637,7 @@ void ROWOWMod::RegisterNpcScriptCommands()
         ROWOWSCRIPT->Run(*roItem->UseScript, itemContext);
         return ROWOWScriptValue::FromNumber(0);
     });
-    engine->RegisterCommand("convertpcinfo", [this](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const& arguments)
+    engine->RegisterCommand("convertpcinfo", [](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const& arguments)
     {
         // convertpcinfo(<char id or account id or "name">,<CPC_*>): an online character's name (0), char id (1) or account id (2).  0 (or "") offline
         if (arguments.size() < 2)

@@ -689,7 +689,7 @@ bool ROWOWMod::MobAISubHard(Creature* md, uint64 tick)
         {
             // No valid target: walk at least "mob_chase_refresh" cells before dropping the target unless target is non-existent
             if (tbl != nullptr && tbl->IsAlive() == true && IsOnSameROMap(tbl, md) == true && mob->IsWalking == true &&
-                (canMove == false || UnitWalkPathPos(md, mob, tick) <= BattleConfig.MobChaseRefresh))
+                (canMove == false || int64(UnitWalkPathPos(md, mob, tick)) <= BattleConfig.MobChaseRefresh))
                 return true;
             MobUnlockTarget(md, tick); // Unlock target
             tbl = nullptr;
@@ -862,7 +862,7 @@ bool ROWOWMod::MobAISubHard(Creature* md, uint64 tick)
     }
 
     // Only update target cell / drop target after having moved at least "mob_chase_refresh" cells
-    if (mob->IsWalking == true && (canMove == false || UnitWalkPathPos(md, mob, tick) <= BattleConfig.MobChaseRefresh) && MobIsChasing(mob->SkillState) == true)
+    if (mob->IsWalking == true && (canMove == false || int64(UnitWalkPathPos(md, mob, tick)) <= BattleConfig.MobChaseRefresh) && MobIsChasing(mob->SkillState) == true)
         return true;
 
     // Out of range

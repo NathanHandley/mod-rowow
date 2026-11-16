@@ -2835,7 +2835,7 @@ void ROWOWMod::StatusCalcState(Unit* bl, ROWOWStatusChange& sc, ROWOWStatusChang
     else
     {
         // status_calc_state_sub: starting an unconditional state sets it; otherwise it's on while any status still has it
-        auto calcStateSub = [this, bl, &sc, &scdb, start](bool& restriction, uint8 unconditional, uint8 conditional,
+        auto calcStateSub = [this, &sc, &scdb, start](bool& restriction, uint8 unconditional, uint8 conditional,
             std::function<bool(int32, ROWOWStatusChangeEntry const&)> const& isConditionMet)
         {
             if (start == true && scdb.State[unconditional] == true)

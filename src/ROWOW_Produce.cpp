@@ -44,7 +44,6 @@ namespace
     uint32 const ItemIDRedSlimPotion = 545;
     uint32 const ItemIDYellowSlimPotion = 546;
     uint32 const ItemIDWhiteSlimPotion = 547;
-    uint32 const ItemIDEmptyBottle = 713;
     uint32 const ItemIDOrideconStone = 756;
     uint32 const ItemIDAlcohol = 970;
     uint32 const ItemIDOridecon = 984;

@@ -235,8 +235,6 @@ void ROWOWMod::LoadSkillData()
     int32 nameColumnIndex = skillTable->GetColumnIndex("Name");
     int32 descriptionColumnIndex = skillTable->GetColumnIndex("Description");
     int32 maxLevelColumnIndex = skillTable->GetColumnIndex("MaxLevel");
-    int32 targetTypeColumnIndex = skillTable->GetColumnIndex("TargetType");
-    int32 flagsColumnIndex = skillTable->GetColumnIndex("Flags");
     for (size_t rowIndex = 0; rowIndex < skillTable->Rows.size(); rowIndex++)
     {
         ROWOWSkill skill;
