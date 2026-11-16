@@ -369,6 +369,19 @@ bool ROWOWMod::GetApproachPath(Player* player, Unit const* target, std::vector<s
         return rise <= APPROACH_MAX_STEP_UP * (fromX != toCellX && fromY != toCellY ? 1.4142f : 1.0f);
     };
     auto cellIndex = [minX, minY, boxWidth](int32 x, int32 y) { return size_t(y - minY) * size_t(boxWidth) + size_t(x - minX); };
+    // A cell beside one that can't be walked onto from it (a wall, a ledge too high) costs more to step into, so the path keeps a cell off walls
+    // where there's room: a player is wider than RO's characters, and turning on the cell next to a wall's corner caught on it (Prontera Culvert)
+    constexpr int32 APPROACH_WALL_COST = 8;
+    auto isBesideWall = [&isPassable, &canStep](int32 x, int32 y)
+    {
+        for (uint8 direction = 0; direction < ROWOW_RO_DIRECTION_COUNT; direction++)
+        {
+            int32 nx = x + DirectionX[direction], ny = y + DirectionY[direction];
+            if (isPassable(nx, ny) == false || canStep(x, y, nx, ny) == false)
+                return true;
+        }
+        return false;
+    };
 
     // A player can stand where RO's cells don't let anyone (swimming in a channel RO keeps people out of): the search starts from the nearest cell
     // that can be walked, a few cells at most
@@ -423,7 +436,7 @@ bool ROWOWMod::GetApproachPath(Player* player, Unit const* target, std::vector<s
             if (canStep(x, y, nx, ny) == false)
                 continue;
             size_t neighbourIndex = cellIndex(nx, ny);
-            int32 cost = costs[index] + (isDiagonal == true ? MOVE_DIAGONAL_COST : MOVE_COST);
+            int32 cost = costs[index] + (isDiagonal == true ? MOVE_DIAGONAL_COST : MOVE_COST) + (isBesideWall(nx, ny) == true ? APPROACH_WALL_COST : 0);
             if (isClosed[neighbourIndex] != 0 || cost >= costs[neighbourIndex])
                 continue;
             costs[neighbourIndex] = cost;
@@ -440,8 +453,9 @@ bool ROWOWMod::GetApproachPath(Player* player, Unit const* target, std::vector<s
         cells.emplace_back(minX + index % boxWidth, minY + index / boxWidth);
     std::reverse(cells.begin(), cells.end());
 
-    // Whether a player can walk the straight line between two cells' centers: every cell under it, and under the lines a third of a cell to either
-    // side (the character's width), passable, and no step up along it higher than one between neighbouring cells may be
+    // Whether a player can walk the straight line between two cells' centers: every cell under it, and under the lines 0.45 of a cell to either
+    // side (the character's width, with room to spare: walls' models reach a little past their cells), passable, and no step up along it higher
+    // than one between neighbouring cells may be
     auto isLineWalkable = [&isPassable, &canStep](std::pair<int32, int32> const& from, std::pair<int32, int32> const& to)
     {
         float fx = float(from.first) + 0.5f, fy = float(from.second) + 0.5f;
@@ -449,7 +463,7 @@ bool ROWOWMod::GetApproachPath(Player* player, Unit const* target, std::vector<s
         float length = std::sqrt(lx * lx + ly * ly);
         if (length < 0.001f)
             return true;
-        float sideX = -ly / length / 3.0f, sideY = lx / length / 3.0f;
+        float sideX = -ly / length * 0.45f, sideY = lx / length * 0.45f;
         int32 steps = int32(std::ceil(length * 4.0f));
         for (float side = -1.0f; side <= 1.0f; side += 1.0f)
         {
