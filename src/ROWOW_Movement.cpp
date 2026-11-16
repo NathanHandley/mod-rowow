@@ -28,6 +28,8 @@
 #include "ROWOW.h"
 #include "ROWOW_Skill.h"
 
+#include <algorithm>
+#include <limits>
 #include <queue>
 
 using namespace std;
@@ -314,6 +316,177 @@ bool ROWOWMod::PathSearch(std::vector<uint8>& pathOut, Map* map, ROWOWMapGrid co
     int32 pathIndex = length - 1;
     for (PathNode* node = current; node->Parent != nullptr; node = node->Parent)
         pathOut[size_t(pathIndex--)] = GetDirection(node->X - node->Parent->X, node->Y - node->Parent->Y);
+    return true;
+}
+
+bool ROWOWMod::GetApproachPath(Player* player, Unit const* target, std::vector<std::pair<float, float>>& cornersOut) const
+{
+    cornersOut.clear();
+    ROWOWMapGrid const* mapGrid = GetMapGrid(player->GetMapId());
+    if (mapGrid == nullptr || mapGrid->HasCells() == false || target->GetMapId() != player->GetMapId())
+        return false;
+    int32 x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+    GetUnitCell(player, x0, y0);
+    GetUnitCell(target, x1, y1);
+    Map* map = player->GetMap();
+
+    // The cell beside the target on the player's side, or the first free one around it (unit_can_reach_bl's)
+    int32 dx = x1 - x0;
+    int32 dy = y1 - y0;
+    dx = dx > 0 ? 1 : (dx < 0 ? -1 : 0);
+    dy = dy > 0 ? 1 : (dy < 0 ? -1 : 0);
+    if ((dx != 0 || dy != 0) && MapGetCellNoPass(map, *mapGrid, x1 - dx, y1 - dy) == true)
+    {
+        int32 direction = 0;
+        for (; direction < ROWOW_RO_DIRECTION_COUNT && MapGetCellNoPass(map, *mapGrid, x1 - DirectionX[direction], y1 - DirectionY[direction]) == true; direction++)
+            ;
+        if (direction == ROWOW_RO_DIRECTION_COUNT)
+            return false;
+        dx = DirectionX[direction];
+        dy = DirectionY[direction];
+    }
+    int32 toX = x1 - dx;
+    int32 toY = y1 - dy;
+    // A player isn't an RO character: RO walks up any ledge its GAT has, where a player's collision stops it (Prontera Culvert's walkways two yards
+    // over the channels, which RO's own path_search went straight up), though it can drop down one.  So the search is path_search's A* on the cells
+    // (no corner cutting by a cell nothing can walk on), with a step up to a neighbouring cell allowed only as high as a player climbs, over the box
+    // the two cells span and APPROACH_MARGIN cells around it
+    constexpr int32 APPROACH_MARGIN = 40;
+    constexpr int32 APPROACH_MAX_SIDE = 200;
+    constexpr float APPROACH_MAX_STEP_UP = 1.2f; // Yards up from a cell to its neighbour (times the diagonal's length for one)
+    int32 minX = std::min(x0, toX) - APPROACH_MARGIN, maxX = std::max(x0, toX) + APPROACH_MARGIN;
+    int32 minY = std::min(y0, toY) - APPROACH_MARGIN, maxY = std::max(y0, toY) + APPROACH_MARGIN;
+    int32 boxWidth = maxX - minX + 1, boxHeight = maxY - minY + 1;
+    if (boxWidth > APPROACH_MAX_SIDE || boxHeight > APPROACH_MAX_SIDE)
+        return false;
+    auto isPassable = [this, map, mapGrid, minX, maxX, minY, maxY](int32 x, int32 y)
+    {
+        return x >= minX && x <= maxX && y >= minY && y <= maxY && MapGetCellNoPass(map, *mapGrid, x, y) == false;
+    };
+    auto canStep = [mapGrid](int32 fromX, int32 fromY, int32 toCellX, int32 toCellY)
+    {
+        float rise = mapGrid->GetCellGroundZ(toCellX, toCellY) - mapGrid->GetCellGroundZ(fromX, fromY);
+        return rise <= APPROACH_MAX_STEP_UP * (fromX != toCellX && fromY != toCellY ? 1.4142f : 1.0f);
+    };
+    auto cellIndex = [minX, minY, boxWidth](int32 x, int32 y) { return size_t(y - minY) * size_t(boxWidth) + size_t(x - minX); };
+
+    // A player can stand where RO's cells don't let anyone (swimming in a channel RO keeps people out of): the search starts from the nearest cell
+    // that can be walked, a few cells at most
+    if (isPassable(x0, y0) == false)
+    {
+        int32 bestX = 0, bestY = 0, bestDistance = std::numeric_limits<int32>::max();
+        for (int32 ry = -3; ry <= 3; ry++)
+            for (int32 rx = -3; rx <= 3; rx++)
+                if (rx * rx + ry * ry < bestDistance && isPassable(x0 + rx, y0 + ry) == true)
+                {
+                    bestX = x0 + rx;
+                    bestY = y0 + ry;
+                    bestDistance = rx * rx + ry * ry;
+                }
+        if (bestDistance == std::numeric_limits<int32>::max())
+            return false;
+        x0 = bestX;
+        y0 = bestY;
+        cornersOut.emplace_back(mapGrid->GetCellCenterWorldX(y0), mapGrid->GetCellCenterWorldY(x0)); // Out to it first
+    }
+    std::vector<int32> costs(size_t(boxWidth) * size_t(boxHeight), std::numeric_limits<int32>::max());
+    std::vector<int32> parents(costs.size(), -1);
+    std::vector<uint8> isClosed(costs.size(), 0);
+    using OpenNode = std::pair<int32, int32>; // F cost, cell index
+    std::priority_queue<OpenNode, std::vector<OpenNode>, std::greater<OpenNode>> open;
+    auto heuristic = [toX, toY](int32 x, int32 y)
+    {
+        int32 ax = std::abs(toX - x), ay = std::abs(toY - y);
+        return MOVE_COST * std::max(ax, ay) + (MOVE_DIAGONAL_COST - MOVE_COST) * std::min(ax, ay);
+    };
+    size_t startIndex = cellIndex(x0, y0);
+    size_t goalIndex = cellIndex(toX, toY);
+    costs[startIndex] = 0;
+    open.emplace(heuristic(x0, y0), int32(startIndex));
+    while (open.empty() == false)
+    {
+        size_t index = size_t(open.top().second);
+        open.pop();
+        if (isClosed[index] != 0)
+            continue;
+        isClosed[index] = 1;
+        if (index == goalIndex)
+            break;
+        int32 x = minX + int32(index % size_t(boxWidth));
+        int32 y = minY + int32(index / size_t(boxWidth));
+        for (uint8 direction = 0; direction < ROWOW_RO_DIRECTION_COUNT; direction++)
+        {
+            int32 nx = x + DirectionX[direction], ny = y + DirectionY[direction];
+            bool isDiagonal = DirectionX[direction] != 0 && DirectionY[direction] != 0;
+            if (isPassable(nx, ny) == false || (isDiagonal == true && (isPassable(nx, y) == false || isPassable(x, ny) == false)))
+                continue;
+            if (canStep(x, y, nx, ny) == false)
+                continue;
+            size_t neighbourIndex = cellIndex(nx, ny);
+            int32 cost = costs[index] + (isDiagonal == true ? MOVE_DIAGONAL_COST : MOVE_COST);
+            if (isClosed[neighbourIndex] != 0 || cost >= costs[neighbourIndex])
+                continue;
+            costs[neighbourIndex] = cost;
+            parents[neighbourIndex] = int32(index);
+            open.emplace(cost + heuristic(nx, ny), int32(neighbourIndex));
+        }
+    }
+    if (isClosed[goalIndex] == 0)
+        return false;
+
+    // The cells the path steps through, from the player's
+    std::vector<std::pair<int32, int32>> cells;
+    for (int32 index = int32(goalIndex); index >= 0; index = parents[size_t(index)])
+        cells.emplace_back(minX + index % boxWidth, minY + index / boxWidth);
+    std::reverse(cells.begin(), cells.end());
+
+    // Whether a player can walk the straight line between two cells' centers: every cell under it, and under the lines a third of a cell to either
+    // side (the character's width), passable, and no step up along it higher than one between neighbouring cells may be
+    auto isLineWalkable = [&isPassable, &canStep](std::pair<int32, int32> const& from, std::pair<int32, int32> const& to)
+    {
+        float fx = float(from.first) + 0.5f, fy = float(from.second) + 0.5f;
+        float lx = float(to.first - from.first), ly = float(to.second - from.second);
+        float length = std::sqrt(lx * lx + ly * ly);
+        if (length < 0.001f)
+            return true;
+        float sideX = -ly / length / 3.0f, sideY = lx / length / 3.0f;
+        int32 steps = int32(std::ceil(length * 4.0f));
+        for (float side = -1.0f; side <= 1.0f; side += 1.0f)
+        {
+            int32 lastX = int32(std::floor(fx + sideX * side));
+            int32 lastY = int32(std::floor(fy + sideY * side));
+            for (int32 step = 0; step <= steps; step++)
+            {
+                float t = float(step) / float(steps);
+                int32 cx = int32(std::floor(fx + lx * t + sideX * side));
+                int32 cy = int32(std::floor(fy + ly * t + sideY * side));
+                if (isPassable(cx, cy) == false || ((cx != lastX || cy != lastY) && canStep(lastX, lastY, cx, cy) == false))
+                    return false;
+                lastX = cx;
+                lastY = cy;
+            }
+        }
+        return true;
+    };
+
+    // The corners: from each, the furthest cell on the path still walkable in a straight line, so the walk is straight wherever nothing's in the way
+    size_t from = 0;
+    while (from + 1 < cells.size())
+    {
+        size_t next = from + 1;
+        for (size_t candidate = cells.size() - 1; candidate > from + 1; candidate--)
+        {
+            if (isLineWalkable(cells[from], cells[candidate]) == true)
+            {
+                next = candidate;
+                break;
+            }
+        }
+        cornersOut.emplace_back(mapGrid->GetCellCenterWorldX(cells[next].second), mapGrid->GetCellCenterWorldY(cells[next].first));
+        from = next;
+    }
+    if (cornersOut.empty() == true) // Already on the cell beside it: that cell, so the answer isn't taken for "no way there"
+        cornersOut.emplace_back(mapGrid->GetCellCenterWorldX(toY), mapGrid->GetCellCenterWorldY(toX));
     return true;
 }
 

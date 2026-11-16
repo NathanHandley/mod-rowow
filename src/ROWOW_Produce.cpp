@@ -654,6 +654,22 @@ void ROWOWMod::PCFameRefine(Player* player, Item const* item)
     }
 }
 
+uint32 ROWOWMod::RefineFailed(Player* player, Item* item)
+{
+    // MergedWorlds (Nathan 2026-11-15): a failed refine no longer destroys the item: it loses 1 refine level (75%) or 2 (25%), never going
+    // below +0, and stays where it is (worn ones keep being worn, with the lower refine's bonuses)
+    uint32 oldRefine = GetItemRefine(item);
+    uint32 loss = urand(1, 4) == 1 ? 2 : 1;
+    uint32 refine = oldRefine > loss ? oldRefine - loss : 0;
+    SetItemState(player, item, refine, IsItemBroken(item), IsItemIdentified(item));
+    RefreshROForm(player);
+    if (ROWOWIdentity* identity = GetIdentity(player))
+        SendItemCardsToClient(player, *identity, true);
+    ChatHandler(player->GetSession()).SendSysMessage(fmt::format("Upgrade failed!! {} is now +{}.", item->GetTemplate()->Name1, refine)); // clif_refine failure
+    ClifMiscEffect(player, ROWOW_NOTIFYEFFECT_REFINE_FAILURE); // clif_misceffect(NOTIFYEFFECT_REFINE_FAILURE)
+    return refine;
+}
+
 void ROWOWMod::ClifSkillProduceMixList(Player* player, int32 skillID, int32 trigger)
 {
     // clif_skill_produce_mix_list: the items the player can make of the list's kind (trigger, the item level asked for) and its skill's (-1,
@@ -848,7 +864,7 @@ void ROWOWMod::ClifItemRefineList(Player* sd)
 void ROWOWMod::SkillWeaponRefine(Player* sd, ObjectGuid::LowType itemGUID)
 {
     // skill_weaponrefine: one refine level, for one of the weapon level's material (Phracon, Emveretarcon, Oridecon), at refine.yml's normal
-    // chance plus (job level - 50) / 2 percent; a failure destroys the weapon
+    // chance plus (job level - 50) / 2 percent; a failure makes the weapon 1 or 2 levels weaker (RefineFailed; rAthena destroys it)
     ROWOWIdentity* identity = GetIdentity(sd);
     if (identity->MenuSkillID != ROWOW_SKILL_WS_WEAPONREFINE) // Packet exploit?
         return;
@@ -900,11 +916,8 @@ void ROWOWMod::SkillWeaponRefine(Player* sd, ObjectGuid::LowType itemGUID)
     }
     else
     {
-        // The weapon is lost (pc_delitem)
-        count = 1;
-        sd->DestroyItemCount(item, count, true);
-        handler.PSendSysMessage("Upgrade failed!! {} was destroyed.", itemName); // clif_upgrademessage(1), clif_refine failure
-        ClifMiscEffect(sd, ROWOW_NOTIFYEFFECT_REFINE_FAILURE); // clif_misceffect(NOTIFYEFFECT_REFINE_FAILURE)
+        // rAthena loses the weapon (pc_delitem); here it's 1 or 2 refine levels weaker
+        RefineFailed(sd, item);
         ClifEmotion(sd, 23); // clif_emotion(ET_HUK)
     }
 }

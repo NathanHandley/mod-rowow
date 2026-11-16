@@ -2974,6 +2974,7 @@ public:
     int64 PCJobIDToMapID(int32 jobID) const; // pc_jobid2mapid: the job's class (MAPID, EAJ_), -1 for none
     int32 PCMapIDToJobID(uint64 mapID, bool isMale) const; // pc_mapid2jobid: -1 for none
     int32 PCResetSkill(Player* player); // pc_resetskill (flag 1): the skill points it gave back
+    void RemoveForgottenSkillButtons(Player* player, ROWOWIdentity& identity, std::vector<uint16> const& skillIDs); // Off the form's action bars
     void PCResetState(ROWOWIdentity& identity) const; // pc_resetstate: the stats back to 1 and their points back (the caller refreshes the form)
     void PCResetLvl(Player* player, int32 type); // pc_resetlvl: rebirth (1), or base and job level 1 (2), base (3) or job (4) level 1
     std::vector<uint16> GetSkillTreeJobIDs(uint16 jobID) const; // The jobs whose skills the skill window shows, Novice first
@@ -3244,6 +3245,9 @@ public:
     void UpdateFameList(int32 fameType, ObjectGuid::LowType characterGUID, int32 fame, std::string const& name);
     bool PCAddFame(Player* player, int32 count); // pc_addfame
     void PCFameRefine(Player* player, Item const* item); // The Fame point system: +10 on a weapon of its own forge
+    // A failed refine (the refiners' failedrefitem, the Whitesmith's Weapon Refine): the item is kept, weaker by 1 refine level (75%) or 2 (25%),
+    // never below +0, instead of rAthena's destroying it (Nathan 2026-11-15).  Its new refine level
+    uint32 RefineFailed(Player* player, Item* item);
     uint8 PCFameRank(ObjectGuid::LowType characterGUID, int32 fameType) const; // pc_famerank
     bool PCIsTaekwonRanker(ROWOWIdentity const& identity) const; // pc_is_taekwon_ranker
     void ClifSubRanklist(Player* player, int32 fameType); // clif_sub_ranklist
@@ -3539,6 +3543,12 @@ public:
     bool MapGetCellNoPass(Map* map, ROWOWMapGrid const& mapGrid, int32 x, int32 y) const; // map_getcell(CELL_CHKNOPASS)
     bool PathSearchLong(ROWOWMapGrid const& mapGrid, int32 x0, int32 y0, int32 x1, int32 y1) const; // path_search_long(CELL_CHKWALL)
     bool PathSearch(std::vector<uint8>& pathOut, Map* map, ROWOWMapGrid const& mapGrid, int32 x0, int32 y0, int32 x1, int32 y1, uint8 cell) const; // path_search (A*), directions in pathOut
+    // MergedWorlds ro-approach (Nathan 2026-11-15): the client's Walk Into Range asks (.ro approachpath) for RO's path from the player to beside a
+    // target, as RO's client walks to what it's told to hit, rather than a straight line into the walls between.  path_search's A* on the cells,
+    // but with a player's limits (no step up a ledge higher than a player climbs) and further (40 cells round the box the two span).  The path's
+    // corners as WoW X,Y (cell centers), its straight stretches merged where a player can walk the line; the last is the cell beside the target.
+    // False when there's no such path
+    bool GetApproachPath(Player* player, Unit const* target, std::vector<std::pair<float, float>>& cornersOut) const;
     bool IsMobMovementBlocked(Creature* md, bool isIgnoreDisableMove = false) const; // Movement the core controls, or that's impossible right now
     bool UnitCanMove(Creature* md, ROWOWMobData const* mob, uint64 tick) const; // unit_can_move
     bool UnitCanReachBL(Creature* md, Unit const* tbl, int32 range, int32& xOut, int32& yOut) const; // unit_can_reach_bl

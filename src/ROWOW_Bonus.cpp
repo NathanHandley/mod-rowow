@@ -573,7 +573,8 @@ void ROWOWMod::LoadBonusData()
     });
     ROWOWSCRIPT->RegisterCommand("failedrefitem", [this, getEquipIndexItem](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
     {
-        // failedrefitem <equip index>: the refine failed, and the item is gone (pc_unequipitem, pc_delitem)
+        // failedrefitem <equip index>: the refine failed.  rAthena destroys the item (pc_unequipitem, pc_delitem); here it stays worn, 1 or 2 refine
+        // levels weaker (RefineFailed)
         Item* item = getEquipIndexItem(context, arguments);
         if (item == nullptr)
         {
@@ -581,12 +582,7 @@ void ROWOWMod::LoadBonusData()
                 context.AttachedPlayer != nullptr ? context.AttachedPlayer->GetGUID().GetCounter() : 0);
             return ROWOWScriptValue::FromNumber(0);
         }
-        std::string itemName = item->GetTemplate()->Name1;
-        PCUnequipItem(context.AttachedPlayer, EquipIndexes[arguments[0].GetNumber()].second, 1);
-        uint32 count = 1;
-        context.AttachedPlayer->DestroyItemCount(item, count, true);
-        ChatHandler(context.AttachedPlayer->GetSession()).SendSysMessage(fmt::format("Upgrade failed!! {} was destroyed.", itemName)); // clif_refine failure
-        ClifMiscEffect(context.AttachedPlayer, ROWOW_NOTIFYEFFECT_REFINE_FAILURE); // clif_misceffect(NOTIFYEFFECT_REFINE_FAILURE)
+        RefineFailed(context.AttachedPlayer, item);
         return ROWOWScriptValue::FromNumber(1);
     });
     // The card remover's commands (npc/custom/card_remover.txt, the Wise Old Woman): the cards in what's worn in an equip index, and taking

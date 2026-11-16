@@ -28,6 +28,9 @@
 
 #include "ROWOW.h"
 #include "ROWOW_JobMapIDs.h"
+#include "ROWOW_Skill.h"
+
+#include <set>
 
 using namespace std;
 
@@ -1069,6 +1072,7 @@ int32 ROWOWMod::PCResetSkill(Player* player)
         HomVaporize(player, ROWOW_HOM_ST_ACTIVE);
     bool isNovice = (PCJobIDToMapID(GetNonBabyJobID(identity->JobID)) & ROWOW_MAPID_SECONDMASK) == 0; // MAPID_NOVICE, normal or High
     int32 skillPoint = 0;
+    std::vector<uint16> forgottenSkillIDs;
     for (auto levelIter = identity->SkillLevelsByID.begin(); levelIter != identity->SkillLevelsByID.end();)
     {
         uint16 skillID = levelIter->first;
@@ -1080,6 +1084,7 @@ int32 ROWOWMod::PCResetSkill(Player* player)
         }
         if (skillID == ROWOW_SKILL_NV_TRICKDEAD && isNovice == false)
         {
+            forgottenSkillIDs.push_back(skillID);
             levelIter = identity->SkillLevelsByID.erase(levelIter);
             continue;
         }
@@ -1092,20 +1097,54 @@ int32 ROWOWMod::PCResetSkill(Player* player)
         {
             // Only handle quest skills in a special way when you can't learn them manually
             if (BattleConfig.QuestSkillReset != 0)
+            {
+                forgottenSkillIDs.push_back(skillID);
                 levelIter = identity->SkillLevelsByID.erase(levelIter);
+            }
             else
                 ++levelIter;
             continue;
         }
         skillPoint += levelIter->second;
+        forgottenSkillIDs.push_back(skillID);
         levelIter = identity->SkillLevelsByID.erase(levelIter);
     }
+    RemoveForgottenSkillButtons(player, *identity, forgottenSkillIDs);
     if (skillPoint == 0)
         return 0;
     identity->SkillPoints += skillPoint;
     identity->AreSkillsChanged = true;
     RefreshROForm(player);
     return skillPoint;
+}
+
+void ROWOWMod::RemoveForgottenSkillButtons(Player* player, ROWOWIdentity& identity, std::vector<uint16> const& skillIDs)
+{
+    // MergedWorlds (Nathan 2026-11-15): skills forgotten (the hypnotist's reset) come off the form's action bars, every level of them, rather than
+    // staying there doing nothing when used.  A spell's button is its spell ID (ACTION_BUTTON_SPELL is type 0).  The client is sent the bars when
+    // they changed and the character is in the form (out of it, they're sent on the way in)
+    std::set<uint32> spellIDs;
+    for (uint16 skillID : skillIDs)
+        if (ROWOWSkill const* skill = GetSkill(skillID))
+            for (uint32 spellID : skill->SpellIDsByLevel)
+                if (spellID != 0)
+                    spellIDs.insert(spellID);
+    bool isChanged = false;
+    for (auto actionIter = identity.ActionsByButton.begin(); actionIter != identity.ActionsByButton.end();)
+    {
+        if (spellIDs.count(actionIter->second) != 0)
+        {
+            actionIter = identity.ActionsByButton.erase(actionIter);
+            isChanged = true;
+        }
+        else
+            ++actionIter;
+    }
+    if (isChanged == false)
+        return;
+    identity.AreActionsChanged = true;
+    if (identity.IsInForm == true)
+        SendIdentityActionButtons(player, identity);
 }
 
 void ROWOWMod::PCResetState(ROWOWIdentity& identity) const
