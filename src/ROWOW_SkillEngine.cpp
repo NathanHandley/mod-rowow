@@ -2050,7 +2050,10 @@ bool ROWOWMod::SkillCheckConditionCastBegin(Player* sd, uint16 skillID, uint16 s
                 if (int32(sd->GetPower(POWER_MANA)) < require.SP)
                     ClifSkillFail(sd, skillID, ROWOW_USESKILL_FAIL_SP_INSUFFICIENT);
                 else
+                {
                     StatusZap(sd, 0, uint32(require.SP));
+                    MarkSPUse(sd);
+                }
             }
             return false;
         case ROWOW_SKILL_GS_GLITTERING:
@@ -2307,7 +2310,10 @@ void ROWOWMod::SkillConsumeRequirement(Player* sd, uint16 skillID, uint16 skillL
         if (require.HP > 0)
             sd->SetHealth(sd->GetHealth() > uint32(require.HP) ? sd->GetHealth() - uint32(require.HP) : 1);
         if (require.SP > 0)
+        {
             sd->SetPower(POWER_MANA, sd->GetPower(POWER_MANA) > uint32(require.SP) ? sd->GetPower(POWER_MANA) - uint32(require.SP) : 0);
+            MarkSPUse(sd); // The five second rule SP regen
+        }
         if (require.SpiritBall > 0) // Skills that require spirit spheres to use
             PCDelSpiritBall(sd, require.SpiritBall, 0);
         if (require.Zeny > 0 && skillID != ROWOW_SKILL_NJ_ZENYNAGE) // Zeny is reduced on skill_attack.
@@ -2316,7 +2322,10 @@ void ROWOWMod::SkillConsumeRequirement(Player* sd, uint16 skillID, uint16 skillL
     if ((type & 2) != 0)
     {
         if (skillID == ROWOW_SKILL_MC_IDENTIFY && require.SP > 0)
+        {
             sd->SetPower(POWER_MANA, sd->GetPower(POWER_MANA) > uint32(require.SP) ? sd->GetPower(POWER_MANA) - uint32(require.SP) : 0);
+            MarkSPUse(sd);
+        }
         for (int32 i = 0; i < ROWOW_MAX_SKILL_ITEM_REQUIRE; ++i)
         {
             if (require.ItemIDs[i] == 0 || require.ItemAmounts[i] <= 0)

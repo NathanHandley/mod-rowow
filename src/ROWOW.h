@@ -21,6 +21,7 @@
 #include "DatabaseEnvFwd.h"
 #include "MoveSplineInitArgs.h"
 #include "ObjectGuid.h"
+#include "Optional.h"
 #include "SharedDefines.h"
 
 #include "DataMap.h"
@@ -2175,6 +2176,8 @@ struct ROWOWIdentity : public DataMap::Base
     int32 SpriteJobID = -1; // The job whose sprite is shown (Options > Interface > Ragnarok, .ro spritejob): -1 the job of the slot in use
     bool IsPecoMountLookEnabled = true; // Out of Midgard, on a ground mount, a Peco rider's sprite shows its Peco in the mount's place (Options > Interface > Ragnarok, .ro pecomount; IsPecoShownForMount)
     bool IsAutolootEnabled = false; // A monster's drops the character has the loot priority on go into its bags when they fit (Options > Interface > Ragnarok, .ro autoloot; MobDropAutoloot)
+    bool IsWarcraftHPRegen = true; // HP Regen Type (Options > Interface > Ragnarok, .ro hpregen; UpdateNaturalRegen): Warcraft's out of combat regen, or RO's natural regen
+    bool IsFiveSecondRuleSPRegen = true; // The five second rule SP regen on top of RO's (Options > Interface > Ragnarok, .ro spregen; UpdateNaturalRegen)
     std::map<uint8, uint32> ActionsByButton; // The RO form's own action bars (packed action and type, as SMSG_ACTION_BUTTONS sends them)
     bool AreActionsChanged = false;
     std::map<uint32, ObjectGuid::LowType> ItemGUIDsByEquipPosition; // The RO equipment worn (in the bags, as RO's inventory holds it)
@@ -2289,8 +2292,10 @@ struct ROWOWIdentity : public DataMap::Base
     uint32 SkillRegenSPTimer = 0;
     uint32 SitSkillRegenHPTimer = 0;
     uint32 SitSkillRegenSPTimer = 0;
-    uint32 RestingHPTimer = 0; // Resting Restoration (HP) and (SP): time sat still out of combat with Basic Skill 3, scaled by the regen rate (UpdateRestingRestoration)
+    uint32 RestingHPTimer = 0; // Resting Restoration (HP) and (SP): time sat still out of combat with Basic Skill 8, scaled by the regen rate (UpdateRestingRestoration)
     uint32 RestingSPTimer = 0;
+    uint32 SinceSPUseTime = 5000; // The five second rule SP regen (IsFiveSecondRuleSPRegen): time since a skill last spent SP, up to 5000 ms
+    float MergedSPRegenRemainder = 0.f; // ... the SP owed but not yet given (under a point)
 
     // A form change made before the character was in the world (arriving on a map), finished once it's in the world
     bool IsFormArrivalPending = false;
@@ -2514,6 +2519,7 @@ public:
     bool SetSpriteJob(Player* player, int32 jobID); // .ro spritejob: -1 for the job of the slot in use; false when it isn't one to pick
     bool SetPecoMountLook(Player* player, bool isEnabled); // .ro pecomount: the Peco shown in a ground mount's place out of Midgard, or the mount as it is
     bool SetAutoloot(Player* player, bool isEnabled); // .ro autoloot: a monster's drops straight into the bags, or on the ground
+    bool SetRegenOptions(Player* player, Optional<bool> isWarcraftHPRegen, Optional<bool> isFiveSecondRuleSPRegen); // .ro hpregen and .ro spregen
     void SendSpriteJobsToClient(Player* player);
 
     // R9.6: the post-renewal looks' garments (robes, wings) and hat effects in the RO form, each a hidden aura (the garment's model attached
@@ -2766,7 +2772,9 @@ public:
 
     // RO natural HP and SP regen (status_natural_heal), in place of WoW's while in the form
     void UpdateNaturalRegen(Player* player, uint32 diff);
-    void UpdateRestingRestoration(Player* player, uint32 diff); // MergedWorlds' Basic Skill 3 sitting regen, in place of RO's doubled sitting regen
+    void UpdateRestingRestoration(Player* player, uint32 diff); // MergedWorlds' Basic Skill 8 sitting regen, in place of RO's doubled sitting regen
+    void SetMergedSPRegenField(Player* player, float perSecond); // The five second rule SP regen as the client's mana bar fills
+    void MarkSPUse(Unit* unit); // A player's skill spent its SP: the five second rule starts over
     void UpdateRestingRestorationPart(Player* player, uint32 diff, bool isResting, int32 rate, uint32& timer, uint32 spellID, bool isSP);
 
     // RO battle (ROWOW_Battle.cpp): the port of rAthena's pre-renewal battle code (battle.cpp) for combat between RO combatants: the normal

@@ -1433,7 +1433,9 @@ void ROWOWMod::LoadIdentitySlots(Player* player, ROWOWIdentity& identity)
     identity.SpriteJobID = -1;
     identity.IsPecoMountLookEnabled = true;
     identity.IsAutolootEnabled = false;
-    if (QueryResult result = CharacterDatabase.Query("SELECT `slot`, `zeny`, `hair_style`, `hair_color`, `sprite_job`, `peco_mount_look`, `autoloot` FROM `mod_rowow_identity_character` WHERE `guid` = {}", guid))
+    identity.IsWarcraftHPRegen = true;
+    identity.IsFiveSecondRuleSPRegen = true;
+    if (QueryResult result = CharacterDatabase.Query("SELECT `slot`, `zeny`, `hair_style`, `hair_color`, `sprite_job`, `peco_mount_look`, `autoloot`, `hp_regen_type`, `sp_regen_rule` FROM `mod_rowow_identity_character` WHERE `guid` = {}", guid))
     {
         Field* fields = result->Fetch();
         identity.Slot = uint8(std::clamp<uint32>(fields[0].Get<uint8>(), 1, ROWOW_IDENTITY_SLOT_COUNT));
@@ -1449,6 +1451,8 @@ void ROWOWMod::LoadIdentitySlots(Player* player, ROWOWIdentity& identity)
         identity.SpriteJobID = fields[4].Get<int16>();
         identity.IsPecoMountLookEnabled = fields[5].Get<uint8>() != 0;
         identity.IsAutolootEnabled = fields[6].Get<uint8>() != 0;
+        identity.IsWarcraftHPRegen = fields[7].Get<uint8>() == 0;
+        identity.IsFiveSecondRuleSPRegen = fields[8].Get<uint8>() != 0;
     }
     if (QueryResult result = CharacterDatabase.Query("SELECT `slot`, `identity`, `name` FROM `mod_rowow_identity_slot` WHERE `guid` = {}", guid))
     {
@@ -1689,10 +1693,39 @@ bool ROWOWMod::SetAutoloot(Player* player, bool isEnabled)
     return true;
 }
 
+bool ROWOWMod::SetRegenOptions(Player* player, Optional<bool> isWarcraftHPRegen, Optional<bool> isFiveSecondRuleSPRegen)
+{
+    // Options > Interface > Ragnarok (.ro hpregen, .ro spregen, Nathan 2026-11-17): the HP Regen Type, Warcraft's out of combat regen or RO's
+    // natural regen, and the five second rule SP regen on top of RO's (UpdateNaturalRegen).  The character's own choices, shared by its save
+    // slots as autoloot is
+    ROWOWIdentity* identity = GetIdentity(player);
+    if (IsEnabled == false || HasAnyIdentity(*identity) == false)
+        return false;
+    bool isChanged = false;
+    if (isWarcraftHPRegen.has_value() == true && *isWarcraftHPRegen != identity->IsWarcraftHPRegen)
+    {
+        identity->IsWarcraftHPRegen = *isWarcraftHPRegen;
+        identity->RegenHPTimer = 0;
+        isChanged = true;
+    }
+    if (isFiveSecondRuleSPRegen.has_value() == true && *isFiveSecondRuleSPRegen != identity->IsFiveSecondRuleSPRegen)
+    {
+        identity->IsFiveSecondRuleSPRegen = *isFiveSecondRuleSPRegen;
+        isChanged = true;
+    }
+    // Its row is there once a slot has had an identity (every save writes it too)
+    if (isChanged == true)
+        CharacterDatabase.Execute("UPDATE `mod_rowow_identity_character` SET `hp_regen_type` = {}, `sp_regen_rule` = {} WHERE `guid` = {}",
+            identity->IsWarcraftHPRegen == true ? 0 : 1, identity->IsFiveSecondRuleSPRegen == true ? 1 : 0, identity->CharacterGUID);
+    SendSpriteJobsToClient(player);
+    return true;
+}
+
 void ROWOWMod::SendSpriteJobsToClient(Player* player)
 {
     // ROWOWSPRITE: "<1 with an identity in any save slot, else 0><tab><the job picked, -1 for the job of the slot in use><tab><1 while the Peco is
-    // shown in a ground mount's place out of Midgard, 0 with the mount shown as it is><tab><1 with autoloot on, else 0>", then for each job that may be picked "<tab><job ID>:<job
+    // shown in a ground mount's place out of Midgard, 0 with the mount shown as it is><tab><1 with autoloot on, else 0><tab><HP Regen Type, 0 Warcraft or 1
+    // Ragnarok><tab><1 with the five second rule SP regen on, else 0>", then for each job that may be picked "<tab><job ID>:<job
     // name>" (the name with spaces for rAthena's underscores).  A job picked that can't be shown now is told as -1.  Sent when asked for (.ro
     // spritejob), each time the client's interface has loaded (ROWOW_IdentityServerScript), on every arrival (CompleteROFormChange) and whenever
     // it changes
@@ -1702,8 +1735,8 @@ void ROWOWMod::SendSpriteJobsToClient(Player* player)
     for (uint16 jobID : spriteJobIDs)
         if (int32(jobID) == identity->SpriteJobID)
             spriteJobID = identity->SpriteJobID;
-    std::string addonMessage = fmt::format("ROWOWSPRITE\t{}\t{}\t{}\t{}", HasAnyIdentity(*identity) == true ? 1 : 0, spriteJobID, identity->IsPecoMountLookEnabled == true ? 1 : 0,
-        identity->IsAutolootEnabled == true ? 1 : 0);
+    std::string addonMessage = fmt::format("ROWOWSPRITE\t{}\t{}\t{}\t{}\t{}\t{}", HasAnyIdentity(*identity) == true ? 1 : 0, spriteJobID, identity->IsPecoMountLookEnabled == true ? 1 : 0,
+        identity->IsAutolootEnabled == true ? 1 : 0, identity->IsWarcraftHPRegen == true ? 0 : 1, identity->IsFiveSecondRuleSPRegen == true ? 1 : 0);
     for (uint16 jobID : spriteJobIDs)
     {
         std::string jobName = GetJob(jobID)->Name;
@@ -1880,9 +1913,9 @@ void ROWOWMod::SaveIdentity(Player* player, CharacterDatabaseTransaction trans, 
     // The identity's rows are its slot's; the slot picked and the zeny go to the character's row, which the other slots share
     uint32 guid = identity->IdentityID;
     // ... with the head and the job sprite picked, which they share too
-    trans->Append("REPLACE INTO `mod_rowow_identity_character` (`guid`, `slot`, `zeny`, `hair_style`, `hair_color`, `sprite_job`, `peco_mount_look`, `autoloot`) VALUES ({}, {}, {}, {}, {}, {}, {}, {})",
+    trans->Append("REPLACE INTO `mod_rowow_identity_character` (`guid`, `slot`, `zeny`, `hair_style`, `hair_color`, `sprite_job`, `peco_mount_look`, `autoloot`, `hp_regen_type`, `sp_regen_rule`) VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
         player->GetGUID().GetCounter(), identity->Slot, identity->Zeny, identity->HairStyle, identity->HairColor, identity->SpriteJobID, identity->IsPecoMountLookEnabled == true ? 1 : 0,
-        identity->IsAutolootEnabled == true ? 1 : 0);
+        identity->IsAutolootEnabled == true ? 1 : 0, identity->IsWarcraftHPRegen == true ? 0 : 1, identity->IsFiveSecondRuleSPRegen == true ? 1 : 0);
     identity->IsZenyShared = true;
     identity->IsHairShared = identity->HairStyle != 0;
     ROWOWPosition const& savePoint = identity->SavePoint;
@@ -2699,9 +2732,9 @@ bool ROWOWMod::SelectIdentitySlot(Player* player, uint8 slot)
     bool isHairShared = identity->IsHairShared == true || (identity->Exists == true && identity->HairStyle != 0);
     uint8 hairStyle = identity->HairStyle;
     uint8 hairColor = identity->HairColor;
-    trans->Append("REPLACE INTO `mod_rowow_identity_character` (`guid`, `slot`, `zeny`, `hair_style`, `hair_color`, `sprite_job`, `peco_mount_look`, `autoloot`) VALUES ({}, {}, {}, {}, {}, {}, {}, {})",
+    trans->Append("REPLACE INTO `mod_rowow_identity_character` (`guid`, `slot`, `zeny`, `hair_style`, `hair_color`, `sprite_job`, `peco_mount_look`, `autoloot`, `hp_regen_type`, `sp_regen_rule`) VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
         guid, slot, identity->Zeny, isHairShared == true ? hairStyle : 0, isHairShared == true ? hairColor : 0, identity->SpriteJobID, identity->IsPecoMountLookEnabled == true ? 1 : 0,
-        identity->IsAutolootEnabled == true ? 1 : 0);
+        identity->IsAutolootEnabled == true ? 1 : 0, identity->IsWarcraftHPRegen == true ? 0 : 1, identity->IsFiveSecondRuleSPRegen == true ? 1 : 0);
     CharacterDatabase.CommitTransaction(trans);
 
     // The slot's identity in this one's place
@@ -2713,6 +2746,8 @@ bool ROWOWMod::SelectIdentitySlot(Player* player, uint8 slot)
     int32 spriteJobID = identity->SpriteJobID;
     bool isPecoMountLookEnabled = identity->IsPecoMountLookEnabled;
     bool isAutolootEnabled = identity->IsAutolootEnabled;
+    bool isWarcraftHPRegen = identity->IsWarcraftHPRegen;
+    bool isFiveSecondRuleSPRegen = identity->IsFiveSecondRuleSPRegen;
     player->CustomData.Erase("ROWOWIdentity");
     identity = player->CustomData.GetDefault<ROWOWIdentity>("ROWOWIdentity");
     identity->IsLoaded = true;
@@ -2734,6 +2769,8 @@ bool ROWOWMod::SelectIdentitySlot(Player* player, uint8 slot)
     identity->SpriteJobID = spriteJobID;
     identity->IsPecoMountLookEnabled = isPecoMountLookEnabled;
     identity->IsAutolootEnabled = isAutolootEnabled;
+    identity->IsWarcraftHPRegen = isWarcraftHPRegen;
+    identity->IsFiveSecondRuleSPRegen = isFiveSecondRuleSPRegen;
     LoadIdentityRows(player, *identity);
     identity->AccountVariables = accountVariables; // Its rows may not have the save above yet
     LOG_INFO("module.ROWOW", "{} changed Ragnarok Online save slot {} for {} ({}, identity {})", player->GetName(), oldSlot, slot,

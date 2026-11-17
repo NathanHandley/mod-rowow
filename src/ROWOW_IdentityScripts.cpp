@@ -1248,6 +1248,8 @@ public:
             { "spritejob", HandleROSpriteJobCommand, SEC_PLAYER, Console::No },
             { "pecomount", HandleROPecoMountCommand, SEC_PLAYER, Console::No },
             { "autoloot", HandleROAutolootCommand, SEC_PLAYER, Console::No },
+            { "hpregen",  HandleROHPRegenCommand, SEC_PLAYER,    Console::No },
+            { "spregen",  HandleROSPRegenCommand, SEC_PLAYER,    Console::No },
             { "enter",    HandleROEnterCommand,  SEC_PLAYER,     Console::No },
             { "content",  HandleROContentCommand, SEC_GAMEMASTER, Console::Yes },
             { "slot",     HandleROSlotCommand,   SEC_PLAYER,     Console::No },
@@ -3380,6 +3382,37 @@ public:
         return true; // Answered above (false would add the command's usage lines)
     }
 
+    // Options > Interface > Ragnarok's "HP Regen Type" (Nathan 2026-11-17): ".ro hpregen 0" (the default) Warcraft's, 1% of the max HP every 2 seconds
+    // out of combat (2% sitting), ".ro hpregen 1" RO's natural regen.  The answer is the ROWOWSPRITE message, which carries the choice
+    static bool HandleROHPRegenCommand(ChatHandler* handler, Optional<uint32> regenType)
+    {
+        return HandleRORegenOption(handler, regenType.has_value() == true ? Optional<bool>(*regenType == 0) : Optional<bool>(), Optional<bool>());
+    }
+
+    // ... "Enable WoW-like 5-second rule SP regen": ".ro spregen 1" (the default) on, ".ro spregen 0" off
+    static bool HandleROSPRegenCommand(ChatHandler* handler, Optional<uint32> isEnabled)
+    {
+        return HandleRORegenOption(handler, Optional<bool>(), isEnabled.has_value() == true ? Optional<bool>(*isEnabled != 0) : Optional<bool>());
+    }
+
+    static bool HandleRORegenOption(ChatHandler* handler, Optional<bool> isWarcraftHPRegen, Optional<bool> isFiveSecondRuleSPRegen)
+    {
+        Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
+        if (player == nullptr)
+            return false;
+        if (isWarcraftHPRegen.has_value() == false && isFiveSecondRuleSPRegen.has_value() == false)
+        {
+            ROWOW->SendSpriteJobsToClient(player);
+            return true;
+        }
+        if (ROWOW->SetRegenOptions(player, isWarcraftHPRegen, isFiveSecondRuleSPRegen) == false)
+        {
+            handler->SendSysMessage("You have no Ragnarok Online character yet.");
+            ROWOW->SendSpriteJobsToClient(player); // The page shows what's kept again
+        }
+        return true; // Answered above (false would add the command's usage lines)
+    }
+
     static bool HandleROEnterCommand(ChatHandler* handler)
     {
         Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
@@ -3583,6 +3616,8 @@ public:
         int32 spriteJobID = oldIdentity->SpriteJobID;
         bool isPecoMountLookEnabled = oldIdentity->IsPecoMountLookEnabled;
         bool isAutolootEnabled = oldIdentity->IsAutolootEnabled;
+        bool isWarcraftHPRegen = oldIdentity->IsWarcraftHPRegen;
+        bool isFiveSecondRuleSPRegen = oldIdentity->IsFiveSecondRuleSPRegen;
         slots[slot - 1].Exists = false;
         slots[slot - 1].HasRiding = false;
         player->CustomData.Erase("ROWOWIdentity");
@@ -3601,6 +3636,8 @@ public:
         identity->SpriteJobID = spriteJobID;
         identity->IsPecoMountLookEnabled = isPecoMountLookEnabled;
         identity->IsAutolootEnabled = isAutolootEnabled;
+        identity->IsWarcraftHPRegen = isWarcraftHPRegen;
+        identity->IsFiveSecondRuleSPRegen = isFiveSecondRuleSPRegen;
         identity->AccountVariables = accountVariables;
         if (wasInForm == true)
             ROWOW->EnterROForm(player);

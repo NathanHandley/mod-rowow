@@ -1627,12 +1627,20 @@ void ROWOWMod::MobDeadExp(Creature* creature, Unit* killer)
 
 void ROWOWMod::UpdateNaturalRegen(Player* player, uint32 diff)
 {
-    // status_natural_heal for a player with no regen skills: HP every natural_healhp_interval and SP every natural_healsp_interval, as fast as
-    // the statuses' regen rates (sitting doesn't double it here: Resting Restoration replaces that, UpdateRestingRestoration).  Walking stops HP regen (and starts its interval over), not SP.  Statuses stop
-    // either (status_calc_regen_rate's flag), and nothing regenerates while hidden or cloaked
+    // status_natural_heal for a player with no regen skills: HP every natural_healhp_interval and SP every natural_healsp_interval, twice as
+    // often sitting (Basic Skill 3's "Sitting doubles HP/SP Recovery Speed": back since 2026-11-17, Resting Restoration being Basic Skill 8's
+    // now) and as fast as the statuses' regen rates.  Walking stops HP regen (and starts its interval over), not SP.  Statuses stop either
+    // (status_calc_regen_rate's flag), and nothing regenerates while hidden or cloaked.
+    // The character's regen options (Options > Interface > Ragnarok, Nathan 2026-11-17) change it.  HP Regen Type Warcraft (the default): HP
+    // regenerates 1% of the max every 2 seconds (2% sitting) as fast as the statuses' regen rate, only out of combat, in place of RO's natural
+    // HP regen (Ragnarok: RO's).  And the five second rule SP regen (on by default): on top of RO's natural SP regen, 0.5% of the max SP every
+    // second once 5 seconds have passed since a skill spent SP (WoW's five second rule), sitting or not, which the client's mana bar shows
+    // filling smoothly (its power regen field, as WoW's mana regen)
     ROWOWIdentity* identity = player->CustomData.Get<ROWOWIdentity>("ROWOWIdentity");
     if (identity == nullptr || identity->IsInForm == false)
         return;
+    identity->SinceSPUseTime = std::min<uint32>(5000, identity->SinceSPUseTime + diff);
+    float mergedSPRegenPerSecond = 0.f; // The power regen field's value, for the client's mana bar
     if (player->IsAlive() == false)
     {
         // status_damage's death resets every regen tick, the skills' too.  (Walking only pauses the skills' ticks, as status_natural_heal does)
@@ -1642,6 +1650,8 @@ void ROWOWMod::UpdateNaturalRegen(Player* player, uint32 diff)
         identity->SkillRegenSPTimer = 0;
         identity->SitSkillRegenHPTimer = 0;
         identity->SitSkillRegenSPTimer = 0;
+        identity->MergedSPRegenRemainder = 0.f;
+        SetMergedSPRegenField(player, 0.f);
         return;
     }
     // pc_setstand: standing up starts the sitting regen's ticks over
@@ -1660,6 +1670,7 @@ void ROWOWMod::UpdateNaturalRegen(Player* player, uint32 diff)
     if (ROWOWStatusChange const* sc = GetStatusChange(static_cast<Unit const*>(player)); sc != nullptr &&
         (sc->Option & (ROWOW_OPTION_HIDE | ROWOW_OPTION_CLOAK | ROWOW_OPTION_CHASEWALK)) != 0)
         flag = 0;
+    int32 multi = player->IsSitState() == true ? 2 : 1; // Sitting doubles the natural HP and SP regen (not the five second rule's)
 
     // The regen skill a tick is named for in its recovery number (StatusHeal's flag&2: the first of the player's skills that give it)
     auto regenSpellID = [this, player](std::initializer_list<uint16> skillIDs) -> uint32
@@ -1698,13 +1709,30 @@ void ROWOWMod::UpdateNaturalRegen(Player* player, uint32 diff)
             flag &= ~ROWOW_RGN_HP;
     }
 
-    if ((flag & ROWOW_RGN_HP) == 0)
+    if (identity->IsWarcraftHPRegen == true)
+    {
+        if ((flag & ROWOW_RGN_HP) == 0 || player->IsInCombat() == true)
+            identity->RegenHPTimer = 0;
+        else
+        {
+            // (Walking stops it as RO's, but with Moving HP-Recovery at half speed)
+            constexpr uint32 MergedHPRegenInterval = 2000;
+            identity->RegenHPTimer += diff;
+            if (identity->RegenHPTimer >= uint32(MergedHPRegenInterval / (status.RegenRateHP / 100.)) * (player->isMoving() == true ? 2 : 1))
+            {
+                identity->RegenHPTimer = 0;
+                if (player->GetHealth() < player->GetMaxHealth())
+                    player->ModifyHealth(int32(std::max<uint32>(1, player->GetMaxHealth() * uint32(multi) / 100)));
+            }
+        }
+    }
+    else if ((flag & ROWOW_RGN_HP) == 0)
         identity->RegenHPTimer = 0;
     else
     {
         identity->RegenHPTimer += diff;
         // Half recovery while moving only applies to players with certain traits
-        uint32 interval = uint32(BattleConfig.NaturalHealHPInterval / (status.RegenRateHP / 100.)) * (player->isMoving() == true ? 2 : 1);
+        uint32 interval = uint32(BattleConfig.NaturalHealHPInterval / (status.RegenRateHP / 100. * multi)) * (player->isMoving() == true ? 2 : 1);
         if (identity->RegenHPTimer >= interval)
         {
             identity->RegenHPTimer = 0;
@@ -1746,7 +1774,7 @@ void ROWOWMod::UpdateNaturalRegen(Player* player, uint32 diff)
     else
     {
         identity->RegenSPTimer += diff;
-        if (identity->RegenSPTimer >= uint32(BattleConfig.NaturalHealSPInterval / (status.RegenRateSP / 100.)))
+        if (identity->RegenSPTimer >= uint32(BattleConfig.NaturalHealSPInterval / (status.RegenRateSP / 100. * multi)))
         {
             identity->RegenSPTimer = 0;
             if (player->GetPower(POWER_MANA) < player->GetMaxPower(POWER_MANA))
@@ -1754,15 +1782,51 @@ void ROWOWMod::UpdateNaturalRegen(Player* player, uint32 diff)
         }
     }
 
+    // The five second rule SP regen, each whole point given as soon as it's owed: the client's bar fills by the same rate in between, so the
+    // server's value never trails what the bar shows by more than the latency (a once a second tick stepped the bar back a point or more)
+    if (identity->IsFiveSecondRuleSPRegen == true && (flag & ROWOW_RGN_SP) != 0 && identity->SinceSPUseTime >= 5000)
+    {
+        mergedSPRegenPerSecond = float(player->GetMaxPower(POWER_MANA)) * 0.005f;
+        identity->MergedSPRegenRemainder += mergedSPRegenPerSecond * float(diff) / 1000.f;
+        int32 amount = int32(identity->MergedSPRegenRemainder);
+        identity->MergedSPRegenRemainder -= float(amount);
+        if (amount > 0 && player->GetPower(POWER_MANA) < player->GetMaxPower(POWER_MANA))
+            player->ModifyPower(POWER_MANA, amount);
+        if (player->GetPower(POWER_MANA) >= player->GetMaxPower(POWER_MANA))
+            identity->MergedSPRegenRemainder = 0.f;
+    }
+    else
+        identity->MergedSPRegenRemainder = 0.f;
+    SetMergedSPRegenField(player, mergedSPRegenPerSecond);
+
     // Kept in step, for the SP a respawn keeps (death empties the power)
     identity->HP = player->GetHealth();
     identity->SP = player->GetPower(POWER_MANA);
 }
 
+void ROWOWMod::MarkSPUse(Unit* unit)
+{
+    if (unit == nullptr || unit->IsPlayer() == false)
+        return;
+    if (ROWOWIdentity* identity = unit->ToPlayer()->CustomData.Get<ROWOWIdentity>("ROWOWIdentity"))
+        identity->SinceSPUseTime = 0;
+}
+
+void ROWOWMod::SetMergedSPRegenField(Player* player, float perSecond)
+{
+    // The client fills the mana bar between the server's updates by the power regen field (UNIT_FIELD_POWER_REGEN_FLAT_MODIFIER, mana's per
+    // second; the interrupted one is its five second rule's, which the client counts from its own casts, so 0 here: the server's rule ends
+    // the regen).  Player::UpdateManaRegen zeroes both for the form
+    if (player->GetFloatValue(UNIT_FIELD_POWER_REGEN_FLAT_MODIFIER + AsUnderlyingType(POWER_MANA)) != perSecond)
+        player->SetStatFloatValue(UNIT_FIELD_POWER_REGEN_FLAT_MODIFIER + AsUnderlyingType(POWER_MANA), perSecond);
+    if (player->GetFloatValue(UNIT_FIELD_POWER_REGEN_INTERRUPTED_FLAT_MODIFIER + AsUnderlyingType(POWER_MANA)) != 0.f)
+        player->SetStatFloatValue(UNIT_FIELD_POWER_REGEN_INTERRUPTED_FLAT_MODIFIER + AsUnderlyingType(POWER_MANA), 0.f);
+}
+
 void ROWOWMod::UpdateRestingRestoration(Player* player, uint32 diff)
 {
-    // Resting Restoration (Nathan 2026-11-16, MergedWorlds' Basic Skill 3 in place of RO's sitting doubling the natural regen): sitting for
-    // 10 seconds with Basic Skill 3, still and out of combat, gives Resting Restoration (HP) and (SP), each its own aura (Heal's icon), and from
+    // Resting Restoration (Nathan 2026-11-16, MergedWorlds' Basic Skill 3 in place of RO's sitting doubling the natural regen; Basic Skill 8
+    // since 2026-11-17, Basic Skill 3's sitting doubling the natural regen again): sitting for 10 seconds with Basic Skill 8, still and out of combat, gives Resting Restoration (HP) and (SP), each its own aura (Heal's icon), and from
     // then on 10% of the max HP (or SP) every second (the first at 11 seconds).  Standing, moving or entering combat ends both and starts the
     // 10 seconds over, and so does hiding (Hiding, Cloaking, Chase Walk); what stops the natural HP or SP regen (Poison, Bleeding, Berserk,
     // Trick Dead, Fury's SP...: status_calc_regen_rate's flag) ends that one.  A status that speeds up that regen halves its wait to 5 seconds:
@@ -1771,7 +1835,7 @@ void ROWOWMod::UpdateRestingRestoration(Player* player, uint32 diff)
     if (identity == nullptr)
         return;
     bool isResting = IsEnabled == true && identity->IsInForm == true && player->IsAlive() == true && player->IsSitState() == true &&
-        player->isMoving() == false && player->IsInCombat() == false && PCCheckSkill(player, ROWOW_SKILL_NV_BASIC) >= 3;
+        player->isMoving() == false && player->IsInCombat() == false && PCCheckSkill(player, ROWOW_SKILL_NV_BASIC) >= 8;
     if (ROWOWStatusChange const* sc = GetStatusChange(static_cast<Unit const*>(player)); sc != nullptr &&
         (sc->Option & (ROWOW_OPTION_HIDE | ROWOW_OPTION_CLOAK | ROWOW_OPTION_CHASEWALK)) != 0)
         isResting = false;
