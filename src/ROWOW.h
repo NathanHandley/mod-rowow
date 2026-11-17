@@ -2773,7 +2773,7 @@ public:
     // RO natural HP and SP regen (status_natural_heal), in place of WoW's while in the form
     void UpdateNaturalRegen(Player* player, uint32 diff);
     void UpdateRestingRestoration(Player* player, uint32 diff); // MergedWorlds' Basic Skill 8 sitting regen, in place of RO's doubled sitting regen
-    void SetMergedSPRegenField(Player* player, float perSecond); // The five second rule SP regen as the client's mana bar fills
+    void ClearClientManaRegen(Player* player); // The form's mana bar shows the server's SP only: no regen rate for the client to fill it by
     void MarkSPUse(Unit* unit); // A player's skill spent its SP: the five second rule starts over
     void UpdateRestingRestorationPart(Player* player, uint32 diff, bool isResting, int32 rate, uint32& timer, uint32 spellID, bool isSP);
 

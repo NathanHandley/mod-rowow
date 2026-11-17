@@ -1634,13 +1634,11 @@ void ROWOWMod::UpdateNaturalRegen(Player* player, uint32 diff)
     // The character's regen options (Options > Interface > Ragnarok, Nathan 2026-11-17) change it.  HP Regen Type Warcraft (the default): HP
     // regenerates 1% of the max every 2 seconds (2% sitting) as fast as the statuses' regen rate, only out of combat, in place of RO's natural
     // HP regen (Ragnarok: RO's).  And the five second rule SP regen (on by default): on top of RO's natural SP regen, 0.5% of the max SP every
-    // second once 5 seconds have passed since a skill spent SP (WoW's five second rule), sitting or not, which the client's mana bar shows
-    // filling smoothly (its power regen field, as WoW's mana regen)
+    // second once 5 seconds have passed since a skill spent SP (WoW's five second rule), sitting or not, each point given as soon as it's owed
     ROWOWIdentity* identity = player->CustomData.Get<ROWOWIdentity>("ROWOWIdentity");
     if (identity == nullptr || identity->IsInForm == false)
         return;
     identity->SinceSPUseTime = std::min<uint32>(5000, identity->SinceSPUseTime + diff);
-    float mergedSPRegenPerSecond = 0.f; // The power regen field's value, for the client's mana bar
     if (player->IsAlive() == false)
     {
         // status_damage's death resets every regen tick, the skills' too.  (Walking only pauses the skills' ticks, as status_natural_heal does)
@@ -1651,7 +1649,7 @@ void ROWOWMod::UpdateNaturalRegen(Player* player, uint32 diff)
         identity->SitSkillRegenHPTimer = 0;
         identity->SitSkillRegenSPTimer = 0;
         identity->MergedSPRegenRemainder = 0.f;
-        SetMergedSPRegenField(player, 0.f);
+        ClearClientManaRegen(player);
         return;
     }
     // pc_setstand: standing up starts the sitting regen's ticks over
@@ -1782,12 +1780,13 @@ void ROWOWMod::UpdateNaturalRegen(Player* player, uint32 diff)
         }
     }
 
-    // The five second rule SP regen, each whole point given as soon as it's owed: the client's bar fills by the same rate in between, so the
-    // server's value never trails what the bar shows by more than the latency (a once a second tick stepped the bar back a point or more)
+    // The five second rule SP regen, each whole point given as soon as it's owed, so the bar rises a point at a time as the SP does.  The
+    // client isn't told a regen rate to fill the bar by itself (the power regen field, as WoW's mana regen): its own count ran up to a point
+    // ahead of or behind the server's, so a skill could go off while the bar showed too little SP for it, or be refused with enough showing
+    // (Nathan 2026-11-17: a Bash at 7 SP on the bar spent the 8 the server had, emptying the bar)
     if (identity->IsFiveSecondRuleSPRegen == true && (flag & ROWOW_RGN_SP) != 0 && identity->SinceSPUseTime >= 5000)
     {
-        mergedSPRegenPerSecond = float(player->GetMaxPower(POWER_MANA)) * 0.005f;
-        identity->MergedSPRegenRemainder += mergedSPRegenPerSecond * float(diff) / 1000.f;
+        identity->MergedSPRegenRemainder += float(player->GetMaxPower(POWER_MANA)) * 0.005f * float(diff) / 1000.f;
         int32 amount = int32(identity->MergedSPRegenRemainder);
         identity->MergedSPRegenRemainder -= float(amount);
         if (amount > 0 && player->GetPower(POWER_MANA) < player->GetMaxPower(POWER_MANA))
@@ -1797,7 +1796,7 @@ void ROWOWMod::UpdateNaturalRegen(Player* player, uint32 diff)
     }
     else
         identity->MergedSPRegenRemainder = 0.f;
-    SetMergedSPRegenField(player, mergedSPRegenPerSecond);
+    ClearClientManaRegen(player);
 
     // Kept in step, for the SP a respawn keeps (death empties the power)
     identity->HP = player->GetHealth();
@@ -1812,13 +1811,13 @@ void ROWOWMod::MarkSPUse(Unit* unit)
         identity->SinceSPUseTime = 0;
 }
 
-void ROWOWMod::SetMergedSPRegenField(Player* player, float perSecond)
+void ROWOWMod::ClearClientManaRegen(Player* player)
 {
-    // The client fills the mana bar between the server's updates by the power regen field (UNIT_FIELD_POWER_REGEN_FLAT_MODIFIER, mana's per
-    // second; the interrupted one is its five second rule's, which the client counts from its own casts, so 0 here: the server's rule ends
-    // the regen).  Player::UpdateManaRegen zeroes both for the form
-    if (player->GetFloatValue(UNIT_FIELD_POWER_REGEN_FLAT_MODIFIER + AsUnderlyingType(POWER_MANA)) != perSecond)
-        player->SetStatFloatValue(UNIT_FIELD_POWER_REGEN_FLAT_MODIFIER + AsUnderlyingType(POWER_MANA), perSecond);
+    // The client fills the mana bar between the server's updates by the power regen fields (UNIT_FIELD_POWER_REGEN_FLAT_MODIFIER and the
+    // interrupted one, mana's per second).  The form's are 0, so the bar shows the server's SP and nothing else: Player::UpdateManaRegen
+    // zeroes them for the form, and this keeps them so (a 2026-11-17 build set the flat one to the five second rule SP regen's rate)
+    if (player->GetFloatValue(UNIT_FIELD_POWER_REGEN_FLAT_MODIFIER + AsUnderlyingType(POWER_MANA)) != 0.f)
+        player->SetStatFloatValue(UNIT_FIELD_POWER_REGEN_FLAT_MODIFIER + AsUnderlyingType(POWER_MANA), 0.f);
     if (player->GetFloatValue(UNIT_FIELD_POWER_REGEN_INTERRUPTED_FLAT_MODIFIER + AsUnderlyingType(POWER_MANA)) != 0.f)
         player->SetStatFloatValue(UNIT_FIELD_POWER_REGEN_INTERRUPTED_FLAT_MODIFIER + AsUnderlyingType(POWER_MANA), 0.f);
 }
