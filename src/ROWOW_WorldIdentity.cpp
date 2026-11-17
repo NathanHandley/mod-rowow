@@ -63,11 +63,19 @@ using namespace std;
 //
 // In a battleground or an arena every character shows its Warcraft identity, whatever it picked (the pick is kept and shows again on leaving), and no
 // identity can be changed in combat (GetWorldIdentityChangeLock)
+//
+// City of Heroes (Nathan 2026-11-16, play test item 8; COHWOW): with mod-cityofheroes there is a fourth world, Primal Earth (City of Heroes' maps,
+// the core's map world 2), and a fourth identity, City of Heroes: the character's hero in its costume.  As Midgard and the RO form, Primal Earth
+// always has the character in the CoH form (its powers, endurance, the City of Heroes spell book and windows) and its look is the form's own, so
+// only the City of Heroes identity can be shown there.  Out of it the City of Heroes identity is a look alone (the hero's body and costume, no
+// powers), once the character has made its hero; not in Midgard.  mod-cityofheroes shows that look as the character's native display rather than
+// an aura (no spell is needed for it), so it never shows up among the transforms below (ROWOW_WorldIdentityCityOfHeroes.cpp).  Without
+// mod-cityofheroes the client is told only the first three worlds and identities, as before
 
 namespace
 {
-    char const* const WorldNames[ROWOW_WORLD_COUNT] = { "Azeroth", "Norrath", "Midgard" };
-    char const* const WorldIdentityNames[ROWOW_WORLD_IDENTITY_COUNT] = { "Warcraft", "EverQuest", "Ragnarok" };
+    char const* const WorldNames[ROWOW_WORLD_COUNT] = { "Azeroth", "Norrath", "Midgard", "Primal Earth" };
+    char const* const WorldIdentityNames[ROWOW_WORLD_IDENTITY_COUNT] = { "Warcraft", "EverQuest", "Ragnarok", "City of Heroes" };
 
     // The world's own identity: what a character shows there until it picks another
     uint8 GetWorldDefaultIdentity(uint8 world)
@@ -76,6 +84,7 @@ namespace
         {
             case ROWOW_WORLD_NORRATH: return ROWOW_WORLD_IDENTITY_EVERQUEST;
             case ROWOW_WORLD_MIDGARD: return ROWOW_WORLD_IDENTITY_RAGNAROK;
+            case ROWOW_WORLD_PRIMAL_EARTH: return ROWOW_WORLD_IDENTITY_CITY_OF_HEROES;
             default: return ROWOW_WORLD_IDENTITY_WARCRAFT;
         }
     }
@@ -100,6 +109,7 @@ uint8 ROWOWMod::GetWorldOfMap(uint32 mapID) const
     {
         case MAP_WORLD_AZEROTH: return ROWOW_WORLD_AZEROTH;
         case ROWOW_MAP_WORLD: return ROWOW_WORLD_MIDGARD;
+        case ROWOW_COH_MAP_WORLD: return HasCityOfHeroes() == true ? ROWOW_WORLD_PRIMAL_EARTH : ROWOW_WORLD_NONE;
         case ROWOW_NORRATH_MAP_WORLD: return IsNorrathMap(mapID) == true ? ROWOW_WORLD_NORRATH : ROWOW_WORLD_AZEROTH;
         default: return ROWOW_WORLD_NONE;
     }
@@ -135,7 +145,18 @@ char ROWOWMod::GetWorldIdentityLock(Player* player, uint8 world, uint8 worldIden
     // - the Ragnarok identity out of Midgard needs a Ragnarok Online character (in any save slot) and Midgard Pathfinder.  In Midgard it is never
     //   locked: arriving there with no character makes one, as it always did
     // - any other identity in Midgard needs Midgard Wayfarer
+    // - in Primal Earth only the City of Heroes identity (the CoH form's look); out of it that one needs a hero, and isn't shown in Midgard
     // Warcraft and EverQuest are free in Azeroth and Norrath
+    if (world == ROWOW_WORLD_PRIMAL_EARTH)
+        return worldIdentity == ROWOW_WORLD_IDENTITY_CITY_OF_HEROES ? ROWOW_WORLD_IDENTITY_LOCK_NONE : ROWOW_WORLD_IDENTITY_LOCK_PRIMAL_EARTH;
+    if (worldIdentity == ROWOW_WORLD_IDENTITY_CITY_OF_HEROES)
+    {
+        if (world == ROWOW_WORLD_MIDGARD)
+            return ROWOW_WORLD_IDENTITY_LOCK_COH_IN_MIDGARD;
+        if (HasCityOfHeroesHero(player) == false)
+            return ROWOW_WORLD_IDENTITY_LOCK_NO_COH_HERO;
+        return ROWOW_WORLD_IDENTITY_LOCK_NONE;
+    }
     if (worldIdentity == ROWOW_WORLD_IDENTITY_EVERQUEST && GetEverQuestIdentityLookSpellID(player) == 0)
         return ROWOW_WORLD_IDENTITY_LOCK_NO_EVERQUEST;
     if (worldIdentity == ROWOW_WORLD_IDENTITY_RAGNAROK)
@@ -181,6 +202,9 @@ char const* ROWOWMod::GetWorldIdentityLockText(char lock) const
         case ROWOW_WORLD_IDENTITY_LOCK_WAYFARER: return "You need the achievement Midgard Wayfarer to show another identity in Midgard. It also lets you use your non-Ragnarok companion pets there.";
         case ROWOW_WORLD_IDENTITY_LOCK_NO_RO_CHARACTER: return "You have no Ragnarok Online character yet. Make one on the Ragnarok page of the character window.";
         case ROWOW_WORLD_IDENTITY_LOCK_NO_EVERQUEST: return "Your character has no EverQuest identity.";
+        case ROWOW_WORLD_IDENTITY_LOCK_NO_COH_HERO: return "You have no City of Heroes hero yet. Make one on your first trip to Primal Earth (the Primal Earth spell).";
+        case ROWOW_WORLD_IDENTITY_LOCK_PRIMAL_EARTH: return "In Primal Earth you are your City of Heroes hero.";
+        case ROWOW_WORLD_IDENTITY_LOCK_COH_IN_MIDGARD: return "Your City of Heroes identity isn't shown in Midgard.";
         default: return "";
     }
 }
@@ -203,9 +227,12 @@ uint8 ROWOWMod::GetWorldIdentity(Player* player, uint8 world)
 
 bool ROWOWMod::SetWorldIdentity(Player* player, uint8 world, uint8 worldIdentity, std::string& errorOut)
 {
-    if (IsEnabled == false || world >= ROWOW_WORLD_COUNT || worldIdentity >= ROWOW_WORLD_IDENTITY_COUNT)
+    uint8 worldCount = HasCityOfHeroes() == true ? ROWOW_WORLD_COUNT : ROWOW_WORLD_COUNT_WITHOUT_COH;
+    uint8 worldIdentityCount = HasCityOfHeroes() == true ? ROWOW_WORLD_IDENTITY_COUNT : ROWOW_WORLD_IDENTITY_COUNT_WITHOUT_COH;
+    if (IsEnabled == false || world >= worldCount || worldIdentity >= worldIdentityCount)
     {
-        errorOut = "Use .identity <azeroth/norrath/midgard> <warcraft/everquest/ragnarok>.";
+        errorOut = HasCityOfHeroes() == true ? "Use .identity <azeroth/norrath/midgard/primal> <warcraft/everquest/ragnarok/city>." :
+            "Use .identity <azeroth/norrath/midgard> <warcraft/everquest/ragnarok>.";
         return false;
     }
     char lock = GetWorldIdentityChangeLock(player, world, worldIdentity);
@@ -456,6 +483,9 @@ void ROWOWMod::RefreshWorldIdentityLook(Player* player, bool isArriving /*= fals
     if (worldIdentity == ROWOW_WORLD_IDENTITY_RAGNAROK && (isInForm == true || world != ROWOW_WORLD_MIDGARD))
         wantedIllusionSpellID = GetWorldIdentityRagnarokLookSpellID(player);
     uint32 wantedEverQuestSpellID = worldIdentity == ROWOW_WORLD_IDENTITY_EVERQUEST ? GetEverQuestIdentityLookSpellID(player) : 0;
+    // The City of Heroes look out of Primal Earth (in it the CoH form's own look is shown, whatever this says), which mod-cityofheroes puts on as the
+    // character's native display: any transform below still shows over it, and the body under them is the hero's
+    SetCityOfHeroesIdentityLook(player, worldIdentity == ROWOW_WORLD_IDENTITY_CITY_OF_HEROES && world != ROWOW_WORLD_PRIMAL_EARTH && world < ROWOW_WORLD_COUNT);
 
     // What is on now.  The RO illusions: in the form every one is the form's (the wanted one is made the identity's, any other goes); out of it only
     // the ones an identity put on are touched.  Any other hidden transform is an EverQuest look an identity put on, and any other visible one a look
@@ -628,16 +658,23 @@ void ROWOWMod::SendWorldIdentityToClient(Player* player, bool isForced)
     // whenever it changes
     if (player == nullptr || player->GetSession() == nullptr)
         return;
+    // With mod-cityofheroes four worlds (Primal Earth the fourth) and four identities (City of Heroes the fourth): sixteen lock letters, each world's
+    // four in turn.  A world with no identities (another game's map) is sent as the first number past the worlds told (3 without CoH, as before)
     ROWOWWorldIdentityState* state = GetWorldIdentityState(player);
+    uint8 worldCount = HasCityOfHeroes() == true ? ROWOW_WORLD_COUNT : ROWOW_WORLD_COUNT_WITHOUT_COH;
+    uint8 worldIdentityCount = HasCityOfHeroes() == true ? ROWOW_WORLD_IDENTITY_COUNT : ROWOW_WORLD_IDENTITY_COUNT_WITHOUT_COH;
     std::string shown;
     std::string locks;
-    for (uint8 world = 0; world < ROWOW_WORLD_COUNT; world++)
+    for (uint8 world = 0; world < worldCount; world++)
     {
         shown += char('0' + GetWorldIdentity(player, world));
-        for (uint8 worldIdentity = 0; worldIdentity < ROWOW_WORLD_IDENTITY_COUNT; worldIdentity++)
+        for (uint8 worldIdentity = 0; worldIdentity < worldIdentityCount; worldIdentity++)
             locks += GetWorldIdentityChangeLock(player, world, worldIdentity);
     }
-    std::string addonMessage = fmt::format("ROWOWIDENT\t{}\t{}\t{}\t{}", GetWorldOfMap(player->GetMapId()), shown, locks, IsWorldwalkerOpen(player) == true ? 1 : 0);
+    uint8 worldOfMap = GetWorldOfMap(player->GetMapId());
+    if (worldOfMap >= worldCount)
+        worldOfMap = worldCount;
+    std::string addonMessage = fmt::format("ROWOWIDENT\t{}\t{}\t{}\t{}", worldOfMap, shown, locks, IsWorldwalkerOpen(player) == true ? 1 : 0);
     if (isForced == false && addonMessage == state->SentMessage)
         return;
     state->SentMessage = addonMessage;
@@ -835,6 +872,7 @@ public:
         }
         uint8 world = ROWOW_WORLD_COUNT;
         uint8 worldIdentity = ROWOW_WORLD_IDENTITY_COUNT;
+        // (Primal Earth and City of Heroes only with mod-cityofheroes: SetWorldIdentity refuses them without it)
         for (uint8 i = 0; i < ROWOW_WORLD_COUNT; i++)
             if (IsNameMatch(*worldText, WorldNames[i]) == true || *worldText == std::to_string(i))
                 world = i;

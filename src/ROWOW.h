@@ -2054,28 +2054,34 @@ struct ROWOWIdentitySlot
 // Midgard Worldwalker is no Base level's (Nathan 2026-11-11, was Base level 90): a Transcendent second job (Lord Knight .. Gypsy, their Peco forms
 // too) at its max Job level, 70 (IsMidgardWorldwalkerJob)
 
-// Identity per world (Nathan 2026-11-09; ROWOW_WorldIdentity.cpp): the three worlds, the three identities a character can show in each, and why one
-// can't be picked (the lock letters the client is sent in ROWOWIDENT)
+// Identity per world (Nathan 2026-11-09; ROWOW_WorldIdentity.cpp): the worlds, the identities a character can show in each, and why one can't be
+// picked (the lock letters the client is sent in ROWOWIDENT).  Primal Earth and the City of Heroes identity (Nathan 2026-11-16, COHWOW) exist only
+// with mod-cityofheroes (ROWOW_WorldIdentityCityOfHeroes.cpp): without it the client is told the first three of each, as before
 enum ROWOWWorld : uint8
 {
     ROWOW_WORLD_AZEROTH = 0, // The core's map world 0 (MAP_WORLD_AZEROTH): every map no module registered
     ROWOW_WORLD_NORRATH = 1, // mod-everquest's maps (its map world EVERQUEST_MAP_WORLD)
     ROWOW_WORLD_MIDGARD = 2, // The RO maps (map world ROWOW_MAP_WORLD)
-    ROWOW_WORLD_COUNT   = 3,
-    ROWOW_WORLD_NONE    = 3  // Another game's map (Meridian 59's, ...): no identity is shown there, and none can be picked for it
+    ROWOW_WORLD_PRIMAL_EARTH = 3, // City of Heroes' maps (map world ROWOW_COH_MAP_WORLD, mod-cityofheroes')
+    ROWOW_WORLD_COUNT   = 4,
+    ROWOW_WORLD_NONE    = 4  // Another game's map (Meridian 59's, ...): no identity is shown there, and none can be picked for it
 };
+#define ROWOW_WORLD_COUNT_WITHOUT_COH               3       // The worlds a server without mod-cityofheroes tells the client of
 
 // The RO maps' world id in the core's map worlds (MapWorlds.h; E:\MW\SHARED.md sections 1 and 8), and Norrath's (mod-everquest's
 // EVERQUEST_MAP_WORLD, named here too so mod-rowow builds without mod-everquest)
 #define ROWOW_MAP_WORLD                             1
 #define ROWOW_NORRATH_MAP_WORLD                     5
+#define ROWOW_COH_MAP_WORLD                         2       // City of Heroes' (mod-cityofheroes' COH_MAP_WORLD)
 enum ROWOWWorldIdentityType : uint8
 {
     ROWOW_WORLD_IDENTITY_WARCRAFT  = 0,
     ROWOW_WORLD_IDENTITY_EVERQUEST = 1,
     ROWOW_WORLD_IDENTITY_RAGNAROK  = 2,
-    ROWOW_WORLD_IDENTITY_COUNT     = 3
+    ROWOW_WORLD_IDENTITY_CITY_OF_HEROES = 3, // The character's City of Heroes hero in its costume (mod-cityofheroes)
+    ROWOW_WORLD_IDENTITY_COUNT     = 4
 };
+#define ROWOW_WORLD_IDENTITY_COUNT_WITHOUT_COH      3       // The identities a server without mod-cityofheroes tells the client of
 #define ROWOW_WORLD_IDENTITY_LOCK_NONE              '0'
 #define ROWOW_WORLD_IDENTITY_LOCK_PATHFINDER        'P'     // Needs Midgard Pathfinder (the Ragnarok identity out of Midgard)
 #define ROWOW_WORLD_IDENTITY_LOCK_WAYFARER          'W'     // Needs Midgard Wayfarer (another identity in Midgard)
@@ -2083,6 +2089,9 @@ enum ROWOWWorldIdentityType : uint8
 #define ROWOW_WORLD_IDENTITY_LOCK_NO_EVERQUEST      'E'     // The character has no EverQuest look
 #define ROWOW_WORLD_IDENTITY_LOCK_BATTLEGROUND      'B'     // In a battleground or arena: the Warcraft identity is shown there, and can't be changed
 #define ROWOW_WORLD_IDENTITY_LOCK_COMBAT            'F'     // In combat: no identity can be changed
+#define ROWOW_WORLD_IDENTITY_LOCK_NO_COH_HERO       'H'     // The character has made no City of Heroes hero yet
+#define ROWOW_WORLD_IDENTITY_LOCK_PRIMAL_EARTH      'O'     // In Primal Earth only the City of Heroes identity is shown (the CoH form's own look)
+#define ROWOW_WORLD_IDENTITY_LOCK_COH_IN_MIDGARD    'M'     // The City of Heroes identity isn't shown in Midgard
 #define ROWOW_WORLD_IDENTITY_CHECK_TIME_IN_MS       1000    // How often a character's look is checked against its identity (UpdateWorldIdentity)
 // The mount display of a character shown riding its Peco in place of its WoW mount (RefreshWorldIdentityMount): a display no client or server has, so
 // it stays mounted for both (the field isn't 0) with no mount model made
@@ -2093,7 +2102,7 @@ enum ROWOWWorldIdentityType : uint8
 struct ROWOWWorldIdentityState : public DataMap::Base
 {
     bool IsLoaded = false;
-    uint8 Chosen[ROWOW_WORLD_COUNT] = { ROWOW_WORLD_IDENTITY_WARCRAFT, ROWOW_WORLD_IDENTITY_EVERQUEST, ROWOW_WORLD_IDENTITY_RAGNAROK }; // What was picked (the world's own until then)
+    uint8 Chosen[ROWOW_WORLD_COUNT] = { ROWOW_WORLD_IDENTITY_WARCRAFT, ROWOW_WORLD_IDENTITY_EVERQUEST, ROWOW_WORLD_IDENTITY_RAGNAROK, ROWOW_WORLD_IDENTITY_CITY_OF_HEROES }; // What was picked (the world's own until then)
     uint32 CheckTimer = ROWOW_WORLD_IDENTITY_CHECK_TIME_IN_MS; // Starts due
     std::string SentMessage; // The last ROWOWIDENT the client was sent: sent again only when it changes
     bool IsWorldwalkerOpen = false; // In the RO form with Midgard Worldwalker: the character's own spells were left known (EnterROForm, OpenWorldwalker)
@@ -2659,6 +2668,10 @@ public:
     uint8 GetWorldOfMap(uint32 mapID) const; // ROWOW_WORLD_*
     bool IsNorrathMap(uint32 mapID) const; // One of mod-everquest's maps (false without it)
     uint32 GetEverQuestIdentityLookSpellID(Player* player) const; // The spell whose aura is the character's EverQuest look, 0 for none (the seam for the EQWOW-SoL merge)
+    // City of Heroes (ROWOW_WorldIdentityCityOfHeroes.cpp, the one place that reads mod-cityofheroes; all false/nothing without it)
+    bool HasCityOfHeroes() const; // mod-cityofheroes is built in and on: Primal Earth and the City of Heroes identity exist
+    bool HasCityOfHeroesHero(Player* player) const; // The character has made its City of Heroes hero (the creator finished)
+    void SetCityOfHeroesIdentityLook(Player* player, bool isWanted) const; // The hero's costume shown out of the CoH form (or taken off)
     ROWOWWorldIdentityState* GetWorldIdentityState(Player* player);
     char GetWorldIdentityLock(Player* player, uint8 world, uint8 worldIdentity); // ROWOW_WORLD_IDENTITY_LOCK_*: why it can't be shown there now
     char GetWorldIdentityChangeLock(Player* player, uint8 world, uint8 worldIdentity); // ... and why it can't be picked now: in combat, in a battleground, or that
