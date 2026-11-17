@@ -122,7 +122,25 @@ class ROWOW_SkillSpellScript : public SpellScript
 class ROWOW_SkillAllSpellScript : public AllSpellScript
 {
 public:
-    ROWOW_SkillAllSpellScript() : AllSpellScript("ROWOW_SkillAllSpellScript", { ALLSPELLHOOK_ON_CALC_CAST_TIME, ALLSPELLHOOK_ON_CAST_CANCEL }) { }
+    ROWOW_SkillAllSpellScript() : AllSpellScript("ROWOW_SkillAllSpellScript", { ALLSPELLHOOK_ON_CALC_CAST_TIME, ALLSPELLHOOK_ON_CAST_CANCEL, ALLSPELLHOOK_ON_SPELL_MAX_RANGE }) { }
+
+    void OnSpellMaxRange(Spell* spell, float& maxRange) override
+    {
+        // A player's RO skill reaches as far as RO's range for it (skill_get_range2): Vulture's Eye and Snake Eye add to the skills RO marks
+        // for them, which the spell's fixed SpellRange (the converter's, the skill's base range) doesn't know.  RO's own check (UnitSkillUse)
+        // holds it to that range; this only keeps the core's from stopping it short.  A melee one (2 cells or less) keeps the combat range
+        Unit* caster = spell->GetCaster() != nullptr ? spell->GetCaster()->ToUnit() : nullptr;
+        uint16 skillID = 0;
+        uint16 skillLevel = 0;
+        if (ROWOW->IsEnabled == false || caster == nullptr || caster->IsPlayer() == false || ROWOW->IsROCombatant(caster) == false ||
+            ROWOW->GetSkillOfSpell(spell->GetSpellInfo()->Id, skillID, skillLevel) == false)
+            return;
+        // No further than area_size, past which battle_check_range turns any target away (Double Strafe with Vulture's Eye 10 reaches 14, not 19)
+        int32 rangeCells = std::min<int32>(ROWOW->SkillGetRange2(caster, skillID, skillLevel, true), ROWOW->BattleConfig.AreaSize);
+        if (rangeCells <= 2)
+            return;
+        maxRange = std::max(maxRange, float(rangeCells) * ROWOW->CellSize);
+    }
 
     void OnSpellCalcCastTime(Spell* spell, int32& castTime) override
     {

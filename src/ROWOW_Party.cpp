@@ -260,7 +260,12 @@ bool ROWOWMod::PartyShareLoot(Player* sd, Group* group, ROWOWDropItem const& ite
     if (group != nullptr && BattleConfig.PartyShowSharePicker != 0 && roItem != nullptr && (BattleConfig.ShowPickerItemType & (1 << roItem->Type)) != 0)
     {
         ItemTemplate const* itemTemplate = sObjectMgr->GetItemTemplate(item.ItemTemplateID);
-        std::string message = fmt::format("{} has got {}.", target->GetName(), itemTemplate != nullptr ? itemTemplate->Name1 : "an item");
+        std::string itemName = itemTemplate != nullptr ? itemTemplate->Name1 : "an item";
+        // An unidentified one is named by a link carrying its unidentified state, which the RO_Identity addon shows by its unidentified name
+        if (itemTemplate != nullptr && item.IsIdentified == false)
+            itemName = fmt::format("|c{:08x}|Hitem:{}:{}:0:0:0:0:0:0:{}|h[{}]|h|r", ItemQualityColors[std::min<uint32>(itemTemplate->Quality, MAX_ITEM_QUALITY - 1)],
+                item.ItemTemplateID, ROWOW_ITEM_STATE_ENCHANTMENT_START + ROWOW_ITEM_STATE_UNIDENTIFIED, uint32(target->GetLevel()), itemTemplate->Name1);
+        std::string message = fmt::format("{} has got {}.", target->GetName(), itemName);
         for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next())
         {
             Player* member = itr->GetSource();

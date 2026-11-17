@@ -81,9 +81,26 @@ public:
         return false;
     }
 
-    bool OnPlayerCanSendMail(Player* player, ObjectGuid /*receiverGuid*/, ObjectGuid /*mailbox*/, std::string& /*subject*/, std::string& /*body*/, uint32 /*money*/, uint32 /*COD*/, Item* item) override
+    bool OnPlayerCanSendMail(Player* player, ObjectGuid /*receiverGuid*/, ObjectGuid /*mailbox*/, std::string& /*subject*/, std::string& /*body*/, uint32 /*money*/, uint32 COD, Item* item) override
     {
-        // mail_setitem's itemdb_canmail.  (In the form every mail is refused; this is a character's mail with an RO item in its bags)
+        // RO mail (Nathan 2026-11-13: free, in the form): no cash on delivery from the form, as its payment would cross between zeny and the payer's
+        // money; an RO item is only mailed from the form (out of it one can't be in the character's own bags)
+        if (ROWOW->IsEnabled == true && ROWOW->IsInROForm(player) == true && COD != 0)
+        {
+            ChatHandler(player->GetSession()).SendSysMessage("Cash on delivery can't be asked in zeny.");
+            return false;
+        }
+        if (ROWOW->IsEnabled == true && item != nullptr && ROWOW->IsInROForm(player) == true && ROWOW->IsROItemTemplate(item->GetEntry()) == false)
+        {
+            ChatHandler(player->GetSession()).SendSysMessage("You can't mail that as your Ragnarok Online self.");
+            return false;
+        }
+        if (ROWOW->IsEnabled == true && item != nullptr && ROWOW->IsInROForm(player) == true && ROWOW->GetIdentityEquipPosition(*ROWOW->GetIdentity(player), item->GetGUID().GetCounter()) != 0)
+        {
+            ChatHandler(player->GetSession()).SendSysMessage("Take it off before mailing it.");
+            return false;
+        }
+        // mail_setitem's itemdb_canmail
         if (ROWOW->IsEnabled == false || item == nullptr || ROWOW->ItemDBIsRestricted(item, &ROWOWItem::IsNoMail) == false)
             return true;
         ChatHandler(player->GetSession()).SendSysMessage("This item cannot be mailed.");

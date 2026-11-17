@@ -94,11 +94,6 @@ namespace
     {
         return int32(std::floor(std::sqrt(double((x1 - x2) * (x1 - x2) + (y1 - y2) * (y1 - y2)))));
     }
-
-    void SendFollowerMessage(Player* player, std::string const& message)
-    {
-        ChatHandler(player->GetSession()).SendSysMessage(message.c_str());
-    }
 }
 
 void ROWOWMod::LoadFollowerData()
@@ -1086,7 +1081,7 @@ void ROWOWMod::FollowerAttackTimerSub(Player* /*sd*/, ROWOWFollower& fd, Creatur
     int32 range = sstatus->Range;
     if (target->isMoving() == true)
         range++; // Extra range when chasing
-    if (BattleCheckRange(md, target, range) == false)
+    if (BattleCheckAttackRange(md, target, range) == false) // MergedWorlds ro-melee-range: melee reaches 50% further
         return;
     if (mob->IsWalking == true)
         UnitStopWalking(md);

@@ -402,8 +402,11 @@ void ROWOWMod::RegisterNpcScriptCommands()
         int64 count = std::min(GetArgument(arguments, 1, size - first), size - first);
         if (count <= 0)
             return ROWOWScriptValue::FromNumber(0);
+        // The emptied end is unset: "" for a string array (a 0 there would be the text "0" and count in its size: the Izlude Kafra's menu kept two
+        // "0" destinations after Prontera's longer one; Nathan 2026-11-14)
+        ROWOWScriptValue unset = name.empty() == false && name.back() == '$' ? ROWOWScriptValue::FromText("") : ROWOWScriptValue::FromNumber(0);
         for (int64 index = first; index < size; index++)
-            ROWOWSCRIPT->SetVariable(context, name, uint32(index), index + count < size ? ROWOWSCRIPT->GetVariable(context, name, uint32(index + count)) : ROWOWScriptValue::FromNumber(0));
+            ROWOWSCRIPT->SetVariable(context, name, uint32(index), index + count < size ? ROWOWSCRIPT->GetVariable(context, name, uint32(index + count)) : unset);
         return ROWOWScriptValue::FromNumber(0);
     });
     engine->SetReferenceArguments("deletearray", 1);
@@ -2147,6 +2150,20 @@ void ROWOWMod::RegisterNpcScriptCommands()
             PCResetSkill(player);
         return ROWOWScriptValue::FromNumber(0);
     });
+    engine->RegisterCommand("resetstatus", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const&)
+    {
+        // resetstatus{ <char id>}: pc_resetstate, every stat 1 and the base level's status points back (the Hypnotist's, Nathan 2026-11-13)
+        if (Player* player = GetAttachedPlayer(context, "resetstatus"))
+        {
+            ROWOWIdentity* identity = GetIdentity(player);
+            if (identity->Exists == true)
+            {
+                PCResetState(*identity);
+                RefreshROForm(player);
+            }
+        }
+        return ROWOWScriptValue::FromNumber(0);
+    });
     engine->RegisterCommand("resetlvl", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
     {
         // resetlvl <action type>{,<char id>}: pc_resetlvl (the Valkyrie's rebirth is type 1, after the change to High Novice)
@@ -2493,7 +2510,23 @@ void ROWOWMod::RegisterNpcScriptCommands()
 
     // Commands of systems that aren't here: the runs go on past them.  setunitdata and areamobuseskill are only in battlegrounds and instances,
     // openmail and openauction ask for windows an identity has none of, and freeloop only lifts the loop limit of guild castle scripts
-    for (char const* unusedCommandName : { "setunitdata", "areamobuseskill", "openmail", "openauction", "freeloop" })
+    engine->RegisterCommand("openmail", [getNpcUnit](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const&)
+    {
+        // openmail: the mailbox (MergedWorlds RO mail, Nathan 2026-11-13: a Kafra's Use Mail, free in the form).  The NPC's creature answers the
+        // mail's packets as a mailbox (UNIT_NPC_FLAG_MAILBOX), from RO's click range on an RO map (OnPlayerCreatureInteractionReach)
+        Player* player = GetAttachedPlayer(context, "openmail");
+        Unit* npcUnit = getNpcUnit(context, context.Npc);
+        Creature* creature = npcUnit != nullptr ? npcUnit->ToCreature() : nullptr;
+        if (player == nullptr || creature == nullptr)
+            return ROWOWScriptValue::FromNumber(0);
+        if (creature->HasNpcFlag(UNIT_NPC_FLAG_MAILBOX) == false)
+            creature->SetNpcFlag(UNIT_NPC_FLAG_MAILBOX);
+        WorldPacket data(SMSG_SHOW_MAILBOX, 8);
+        data << creature->GetGUID();
+        player->SendDirectMessage(&data);
+        return ROWOWScriptValue::FromNumber(0);
+    });
+    for (char const* unusedCommandName : { "setunitdata", "areamobuseskill", "openauction", "freeloop" })
     {
         engine->RegisterCommand(unusedCommandName, [](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const&) { return ROWOWScriptValue::FromNumber(0); });
         engine->SetStub(unusedCommandName);
@@ -2552,7 +2585,7 @@ void ROWOWMod::RegisterNpcScriptCommands()
         }
         return items;
     };
-    engine->RegisterCommand("countitem2", [this, findExactItems](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    engine->RegisterCommand("countitem2", [findExactItems](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
     {
         int64 count = 0;
         if (arguments.size() >= 8)
@@ -2560,7 +2593,7 @@ void ROWOWMod::RegisterNpcScriptCommands()
                 count += item->GetCount();
         return ROWOWScriptValue::FromNumber(count);
     });
-    engine->RegisterCommand("delitem2", [this, findExactItems](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
+    engine->RegisterCommand("delitem2", [findExactItems](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
     {
         // Stops the run when there aren't enough, as delitem
         Player* player = GetAttachedPlayer(context, "delitem2");
@@ -2604,7 +2637,7 @@ void ROWOWMod::RegisterNpcScriptCommands()
         ROWOWSCRIPT->Run(*roItem->UseScript, itemContext);
         return ROWOWScriptValue::FromNumber(0);
     });
-    engine->RegisterCommand("convertpcinfo", [this](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const& arguments)
+    engine->RegisterCommand("convertpcinfo", [](ROWOWScriptContext&, std::vector<ROWOWScriptValue> const& arguments)
     {
         // convertpcinfo(<char id or account id or "name">,<CPC_*>): an online character's name (0), char id (1) or account id (2).  0 (or "") offline
         if (arguments.size() < 2)

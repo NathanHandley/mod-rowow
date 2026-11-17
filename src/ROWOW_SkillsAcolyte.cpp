@@ -661,7 +661,7 @@ namespace
     public:
         ROWOWSkillAbsorbSpiritSphere() : ROWOWSkillImpl(ROWOW_SKILL_MO_ABSORBSPIRITS) { }
 
-        void CastendNoDamageID(Unit* src, Unit* target, uint16 /*skillLevel*/, uint64 /*tick*/, int32& /*flag*/) const override
+        void CastendNoDamageID(Unit* src, Unit* target, uint16 skillLevel, uint64 /*tick*/, int32& /*flag*/) const override
         {
             Player* sd = src->ToPlayer();
             Player* dstsd = target->ToPlayer();
@@ -690,7 +690,7 @@ namespace
                 return;
             }
             if (i != 0)
-                ROWOW->StatusHeal(src, 0, i, 3, src, 0);
+                ROWOW->StatusHeal(src, 0, i, 3, src, ROWOW->GetSkillSpellID(SkillID, skillLevel));
         }
     };
 

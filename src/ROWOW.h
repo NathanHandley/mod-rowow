@@ -21,6 +21,7 @@
 #include "DatabaseEnvFwd.h"
 #include "MoveSplineInitArgs.h"
 #include "ObjectGuid.h"
+#include "Optional.h"
 #include "SharedDefines.h"
 
 #include "DataMap.h"
@@ -2184,6 +2185,8 @@ struct ROWOWIdentity : public DataMap::Base
     int32 SpriteJobID = -1; // The job whose sprite is shown (Options > Interface > Ragnarok, .ro spritejob): -1 the job of the slot in use
     bool IsPecoMountLookEnabled = true; // Out of Midgard, on a ground mount, a Peco rider's sprite shows its Peco in the mount's place (Options > Interface > Ragnarok, .ro pecomount; IsPecoShownForMount)
     bool IsAutolootEnabled = false; // A monster's drops the character has the loot priority on go into its bags when they fit (Options > Interface > Ragnarok, .ro autoloot; MobDropAutoloot)
+    bool IsWarcraftHPRegen = true; // HP Regen Type (Options > Interface > Ragnarok, .ro hpregen; UpdateNaturalRegen): Warcraft's out of combat regen, or RO's natural regen
+    bool IsFiveSecondRuleSPRegen = true; // The five second rule SP regen on top of RO's (Options > Interface > Ragnarok, .ro spregen; UpdateNaturalRegen)
     std::map<uint8, uint32> ActionsByButton; // The RO form's own action bars (packed action and type, as SMSG_ACTION_BUTTONS sends them)
     bool AreActionsChanged = false;
     std::map<uint32, ObjectGuid::LowType> ItemGUIDsByEquipPosition; // The RO equipment worn (in the bags, as RO's inventory holds it)
@@ -2298,6 +2301,13 @@ struct ROWOWIdentity : public DataMap::Base
     uint32 SkillRegenSPTimer = 0;
     uint32 SitSkillRegenHPTimer = 0;
     uint32 SitSkillRegenSPTimer = 0;
+    uint32 RestingHPTimer = 0; // Resting Restoration (HP) and (SP): time sat still out of combat with Basic Skill 8, scaled by the regen rate (UpdateRestingRestoration)
+    uint32 RestingSPTimer = 0;
+    uint32 SinceSPUseTime = 5000; // The five second rule SP regen (IsFiveSecondRuleSPRegen): time since a skill last spent SP, up to 5000 ms
+    float MergedSPRegenRemainder = 0.f; // ... the SP owed but not yet given (under a point)
+    std::string SentSkillSPCosts; // The skills' SP costs as last sent (ROWOWSPCOST, UpdateSkillSPCosts), and the time since they were last worked out
+    bool IsSkillSPCostsSent = false;
+    uint32 SkillSPCostTimer = 0;
 
     // A form change made before the character was in the world (arriving on a map), finished once it's in the world
     bool IsFormArrivalPending = false;
@@ -2521,6 +2531,7 @@ public:
     bool SetSpriteJob(Player* player, int32 jobID); // .ro spritejob: -1 for the job of the slot in use; false when it isn't one to pick
     bool SetPecoMountLook(Player* player, bool isEnabled); // .ro pecomount: the Peco shown in a ground mount's place out of Midgard, or the mount as it is
     bool SetAutoloot(Player* player, bool isEnabled); // .ro autoloot: a monster's drops straight into the bags, or on the ground
+    bool SetRegenOptions(Player* player, Optional<bool> isWarcraftHPRegen, Optional<bool> isFiveSecondRuleSPRegen); // .ro hpregen and .ro spregen
     void SendSpriteJobsToClient(Player* player);
 
     // R9.6: the post-renewal looks' garments (robes, wings) and hat effects in the RO form, each a hidden aura (the garment's model attached
@@ -2680,6 +2691,7 @@ public:
     bool HasByHandLook(Player const* player) const; // A transform no identity put on (a guise spell, a polymorph): it shows over the identity's look
     void OnEverQuestIdentityLookHidden(Player* player); // The identity's EverQuest look was put on: mod-everquest's faction reactions made right again
     void RefreshEverQuestIdentityLookDisplay(Player* player); // The EverQuest look's display taken back from whatever set another under it (the core, at every arrival)
+    void EndEverQuestMentorshipForROWorld(Player* player); // mod-everquest's mentorship ended before a trip into the RO world
     uint8 GetWorldIdentity(Player* player, uint8 world); // The identity shown in the world: the one picked while it may be shown, else the world's own
     bool SetWorldIdentity(Player* player, uint8 world, uint8 worldIdentity, std::string& errorOut); // .identity
     uint32 GetWorldIdentityRagnarokLookSpellID(Player* player); // The Ragnarok identity's body: the RO illusion spell of the job sprite shown (or of the outfit on)
@@ -2776,6 +2788,11 @@ public:
 
     // RO natural HP and SP regen (status_natural_heal), in place of WoW's while in the form
     void UpdateNaturalRegen(Player* player, uint32 diff);
+    void UpdateRestingRestoration(Player* player, uint32 diff); // MergedWorlds' Basic Skill 8 sitting regen, in place of RO's doubled sitting regen
+    void ClearClientManaRegen(Player* player); // The form's mana bar shows the server's SP only: no regen rate for the client to fill it by
+    void UpdateSkillSPCosts(Player* player, uint32 diff); // ROWOWSPCOST: the skills' SP costs now, for the client to grey out what the SP can't pay
+    void MarkSPUse(Unit* unit); // A player's skill spent its SP: the five second rule starts over
+    void UpdateRestingRestorationPart(Player* player, uint32 diff, bool isResting, int32 rate, uint32& timer, uint32 spellID, bool isSP);
 
     // RO battle (ROWOW_Battle.cpp): the port of rAthena's pre-renewal battle code (battle.cpp) for combat between RO combatants: the normal
     // attack and the weapon, magic and misc attacks of skills.  Statuses (R6.4) and the skill cases of rAthena's switches (R6.5) plug into
@@ -2838,6 +2855,7 @@ public:
     static uint32 GetItemRefine(Item const* item);
     static bool IsItemBroken(Item const* item);
     static bool IsItemIdentified(Item const* item);
+    void SendNewROItem(Player* player, Item* item, uint32 count) const; // SendNewItem, with an unidentified item named by a link that carries its state
     static void SetItemState(Player* player, Item* item, uint32 refine, bool isBroken, bool isIdentified);
     uint32 GetIdentityEquipPosition(ROWOWIdentity const& identity, ObjectGuid::LowType itemGUID) const; // Where an item is worn, 0 for not
     uint8 PCIsEquip(Player* player, ROWOWIdentity const& identity, Item const* item) const; // pc_isequip
@@ -2879,6 +2897,8 @@ public:
     // a teleport to it leaves a 30 minute return tether aura that, clicked off, goes back to where it was used.  Its 30 minutes are the save slot's and
     // count down only while that slot is played in the RO world (Nathan 2026-11-11)
     uint32 ReturnTetherSpellID = 0; // mod_rowow_status_spell's Special_ReturnTether (0: no tether)
+    uint32 RestingRestorationHPSpellID = 0; // mod_rowow_status_spell's Special_RestingRestorationHP and _SP (0: no icon)
+    uint32 RestingRestorationSPSpellID = 0;
     bool IsReturnToSaveDataLoaded = false;
     std::string ReturnToSaveItemTemplateIDsText; // The items whose use goes to the save point (a Butterfly Wing), as the ROWOWSAVE list
     std::string ReturnToSaveSpellIDsText; // AL_TELEPORT's spells of level 2 and up
@@ -2940,6 +2960,12 @@ public:
     void SetItemCard(Player* player, Item* item, uint8 slot, uint32 cardItemID) const;
     bool PCInsertCard(Player* player, Item* card, Item* equipment); // pc_insert_card
     void SendCardTargetsToClient(Player* player, Item* card); // clif_use_card: the items a card can go into (ROWOWCARDLIST)
+    // MergedWorlds ro-card-slots (Nathan 2026-11-13): cards go into and come out of the RO items in the bags freely, worn or not, from the RO Cards
+    // window (no card remover NPC, no cost, no failure).  The fit rules are pc_insert_card's
+    bool IsCardFitFor(ROWOWItem const& roCard, Item* equipment, ROWOWItem const& roEquipment); // pc_insert_card's checks but the item being worn and a free slot
+    void SendCardSlotsToClient(Player* player, Item* equipment); // ROWOWCARDSLOTS: an item's slots and cards, and the cards in the bags that fit it
+    bool InsertCardFreely(Player* player, Item* card, Item* equipment); // Into the first free slot, a worn item taken off and put back on around it
+    bool RemoveCardFreely(Player* player, Item* equipment, uint8 cardSlot); // Out into the bags, a worn item taken off and put back on around it
     void SendItemCardsToClient(Player* player, ROWOWIdentity& identity, bool isForced); // The cards in the bags' items (ROWOWCARDS)
     int64 BattleCalcCardFix(int32 attackType, Unit* src, Unit* target, std::bitset<ROWOW_NK_MAX> nk, uint16 skillID, int32 rhEle, int32 lhEle, int64 damage, int32 left,
         int32 flag) const; // battle_calc_cardfix
@@ -2979,6 +3005,7 @@ public:
     int64 PCJobIDToMapID(int32 jobID) const; // pc_jobid2mapid: the job's class (MAPID, EAJ_), -1 for none
     int32 PCMapIDToJobID(uint64 mapID, bool isMale) const; // pc_mapid2jobid: -1 for none
     int32 PCResetSkill(Player* player); // pc_resetskill (flag 1): the skill points it gave back
+    void RemoveForgottenSkillButtons(Player* player, ROWOWIdentity& identity, std::vector<uint16> const& skillIDs); // Off the form's action bars
     void PCResetState(ROWOWIdentity& identity) const; // pc_resetstate: the stats back to 1 and their points back (the caller refreshes the form)
     void PCResetLvl(Player* player, int32 type); // pc_resetlvl: rebirth (1), or base and job level 1 (2), base (3) or job (4) level 1
     std::vector<uint16> GetSkillTreeJobIDs(uint16 jobID) const; // The jobs whose skills the skill window shows, Novice first
@@ -3249,6 +3276,9 @@ public:
     void UpdateFameList(int32 fameType, ObjectGuid::LowType characterGUID, int32 fame, std::string const& name);
     bool PCAddFame(Player* player, int32 count); // pc_addfame
     void PCFameRefine(Player* player, Item const* item); // The Fame point system: +10 on a weapon of its own forge
+    // A failed refine (the refiners' failedrefitem, the Whitesmith's Weapon Refine): the item is kept, weaker by 1 refine level (75%) or 2 (25%),
+    // never below +0, instead of rAthena's destroying it (Nathan 2026-11-15).  Its new refine level
+    uint32 RefineFailed(Player* player, Item* item);
     uint8 PCFameRank(ObjectGuid::LowType characterGUID, int32 fameType) const; // pc_famerank
     bool PCIsTaekwonRanker(ROWOWIdentity const& identity) const; // pc_is_taekwon_ranker
     void ClifSubRanklist(Player* player, int32 fameType); // clif_sub_ranklist
@@ -3424,7 +3454,11 @@ public:
     void MobAddSpotted(ROWOWMobData* mob, ObjectGuid const& guid) const; // mob_add_spotted
     void MobCleanSpotted(Creature* md, ROWOWMobData* mob) const; // mob_clean_spotted
     bool CheckDistanceBL(Unit const* src, Unit const* target, int32 distance) const; // check_distance_bl
+    bool CheckDistanceClientBL(Unit const* src, Unit const* target, int32 distance) const; // check_distance_client_bl, a player's attack range
     bool BattleCheckRange(Unit const* src, Unit const* bl, int32 range) const; // battle_check_range, for a monster
+    // MergedWorlds ro-melee-range (Nathan 2026-11-13): an attack's or skill's reach, BattleCheckRange's with a melee one (under 4 cells) 50% longer
+    bool BattleCheckAttackRange(Unit const* src, Unit const* bl, int32 range) const;
+    int32 GetAttackReachCells(int32 range) const; // The cells (as distance_bl counts) the reach can get to, for searching around
     bool MobCheckVisibility(Creature* md, Unit const* target, bool isCheckBlind) const; // status_check_visibility
     bool MobCanReach(Creature* md, Unit const* bl, int32 range) const; // mob_can_reach
     int32 MobLinkSearch(Creature* md, Unit* target, uint64 tick); // mob_linksearch over assist_range
@@ -3512,6 +3546,7 @@ public:
     bool MobIsNearPC(Creature* md, ROWOWMobData* mob) const; // mob_ai_sub_foreachclient
     void MobSetAttackedID(Creature* md, Unit* src, uint64 tick, bool isNormAttacked); // mob_set_attacked_id
     int64 BattleCalcWalkDelay(Unit const* bl, int64 damage, int16 div) const; // battle_calc_walkdelay
+    void PCDamageFlinch(Unit* target, int64 damage, int16 div, uint64 tick); // A player's hit flinch: rooted for its damage motion unless it endures
     void MobBattleAttacked(Unit* src, Unit* target, int64 damage, int16 div, uint64 tick, int32 amotion, bool isNormAttacked, int32 attackType, uint16 skillID); // battle_damage's monster events
     void MobReleaseCombat(Creature* md, ROWOWMobData* mob); // Leaves WoW's combat state, RO having none
     void MobSyncVictim(Creature* md, ROWOWMobData* mob); // The WoW victim follows the RO target
@@ -3539,6 +3574,12 @@ public:
     bool MapGetCellNoPass(Map* map, ROWOWMapGrid const& mapGrid, int32 x, int32 y) const; // map_getcell(CELL_CHKNOPASS)
     bool PathSearchLong(ROWOWMapGrid const& mapGrid, int32 x0, int32 y0, int32 x1, int32 y1) const; // path_search_long(CELL_CHKWALL)
     bool PathSearch(std::vector<uint8>& pathOut, Map* map, ROWOWMapGrid const& mapGrid, int32 x0, int32 y0, int32 x1, int32 y1, uint8 cell) const; // path_search (A*), directions in pathOut
+    // MergedWorlds ro-approach (Nathan 2026-11-15): the client's Walk Into Range asks (.ro approachpath) for RO's path from the player to beside a
+    // target, as RO's client walks to what it's told to hit, rather than a straight line into the walls between.  path_search's A* on the cells,
+    // but with a player's limits (no step up a ledge higher than a player climbs) and further (40 cells round the box the two span).  The path's
+    // corners as WoW X,Y (cell centers), its straight stretches merged where a player can walk the line; the last is the cell beside the target.
+    // False when there's no such path
+    bool GetApproachPath(Player* player, Unit const* target, std::vector<std::pair<float, float>>& cornersOut) const;
     bool IsMobMovementBlocked(Creature* md, bool isIgnoreDisableMove = false) const; // Movement the core controls, or that's impossible right now
     bool UnitCanMove(Creature* md, ROWOWMobData const* mob, uint64 tick) const; // unit_can_move
     bool UnitCanReachBL(Creature* md, Unit const* tbl, int32 range, int32& xOut, int32& yOut) const; // unit_can_reach_bl

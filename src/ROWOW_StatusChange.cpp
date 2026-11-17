@@ -284,6 +284,8 @@ void ROWOWMod::LoadStatusChangeData()
     uint32 spellCount = 0;
     OptionIconSpellIDsByOption.clear();
     ReturnTetherSpellID = 0;
+    RestingRestorationHPSpellID = 0;
+    RestingRestorationSPSpellID = 0;
     if (QueryResult result = WorldDatabase.Query("SELECT `Status`, `SpellID` FROM `mod_rowow_status_spell`"))
     {
         do
@@ -297,6 +299,14 @@ void ROWOWMod::LoadStatusChangeData()
             {
                 if (sSpellMgr->GetSpellInfo(spellID) != nullptr)
                     ReturnTetherSpellID = spellID;
+                continue;
+            }
+
+            // Resting Restoration's auras, which aren't statuses (UpdateRestingRestoration)
+            if (statusName == "Special_RestingRestorationHP" || statusName == "Special_RestingRestorationSP")
+            {
+                if (sSpellMgr->GetSpellInfo(spellID) != nullptr)
+                    (statusName == "Special_RestingRestorationHP" ? RestingRestorationHPSpellID : RestingRestorationSPSpellID) = spellID;
                 continue;
             }
 
@@ -2243,8 +2253,8 @@ bool ROWOWMod::StatusChangeEnd(Unit* bl, int32 type, bool isTimer)
             }
             break;
         case ROWOW_SC_TENSIONRELAX:
-            if (sd != nullptr)
-                sd->SetStandState(UNIT_STAND_STATE_STAND); // pc_setstand
+            // (rAthena stands the player up here, pc_setstand.  MergedWorlds keeps them seated (Nathan 2026-11-16): Tension Relax ends once
+            // the HP is full, and standing would end Resting Restoration's SP with it, UpdateRestingRestoration)
             break;
         case ROWOW_SC_ENDURE:
         case ROWOW_SC_DEFENDER:
@@ -2835,7 +2845,7 @@ void ROWOWMod::StatusCalcState(Unit* bl, ROWOWStatusChange& sc, ROWOWStatusChang
     else
     {
         // status_calc_state_sub: starting an unconditional state sets it; otherwise it's on while any status still has it
-        auto calcStateSub = [this, bl, &sc, &scdb, start](bool& restriction, uint8 unconditional, uint8 conditional,
+        auto calcStateSub = [this, &sc, &scdb, start](bool& restriction, uint8 unconditional, uint8 conditional,
             std::function<bool(int32, ROWOWStatusChangeEntry const&)> const& isConditionMet)
         {
             if (start == true && scdb.State[unconditional] == true)
@@ -2956,7 +2966,7 @@ void ROWOWMod::UpdateStatusChangeOptions(Unit* bl, ROWOWStatusChange& sc)
     // Walk) are stealthed, so only detectors (and Ruwach and Sight, which end it) find them
     bool isDead = bl->IsAlive() == false;
     Player* player = bl->ToPlayer();
-    bool shouldRoot = (sc.Cant.Move == true || (player != nullptr && PCCanMoveAt(player) == false)) && isDead == false;
+    bool shouldRoot = (sc.Cant.Move == true || (player != nullptr && (PCCanMoveAt(player) == false || sc.FlinchEndTime > GetTick()))) && isDead == false;
     if (shouldRoot != sc.IsRootSet)
     {
         sc.IsRootSet = shouldRoot;
@@ -3070,6 +3080,12 @@ void ROWOWMod::UpdateStatusChanges(Unit* unit)
     uint64 tick = GetTick();
     if (sc->LastEffect != -1 && sc->LastEffectTime <= tick)
         sc->LastEffect = -1;
+    // A hit's flinch ends (MergedWorlds ro-flinch).  Its end time stays, for the immunity after it (PCDamageFlinch)
+    if (sc->IsFlinching == true && sc->FlinchEndTime <= tick)
+    {
+        sc->IsFlinching = false;
+        UpdateStatusChangeOptions(unit, *sc);
+    }
     if (sc->IsEmpty() == true)
         return;
     if (unit->IsAlive() == false)
