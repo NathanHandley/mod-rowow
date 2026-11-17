@@ -436,6 +436,7 @@ public:
 
         ROWOW->UpdateNaturalRegen(player, p_time);
         ROWOW->UpdateRestingRestoration(player, p_time);
+        ROWOW->UpdateSkillSPCosts(player, p_time);
         ROWOW->UpdateStatusChanges(player);
         ROWOW->UpdateWorldIdentity(player, p_time); // In every world: the look of the character's identity for it
         ROWOW->UpdateJobField(player); // In every world: the RO job other clients' tooltips name (0 out of the form)
@@ -1392,6 +1393,8 @@ public:
         ROWOW->SendReturnTetherToClient(player, true); // ... and the return tether's place, on its aura's tooltip
         ROWOW->SendFamilyToClient(player); // The Ragnarok page's family (ROWOW_Family.cpp)
         ROWOW->SendJobNamesToClient(player); // The jobs' names, for the unit tooltip (ROWOW_WorldIdentity.cpp)
+        if (ROWOWIdentity* spCostIdentity = player->CustomData.Get<ROWOWIdentity>("ROWOWIdentity"))
+            spCostIdentity->IsSkillSPCostsSent = false; // The skills' SP costs again, at the next update (UpdateSkillSPCosts)
         if (ROWOW->IsInROForm(player) == true)
         {
             ROWOW->SendEquipmentToClient(player, *ROWOW->GetIdentity(player), true);

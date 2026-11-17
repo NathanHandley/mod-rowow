@@ -1803,6 +1803,66 @@ void ROWOWMod::UpdateNaturalRegen(Player* player, uint32 diff)
     identity->SP = player->GetPower(POWER_MANA);
 }
 
+void ROWOWMod::UpdateSkillSPCosts(Player* player, uint32 diff)
+{
+    // MergedWorlds ro-sp-cost (Nathan 2026-11-17): the client is told what each skill level the character has costs in SP now (skill_get_requirement's
+    // SP: the level's cost with Encore, the SP rate bonuses and a cost by the SP), so the action buttons and spellbook grey out a skill the SP can't pay
+    // for and the client refuses it, as WoW's spells for mana (the client's Spell_C_GetPowerCost, through the RO_Identity addon's roSkillSPCosts).
+    // Worked out four times a second and sent when it changed: "ROWOWSPCOST\t<part>\t<parts>\t<spell ID>:<SP>,...", in parts that fit an addon
+    // message.  Out of the form there are none (an empty list)
+    ROWOWIdentity* identity = player->CustomData.Get<ROWOWIdentity>("ROWOWIdentity");
+    if (identity == nullptr)
+        return;
+    identity->SkillSPCostTimer += diff;
+    if (identity->SkillSPCostTimer < 250 && identity->IsSkillSPCostsSent == true)
+        return;
+    identity->SkillSPCostTimer = 0;
+    std::vector<std::string> pairs;
+    if (IsEnabled == true && identity->IsInForm == true && player->IsInWorld() == true)
+    {
+        // Every skill the character can use and its highest level: learned, for now (a spirit's, a dance's) or from its equipment
+        std::map<uint16, uint16> levelsBySkillID = identity->SkillLevelsByID;
+        for (std::map<uint16, uint16> const* skillLevels : { &identity->TempSkillLevelsByID, &identity->ItemSkillLevelsByID })
+            for (auto const& [skillID, level] : *skillLevels)
+                levelsBySkillID[skillID] = std::max(levelsBySkillID[skillID], level);
+        for (auto const& [skillID, maxLevel] : levelsBySkillID)
+        {
+            for (uint16 level = 1; level <= maxLevel; level++)
+            {
+                uint32 spellID = GetSkillSpellID(skillID, level);
+                if (spellID == 0)
+                    continue;
+                int32 sp = SkillGetRequirement(player, skillID, level).SP;
+                if (sp > 0)
+                    pairs.push_back(fmt::format("{}:{}", spellID, sp));
+            }
+        }
+    }
+    std::string costs;
+    for (std::string const& pair : pairs)
+        costs += (costs.empty() == true ? "" : ",") + pair;
+    if (identity->IsSkillSPCostsSent == true && costs == identity->SentSkillSPCosts)
+        return;
+    identity->SentSkillSPCosts = costs;
+    identity->IsSkillSPCostsSent = true;
+
+    constexpr size_t MaxPartLength = 200;
+    std::vector<std::string> parts(1);
+    for (std::string const& pair : pairs)
+    {
+        if (parts.back().empty() == false && parts.back().size() + 1 + pair.size() > MaxPartLength)
+            parts.emplace_back();
+        parts.back() += (parts.back().empty() == true ? "" : ",") + pair;
+    }
+    for (size_t partIndex = 0; partIndex < parts.size(); partIndex++)
+    {
+        WorldPacket data;
+        ChatHandler::BuildChatPacket(data, CHAT_MSG_SYSTEM, LANG_ADDON, nullptr, nullptr,
+            fmt::format("ROWOWSPCOST\t{}\t{}\t{}", partIndex + 1, parts.size(), parts[partIndex]));
+        player->SendDirectMessage(&data);
+    }
+}
+
 void ROWOWMod::MarkSPUse(Unit* unit)
 {
     if (unit == nullptr || unit->IsPlayer() == false)

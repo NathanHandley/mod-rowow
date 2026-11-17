@@ -2296,6 +2296,9 @@ struct ROWOWIdentity : public DataMap::Base
     uint32 RestingSPTimer = 0;
     uint32 SinceSPUseTime = 5000; // The five second rule SP regen (IsFiveSecondRuleSPRegen): time since a skill last spent SP, up to 5000 ms
     float MergedSPRegenRemainder = 0.f; // ... the SP owed but not yet given (under a point)
+    std::string SentSkillSPCosts; // The skills' SP costs as last sent (ROWOWSPCOST, UpdateSkillSPCosts), and the time since they were last worked out
+    bool IsSkillSPCostsSent = false;
+    uint32 SkillSPCostTimer = 0;
 
     // A form change made before the character was in the world (arriving on a map), finished once it's in the world
     bool IsFormArrivalPending = false;
@@ -2774,6 +2777,7 @@ public:
     void UpdateNaturalRegen(Player* player, uint32 diff);
     void UpdateRestingRestoration(Player* player, uint32 diff); // MergedWorlds' Basic Skill 8 sitting regen, in place of RO's doubled sitting regen
     void ClearClientManaRegen(Player* player); // The form's mana bar shows the server's SP only: no regen rate for the client to fill it by
+    void UpdateSkillSPCosts(Player* player, uint32 diff); // ROWOWSPCOST: the skills' SP costs now, for the client to grey out what the SP can't pay
     void MarkSPUse(Unit* unit); // A player's skill spent its SP: the five second rule starts over
     void UpdateRestingRestorationPart(Player* player, uint32 diff, bool isResting, int32 rate, uint32& timer, uint32 spellID, bool isSP);
 
