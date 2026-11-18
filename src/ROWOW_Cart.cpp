@@ -20,6 +20,8 @@
 #include "Chat.h"
 #include "DatabaseEnv.h"
 #include "Item.h"
+#include "Mail.h"
+#include "ObjectMgr.h"
 #include "Player.h"
 #include "QueryResult.h"
 #include "Tokenize.h"
@@ -27,6 +29,7 @@
 #include "WorldSession.h"
 
 #include "ROWOW.h"
+#include <set>
 
 using namespace std;
 
@@ -98,6 +101,85 @@ bool ROWOWMod::PCSetCart(Player* player, int32 type)
     }
     SendCartToClient(player, *identity, true);
     return true;
+}
+
+uint32 ROWOWMod::MailRebirthBelongings(Player* player)
+{
+    // The Valkyrie's rebirth asks only for the base and job levels (Nathan 2026-11-18), so what RO has the player leave behind first is done for
+    // them: the RO equipment worn comes off and, with the cart's items, goes to the character's mailbox, and the falcon, Peco and cart are let go of.
+    // Returns how many items were mailed
+    ROWOWIdentity* identity = GetIdentity(player);
+    CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
+    std::vector<Item*> mailItems;
+
+    // The worn equipment, taken off (an item worn in more than one position is one item)
+    std::set<ObjectGuid::LowType> wornItemGUIDs;
+    for (auto const& wornItem : identity->ItemGUIDsByEquipPosition)
+        wornItemGUIDs.insert(wornItem.second);
+    while (identity->ItemGUIDsByEquipPosition.empty() == false)
+    {
+        uint32 equipPosition = identity->ItemGUIDsByEquipPosition.begin()->first;
+        if (equipPosition == 0 || PCUnequipItem(player, equipPosition, 1) == false)
+        {
+            identity->ItemGUIDsByEquipPosition.erase(identity->ItemGUIDsByEquipPosition.begin());
+            identity->IsEquipmentChanged = true;
+        }
+    }
+    for (ObjectGuid::LowType itemGUID : wornItemGUIDs)
+    {
+        Item* item = player->GetItemByGuid(ObjectGuid::Create<HighGuid::Item>(itemGUID));
+        if (item == nullptr)
+            continue;
+        // As a mail sent from the bags (WorldSession::HandleSendMail)
+        player->MoveItemFromInventory(item->GetBagSlot(), item->GetSlot(), true);
+        item->DeleteFromInventoryDB(trans);
+        if (item->GetState() == ITEM_UNCHANGED)
+            item->FSetState(ITEM_CHANGED);
+        item->SaveToDB(trans);
+        mailItems.push_back(item);
+    }
+
+    // The cart's items, as the stacks they'd be in the bags, with their enchantments (cards) and maker
+    for (int32 slot = 0; slot < ROWOW_MAX_CART; slot++)
+    {
+        ROWOWCartItem const cartItem = identity->CartItems[slot];
+        ItemTemplate const* itemTemplate = cartItem.ItemTemplateID != 0 ? sObjectMgr->GetItemTemplate(cartItem.ItemTemplateID) : nullptr;
+        if (itemTemplate == nullptr)
+            continue;
+        for (uint32 left = cartItem.Count; left > 0;)
+        {
+            uint32 count = std::min(left, std::max<uint32>(itemTemplate->GetMaxStackSize(), 1));
+            left -= count;
+            Item* item = Item::CreateItem(cartItem.ItemTemplateID, count, player);
+            if (item == nullptr)
+                break;
+            if (cartItem.CreatorGUID != 0)
+                item->SetGuidValue(ITEM_FIELD_CREATOR, ObjectGuid::Create<HighGuid::Player>(cartItem.CreatorGUID));
+            for (uint8 enchantmentSlot = 0; enchantmentSlot < MAX_ENCHANTMENT_SLOT; enchantmentSlot++)
+                if (cartItem.Enchantments[enchantmentSlot] != 0)
+                    item->SetEnchantment(EnchantmentSlot(enchantmentSlot), cartItem.Enchantments[enchantmentSlot], 0, 0);
+            item->SaveToDB(trans);
+            mailItems.push_back(item);
+        }
+        PCCartDelItem(player, *identity, slot, int32(cartItem.Count));
+    }
+
+    // In mails of up to MAX_MAIL_ITEMS
+    for (size_t first = 0; first < mailItems.size(); first += MAX_MAIL_ITEMS)
+    {
+        MailDraft draft("Valhalla", "You couldn't take these into your new life, so the Valkyrie sent them to you here.");
+        for (size_t i = first; i < std::min(mailItems.size(), first + MAX_MAIL_ITEMS); i++)
+            draft.AddItem(mailItems[i]);
+        draft.SendMailTo(trans, MailReceiver(player), MailSender(MAIL_NORMAL, 0, MAIL_STATIONERY_GM));
+    }
+    player->SaveInventoryAndGoldToDB(trans);
+    CharacterDatabase.CommitTransaction(trans);
+
+    PCSetFalcon(player, false);
+    PCSetRiding(player, false);
+    PCSetCart(player, 0);
+    SendCartToClient(player, *identity, true);
+    return uint32(mailItems.size());
 }
 
 void ROWOWMod::StatusCalcCartWeight(Player* player, ROWOWIdentity& identity) const

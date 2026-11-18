@@ -1834,6 +1834,14 @@ void ROWOWMod::RegisterNpcScriptCommands()
             PCSetFalcon(player, GetArgument(arguments, 0, 1) != 0);
         return ROWOWScriptValue::FromNumber(0);
     });
+    engine->RegisterCommand("rebirthprep", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const&)
+    {
+        // rebirthprep(): MergedWorlds' own, for the Valkyrie (valkyrie.txt), which asks only for the levels: the worn equipment and the cart's items
+        // go to the mailbox and the falcon, Peco and cart are let go of.  Returns how many items were mailed
+        if (Player* player = GetAttachedPlayer(context, "rebirthprep"))
+            return ROWOWScriptValue::FromNumber(int64(MailRebirthBelongings(player)));
+        return ROWOWScriptValue::FromNumber(0);
+    });
     for (char const* noMountCommandName : { "ismounting", "checkwug", "checkdragon", "checkmadogear" })
     {
         // The renewal and third job mounts (and the cash mount) don't exist in pre-renewal

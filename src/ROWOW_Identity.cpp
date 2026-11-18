@@ -362,8 +362,13 @@ void ROWOWMod::LoadIdentityData()
                 job.ItemJobIndex = itemJobIndex;
         job.NormalJobID = job.JobID;
         job.IllusionJobKey = ToLower(job.Name);
-        if (job.IllusionJobKey.size() > 5 && job.IllusionJobKey.compare(job.IllusionJobKey.size() - 5, 5, "_high") == 0)
-            job.IllusionJobKey.resize(job.IllusionJobKey.size() - 5); // Transcendent first jobs look like the first job
+        if (job.IllusionJobKey.size() > 5 && job.IllusionJobKey.compare(job.IllusionJobKey.size() - 5, 5, "_high") == 0
+            && HasIllusionJobKey(job.IllusionJobKey) == false)
+        {
+            // Transcendent first jobs are their first job's body in cloth palette 1 (the converter's novice_high and others, as the client draws
+            // them); a world database built before those were has only the first job's look
+            job.IllusionJobKey.resize(job.IllusionJobKey.size() - 5);
+        }
         jobIDsByName[GetJobNameKey(job.Name)] = job.JobID;
     }
     for (auto const& secondJobFirstJobID : SecondJobFirstJobIDs)
@@ -628,6 +633,12 @@ void ROWOWMod::LoadIdentityData()
         MapIDsByMapName.size(), ItemTemplateIDs.size(), StartItems.size(), StartMapID, StartCellX, StartCellY, StartBagItemTemplateID);
     MoveSavedSpotsOffStitchedMaps();
     MoveSavedSpotsOnMovedParts();
+}
+
+bool ROWOWMod::HasIllusionJobKey(std::string const& jobKey) const
+{
+    return IllusionSpellIDsByJobKey.find(GetIllusionJobKey(jobKey, true)) != IllusionSpellIDsByJobKey.end()
+        || IllusionSpellIDsByJobKey.find(GetIllusionJobKey(jobKey, false)) != IllusionSpellIDsByJobKey.end();
 }
 
 uint64 ROWOWMod::GetIllusionJobKey(std::string const& jobKey, bool isMale)
@@ -1607,8 +1618,8 @@ uint32 ROWOWMod::GetIdentityLookHeadSpellID(Player* player)
 
 std::vector<uint16> ROWOWMod::GetSpriteJobIDs(Player* player)
 {
-    // One job for each sprite the history's jobs have in the character's gender, lowest job ID first: a Novice High and a Baby look as the Novice does,
-    // so the three are one entry (named by the lowest, the normal job when it's there)
+    // One job for each sprite the history's jobs have in the character's gender, lowest job ID first: a Baby looks as its normal job does, so the two
+    // are one entry (named by the lowest, the normal job when it's there).  A transcendent first job has its own colors, so its own entry
     ROWOWIdentity* identity = GetIdentity(player);
     bool isMale = player->getGender() == GENDER_MALE;
     std::vector<uint16> spriteJobIDs;

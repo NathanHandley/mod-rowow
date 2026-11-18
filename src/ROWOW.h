@@ -2568,6 +2568,7 @@ public:
     // RO identity: one per character, which the character turns into in the RO world (its job's look, level, HP/SP, zeny, spells and
     // action bars) and back out of when leaving it.  The character row keeps the character's own values throughout
     static uint64 GetIllusionJobKey(std::string const& jobKey, bool isMale);
+    bool HasIllusionJobKey(std::string const& jobKey) const; // An illusion of the job key in either gender
     static std::string GetJobNameKey(std::string const& jobName); // A job name as rAthena matches it (Super_Novice is also Supernovice)
     ROWOWJob const* GetJob(uint16 jobID) const;
     uint16 GetNonBabyJobID(uint16 jobID) const; // The job less JOBL_BABY (Baby_Monk's Monk, the job itself for the others)
@@ -3234,6 +3235,7 @@ public:
     // are kept as their templates and enchantments in mod_rowow_identity_cart, and only touched in the player's own thread
     bool PCIsCartOn(Unit const* unit) const; // pc_iscarton
     bool PCSetCart(Player* player, int32 type); // pc_setcart
+    uint32 MailRebirthBelongings(Player* player); // The Valkyrie's rebirthprep: the worn equipment and cart items mailed, the falcon, Peco and cart let go of
     void StatusCalcCartWeight(Player* player, ROWOWIdentity& identity) const; // status_calc_cart_weight
     int32 PCCartAddItem(Player* player, ROWOWIdentity& identity, ROWOWCartItem const& item, int32 amount); // pc_cart_additem (e_additem_result)
     void PCCartDelItem(Player* player, ROWOWIdentity& identity, int32 slot, int32 amount); // pc_cart_delitem
