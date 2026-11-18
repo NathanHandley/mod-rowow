@@ -1333,6 +1333,13 @@ void ROWOWMod::StatusCalcPCItems(Player* player, ROWOWIdentity const& identity, 
             wornPositionsByItemID[cardItemID] |= wornItem.Positions;
         }
     }
+    // The ammo counts too (pc_checkcombo looks at every equip index, EQI_AMMO among them): the bow and arrow sets, like Orc Archer Bow
+    // with Steel Arrows, need it
+    if (ROWOWItem const* roAmmo = GetROItem(ammoItem))
+    {
+        wornCountsByItemID[roAmmo->ItemID]++;
+        wornPositionsByItemID[roAmmo->ItemID] |= ROWOW_EQUIP_POSITION_AMMO;
+    }
     std::unordered_set<size_t> ranComboIndexes;
     for (auto const& wornCountByItemID : wornCountsByItemID)
     {
