@@ -439,6 +439,17 @@ struct ROWOWDataTable
 #define ROWOW_EQUIP_POSITION_ACC                    (ROWOW_EQUIP_POSITION_ACC_L | ROWOW_EQUIP_POSITION_ACC_R)
 #define ROWOW_EQUIP_POSITION_COSTUME                (ROWOW_EQUIP_POSITION_COSTUME_HEAD_TOP | ROWOW_EQUIP_POSITION_COSTUME_HEAD_MID | ROWOW_EQUIP_POSITION_COSTUME_HEAD_LOW | ROWOW_EQUIP_POSITION_COSTUME_GARMENT)
 
+// The visual slots the equipment window can hide (ROWOWIdentity::HiddenLookMask, Nathan 2026-11-18): each is one slot's own, so a hidden costume shows
+// the item under it, and a hidden item still shows its costume
+#define ROWOW_HIDDEN_LOOK_HEAD_TOP                  0x01
+#define ROWOW_HIDDEN_LOOK_HEAD_MID                  0x02
+#define ROWOW_HIDDEN_LOOK_HEAD_LOW                  0x04
+#define ROWOW_HIDDEN_LOOK_GARMENT                   0x08
+#define ROWOW_HIDDEN_LOOK_COSTUME_HEAD_TOP          0x10
+#define ROWOW_HIDDEN_LOOK_COSTUME_HEAD_MID          0x20
+#define ROWOW_HIDDEN_LOOK_COSTUME_HEAD_LOW          0x40
+#define ROWOW_HIDDEN_LOOK_COSTUME_GARMENT           0x80
+
 // What pc_isequip says of equipping an item (e_ITEM_EQUIP_ACK)
 #define ROWOW_EQUIP_ACK_OK                          0
 #define ROWOW_EQUIP_ACK_FAIL                        1
@@ -2178,6 +2189,7 @@ struct ROWOWIdentity : public DataMap::Base
     bool IsAutolootEnabled = false; // A monster's drops the character has the loot priority on go into its bags when they fit (Options > Interface > Ragnarok, .ro autoloot; MobDropAutoloot)
     bool IsWarcraftHPRegen = true; // HP Regen Type (Options > Interface > Ragnarok, .ro hpregen; UpdateNaturalRegen): Warcraft's out of combat regen, or RO's natural regen
     bool IsFiveSecondRuleSPRegen = true; // The five second rule SP regen on top of RO's (Options > Interface > Ragnarok, .ro spregen; UpdateNaturalRegen)
+    uint8 HiddenLookMask = 0; // The visual slots whose items aren't drawn on the sprite (the equipment window's hide buttons, .ro hidelook; ROWOW_HIDDEN_LOOK_*)
     std::map<uint8, uint32> ActionsByButton; // The RO form's own action bars (packed action and type, as SMSG_ACTION_BUTTONS sends them)
     bool AreActionsChanged = false;
     std::map<uint32, ObjectGuid::LowType> ItemGUIDsByEquipPosition; // The RO equipment worn (in the bags, as RO's inventory holds it)
@@ -2522,6 +2534,9 @@ public:
     bool SetSpriteJob(Player* player, int32 jobID); // .ro spritejob: -1 for the job of the slot in use; false when it isn't one to pick
     bool SetPecoMountLook(Player* player, bool isEnabled); // .ro pecomount: the Peco shown in a ground mount's place out of Midgard, or the mount as it is
     bool SetAutoloot(Player* player, bool isEnabled); // .ro autoloot: a monster's drops straight into the bags, or on the ground
+    bool SetHiddenLooks(Player* player, uint8 hiddenLookMask); // .ro hidelook: the visual slots whose items aren't drawn
+    bool IsLookHidden(Player* player, uint32 equipPositions); // An item worn at these positions isn't drawn (a visual slot it takes is hidden)
+    void SendHiddenLooksToClient(Player* player); // ROWOWLOOKHIDE
     bool SetRegenOptions(Player* player, Optional<bool> isWarcraftHPRegen, Optional<bool> isFiveSecondRuleSPRegen); // .ro hpregen and .ro spregen
     void SendSpriteJobsToClient(Player* player);
 

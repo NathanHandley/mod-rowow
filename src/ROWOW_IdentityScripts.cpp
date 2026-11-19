@@ -1251,6 +1251,7 @@ public:
             { "autoloot", HandleROAutolootCommand, SEC_PLAYER, Console::No },
             { "hpregen",  HandleROHPRegenCommand, SEC_PLAYER,    Console::No },
             { "spregen",  HandleROSPRegenCommand, SEC_PLAYER,    Console::No },
+            { "hidelook", HandleROHideLookCommand, SEC_PLAYER,   Console::No },
             { "enter",    HandleROEnterCommand,  SEC_PLAYER,     Console::No },
             { "content",  HandleROContentCommand, SEC_GAMEMASTER, Console::Yes },
             { "slot",     HandleROSlotCommand,   SEC_PLAYER,     Console::No },
@@ -3398,6 +3399,26 @@ public:
         return HandleRORegenOption(handler, Optional<bool>(), isEnabled.has_value() == true ? Optional<bool>(*isEnabled != 0) : Optional<bool>());
     }
 
+    // The equipment window's hide buttons (Nathan 2026-11-18): ".ro hidelook <mask>" hides the visual slots of its ROWOW_HIDDEN_LOOK_* bits (0, the
+    // default, shows them all).  The answer is the ROWOWLOOKHIDE message
+    static bool HandleROHideLookCommand(ChatHandler* handler, Optional<uint32> hiddenLookMask)
+    {
+        Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
+        if (player == nullptr)
+            return false;
+        if (hiddenLookMask.has_value() == false)
+        {
+            ROWOW->SendHiddenLooksToClient(player);
+            return true;
+        }
+        if (ROWOW->SetHiddenLooks(player, uint8(*hiddenLookMask & 0xFF)) == false)
+        {
+            handler->SendSysMessage("You have no Ragnarok Online character yet.");
+            ROWOW->SendHiddenLooksToClient(player); // The window shows what's kept again
+        }
+        return true; // Answered above (false would add the command's usage lines)
+    }
+
     static bool HandleRORegenOption(ChatHandler* handler, Optional<bool> isWarcraftHPRegen, Optional<bool> isFiveSecondRuleSPRegen)
     {
         Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
@@ -3621,6 +3642,7 @@ public:
         bool isAutolootEnabled = oldIdentity->IsAutolootEnabled;
         bool isWarcraftHPRegen = oldIdentity->IsWarcraftHPRegen;
         bool isFiveSecondRuleSPRegen = oldIdentity->IsFiveSecondRuleSPRegen;
+        uint8 hiddenLookMask = oldIdentity->HiddenLookMask;
         slots[slot - 1].Exists = false;
         slots[slot - 1].HasRiding = false;
         player->CustomData.Erase("ROWOWIdentity");
@@ -3641,6 +3663,7 @@ public:
         identity->IsAutolootEnabled = isAutolootEnabled;
         identity->IsWarcraftHPRegen = isWarcraftHPRegen;
         identity->IsFiveSecondRuleSPRegen = isFiveSecondRuleSPRegen;
+        identity->HiddenLookMask = hiddenLookMask;
         identity->AccountVariables = accountVariables;
         if (wasInForm == true)
             ROWOW->EnterROForm(player);

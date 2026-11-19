@@ -1446,7 +1446,8 @@ void ROWOWMod::LoadIdentitySlots(Player* player, ROWOWIdentity& identity)
     identity.IsAutolootEnabled = false;
     identity.IsWarcraftHPRegen = true;
     identity.IsFiveSecondRuleSPRegen = true;
-    if (QueryResult result = CharacterDatabase.Query("SELECT `slot`, `zeny`, `hair_style`, `hair_color`, `sprite_job`, `peco_mount_look`, `autoloot`, `hp_regen_type`, `sp_regen_rule` FROM `mod_rowow_identity_character` WHERE `guid` = {}", guid))
+    identity.HiddenLookMask = 0;
+    if (QueryResult result = CharacterDatabase.Query("SELECT `slot`, `zeny`, `hair_style`, `hair_color`, `sprite_job`, `peco_mount_look`, `autoloot`, `hp_regen_type`, `sp_regen_rule`, `hidden_looks` FROM `mod_rowow_identity_character` WHERE `guid` = {}", guid))
     {
         Field* fields = result->Fetch();
         identity.Slot = uint8(std::clamp<uint32>(fields[0].Get<uint8>(), 1, ROWOW_IDENTITY_SLOT_COUNT));
@@ -1464,6 +1465,7 @@ void ROWOWMod::LoadIdentitySlots(Player* player, ROWOWIdentity& identity)
         identity.IsAutolootEnabled = fields[6].Get<uint8>() != 0;
         identity.IsWarcraftHPRegen = fields[7].Get<uint8>() == 0;
         identity.IsFiveSecondRuleSPRegen = fields[8].Get<uint8>() != 0;
+        identity.HiddenLookMask = fields[9].Get<uint8>();
     }
     if (QueryResult result = CharacterDatabase.Query("SELECT `slot`, `identity`, `name` FROM `mod_rowow_identity_slot` WHERE `guid` = {}", guid))
     {
@@ -1732,6 +1734,53 @@ bool ROWOWMod::SetRegenOptions(Player* player, Optional<bool> isWarcraftHPRegen,
     return true;
 }
 
+bool ROWOWMod::SetHiddenLooks(Player* player, uint8 hiddenLookMask)
+{
+    // The equipment window's hide buttons (.ro hidelook, Nathan 2026-11-18): the visual slots whose items aren't drawn on the sprite, as WoW's Show Helm
+    // hides a helm (RefreshIllusionHeadgear, RefreshIllusionGarment, RefreshIllusionHatEffects), for everyone.  The character's own choice, shared by
+    // its save slots as autoloot is
+    ROWOWIdentity* identity = GetIdentity(player);
+    if (IsEnabled == false || HasAnyIdentity(*identity) == false)
+        return false;
+    if (hiddenLookMask != identity->HiddenLookMask)
+    {
+        identity->HiddenLookMask = hiddenLookMask;
+        // Its row is there once a slot has had an identity (every save writes it too)
+        CharacterDatabase.Execute("UPDATE `mod_rowow_identity_character` SET `hidden_looks` = {} WHERE `guid` = {}", hiddenLookMask, identity->CharacterGUID);
+        RefreshIllusionDisplay(player);
+    }
+    SendHiddenLooksToClient(player);
+    return true;
+}
+
+bool ROWOWMod::IsLookHidden(Player* player, uint32 equipPositions)
+{
+    static std::pair<uint32, uint8> const HiddenLookBitsByPosition[] =
+    {
+        { ROWOW_EQUIP_POSITION_HEAD_TOP, ROWOW_HIDDEN_LOOK_HEAD_TOP }, { ROWOW_EQUIP_POSITION_HEAD_MID, ROWOW_HIDDEN_LOOK_HEAD_MID },
+        { ROWOW_EQUIP_POSITION_HEAD_LOW, ROWOW_HIDDEN_LOOK_HEAD_LOW }, { ROWOW_EQUIP_POSITION_GARMENT, ROWOW_HIDDEN_LOOK_GARMENT },
+        { ROWOW_EQUIP_POSITION_COSTUME_HEAD_TOP, ROWOW_HIDDEN_LOOK_COSTUME_HEAD_TOP }, { ROWOW_EQUIP_POSITION_COSTUME_HEAD_MID, ROWOW_HIDDEN_LOOK_COSTUME_HEAD_MID },
+        { ROWOW_EQUIP_POSITION_COSTUME_HEAD_LOW, ROWOW_HIDDEN_LOOK_COSTUME_HEAD_LOW }, { ROWOW_EQUIP_POSITION_COSTUME_GARMENT, ROWOW_HIDDEN_LOOK_COSTUME_GARMENT },
+    };
+    uint8 hiddenLookMask = GetIdentity(player)->HiddenLookMask;
+    if (hiddenLookMask == 0)
+        return false;
+    // An item taking several slots (a helm over the upper and middle headgear) is hidden by any of them, as the window shows it in each
+    for (auto const& [position, hiddenLookBit] : HiddenLookBitsByPosition)
+        if ((equipPositions & position) != 0 && (hiddenLookMask & hiddenLookBit) != 0)
+            return true;
+    return false;
+}
+
+void ROWOWMod::SendHiddenLooksToClient(Player* player)
+{
+    // ROWOWLOOKHIDE: "<the hidden visual slots, ROWOW_HIDDEN_LOOK_* bits>", for the equipment window's hide buttons.  Sent with ROWOWSPRITE, and
+    // whenever it changes
+    WorldPacket data;
+    ChatHandler::BuildChatPacket(data, CHAT_MSG_SYSTEM, LANG_ADDON, nullptr, nullptr, fmt::format("ROWOWLOOKHIDE\t{}", GetIdentity(player)->HiddenLookMask));
+    player->SendDirectMessage(&data);
+}
+
 void ROWOWMod::SendSpriteJobsToClient(Player* player)
 {
     // ROWOWSPRITE: "<1 with an identity in any save slot, else 0><tab><the job picked, -1 for the job of the slot in use><tab><1 while the Peco is
@@ -1757,6 +1806,7 @@ void ROWOWMod::SendSpriteJobsToClient(Player* player)
     WorldPacket data;
     ChatHandler::BuildChatPacket(data, CHAT_MSG_SYSTEM, LANG_ADDON, nullptr, nullptr, addonMessage);
     player->SendDirectMessage(&data);
+    SendHiddenLooksToClient(player);
 }
 
 void ROWOWMod::LoadIdentityRows(Player* player, ROWOWIdentity& slotIdentity)
@@ -1924,9 +1974,9 @@ void ROWOWMod::SaveIdentity(Player* player, CharacterDatabaseTransaction trans, 
     // The identity's rows are its slot's; the slot picked and the zeny go to the character's row, which the other slots share
     uint32 guid = identity->IdentityID;
     // ... with the head and the job sprite picked, which they share too
-    trans->Append("REPLACE INTO `mod_rowow_identity_character` (`guid`, `slot`, `zeny`, `hair_style`, `hair_color`, `sprite_job`, `peco_mount_look`, `autoloot`, `hp_regen_type`, `sp_regen_rule`) VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
+    trans->Append("REPLACE INTO `mod_rowow_identity_character` (`guid`, `slot`, `zeny`, `hair_style`, `hair_color`, `sprite_job`, `peco_mount_look`, `autoloot`, `hp_regen_type`, `sp_regen_rule`, `hidden_looks`) VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
         player->GetGUID().GetCounter(), identity->Slot, identity->Zeny, identity->HairStyle, identity->HairColor, identity->SpriteJobID, identity->IsPecoMountLookEnabled == true ? 1 : 0,
-        identity->IsAutolootEnabled == true ? 1 : 0, identity->IsWarcraftHPRegen == true ? 0 : 1, identity->IsFiveSecondRuleSPRegen == true ? 1 : 0);
+        identity->IsAutolootEnabled == true ? 1 : 0, identity->IsWarcraftHPRegen == true ? 0 : 1, identity->IsFiveSecondRuleSPRegen == true ? 1 : 0, identity->HiddenLookMask);
     identity->IsZenyShared = true;
     identity->IsHairShared = identity->HairStyle != 0;
     ROWOWPosition const& savePoint = identity->SavePoint;
@@ -2743,9 +2793,9 @@ bool ROWOWMod::SelectIdentitySlot(Player* player, uint8 slot)
     bool isHairShared = identity->IsHairShared == true || (identity->Exists == true && identity->HairStyle != 0);
     uint8 hairStyle = identity->HairStyle;
     uint8 hairColor = identity->HairColor;
-    trans->Append("REPLACE INTO `mod_rowow_identity_character` (`guid`, `slot`, `zeny`, `hair_style`, `hair_color`, `sprite_job`, `peco_mount_look`, `autoloot`, `hp_regen_type`, `sp_regen_rule`) VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
+    trans->Append("REPLACE INTO `mod_rowow_identity_character` (`guid`, `slot`, `zeny`, `hair_style`, `hair_color`, `sprite_job`, `peco_mount_look`, `autoloot`, `hp_regen_type`, `sp_regen_rule`, `hidden_looks`) VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
         guid, slot, identity->Zeny, isHairShared == true ? hairStyle : 0, isHairShared == true ? hairColor : 0, identity->SpriteJobID, identity->IsPecoMountLookEnabled == true ? 1 : 0,
-        identity->IsAutolootEnabled == true ? 1 : 0, identity->IsWarcraftHPRegen == true ? 0 : 1, identity->IsFiveSecondRuleSPRegen == true ? 1 : 0);
+        identity->IsAutolootEnabled == true ? 1 : 0, identity->IsWarcraftHPRegen == true ? 0 : 1, identity->IsFiveSecondRuleSPRegen == true ? 1 : 0, identity->HiddenLookMask);
     CharacterDatabase.CommitTransaction(trans);
 
     // The slot's identity in this one's place
@@ -2759,6 +2809,7 @@ bool ROWOWMod::SelectIdentitySlot(Player* player, uint8 slot)
     bool isAutolootEnabled = identity->IsAutolootEnabled;
     bool isWarcraftHPRegen = identity->IsWarcraftHPRegen;
     bool isFiveSecondRuleSPRegen = identity->IsFiveSecondRuleSPRegen;
+    uint8 hiddenLookMask = identity->HiddenLookMask;
     player->CustomData.Erase("ROWOWIdentity");
     identity = player->CustomData.GetDefault<ROWOWIdentity>("ROWOWIdentity");
     identity->IsLoaded = true;
@@ -2782,6 +2833,7 @@ bool ROWOWMod::SelectIdentitySlot(Player* player, uint8 slot)
     identity->IsAutolootEnabled = isAutolootEnabled;
     identity->IsWarcraftHPRegen = isWarcraftHPRegen;
     identity->IsFiveSecondRuleSPRegen = isFiveSecondRuleSPRegen;
+    identity->HiddenLookMask = hiddenLookMask;
     LoadIdentityRows(player, *identity);
     identity->AccountVariables = accountVariables; // Its rows may not have the save above yet
     LOG_INFO("module.ROWOW", "{} changed Ragnarok Online save slot {} for {} ({}, identity {})", player->GetName(), oldSlot, slot,
