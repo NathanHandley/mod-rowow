@@ -95,12 +95,15 @@ public:
                 return;
 
             // On a walkable RO cell the floor is the cell's (the one nearest its GAT ground), not the first surface over the creature's own height,
-            // which a creature standing in a bush or tree climbed one branch at a time
+            // which a creature standing in a bush or tree climbed one branch at a time.  An NPC (not a monster) stands on its cell's RO ground even
+            // where RO can't walk: the furniture it's placed on, as RO's client clicks it there.  The first surface under 3 yards over it put
+            // lhz_cube's Drawer on a candlestick over the nightstand, its Status Light down on the nightstand, and its Chemicals (on a ledge in the
+            // wall, with nothing under it) 26 yards down under the floor, out of the click's reach (Nathan 2026-11-18)
             if (ROWOWMapGrid const* mapGrid = ROWOW->GetMapGrid(me->GetMapId()); mapGrid != nullptr)
             {
                 int32 cellX = mapGrid->GetCellX(me->GetPositionY());
                 int32 cellY = mapGrid->GetCellY(me->GetPositionX());
-                if (mapGrid->IsCellInGrid(cellX, cellY) == true && mapGrid->IsCellWalkable(cellX, cellY) == true)
+                if (mapGrid->IsCellInGrid(cellX, cellY) == true && (mapGrid->IsCellWalkable(cellX, cellY) == true || IsROMonster == false))
                 {
                     float floorZ = ROWOW->GetCellFloorZ(me, *mapGrid, cellX, cellY, me->GetPositionX(), me->GetPositionY());
                     if (std::fabs(floorZ - me->GetPositionZ()) > ROWOW->ConfigGroundSnapTolerance)
