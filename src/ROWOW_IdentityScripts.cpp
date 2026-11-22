@@ -290,6 +290,23 @@ namespace
         ROWOWItemMove move;
         if (ReadItemMove(player, packet, move) == false)
             return false;
+        // A drag on the RO equipment slots (world equipment's container) goes to the core, which hands it to ROWOWWorldEquipmentHandler; any other
+        // packet naming one the core refuses itself
+        if ((packet.GetOpcode() == CMSG_SWAP_ITEM || packet.GetOpcode() == CMSG_AUTOSTORE_BAG_ITEM) &&
+            (Player::IsWorldContainerAddress(move.SourceBag) == true || (move.DestinationBag != NULL_BAG && Player::IsWorldContainerAddress(move.DestinationBag) == true)))
+            return false;
+        // WoW's own equip of RO equipment (a macro's /equip or /equipslot, which RO_Identity's EquipItemByName hook wears with .ro wear): WoW can't
+        // wear it, so the packet is let go quietly (the item unlocked, no "This item cannot be equipped.")
+        if (packet.GetOpcode() == CMSG_AUTOEQUIP_ITEM || packet.GetOpcode() == CMSG_AUTOEQUIP_ITEM_SLOT)
+        {
+            Item* item = player->GetItemByPos(move.SourceBag, move.SourceSlot);
+            ROWOWItem const* roItem = ROWOW->GetROItem(item);
+            if (roItem != nullptr && roItem->Locations != 0)
+            {
+                player->SendEquipError(EQUIP_ERR_NONE, item, nullptr);
+                return true;
+            }
+        }
         uint8 sourceBag = move.SourceBag;
         uint8 sourceSlot = move.SourceSlot;
         bool isSourceAllowed = IsCarriedSetPosition(sourceBag, sourceSlot) == true || ROWOW->StorageIsRagnarokTabPosition(player, sourceBag, sourceSlot) == true;
@@ -3201,7 +3218,7 @@ public:
             handler->SendSysMessage("You can't take this item off.");
             return true;
         }
-        ROWOW->PCUnequipItem(player, equipPosition, 1);
+        ROWOW->PCUnequipItem(player, equipPosition, 1 | ROWOW_UNEQUIP_ASKED); // Refused with no room in the bags (D4)
         return true;
     }
 
@@ -3222,7 +3239,7 @@ public:
         if (player == nullptr || ROWOW->IsInROForm(player) == false)
             return false;
         Item* card = ROWOWMod::GetItemByClientPosition(player, cardBag, cardSlot);
-        Item* equipment = ROWOWMod::GetItemByClientPosition(player, bag, slot);
+        Item* equipment = ROWOWMod::GetItemByClientPosition(player, bag, slot, true); // Worn or not
         if (card == nullptr || equipment == nullptr || ROWOW->InsertCardFreely(player, card, equipment) == false)
             handler->SendSysMessage("Compounding has failed."); // clif_insert_card's failure (msgstringtable 494)
         return true;
@@ -3235,7 +3252,7 @@ public:
         Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
         if (player == nullptr || ROWOW->IsInROForm(player) == false)
             return false;
-        ROWOW->SendCardSlotsToClient(player, ROWOWMod::GetItemByClientPosition(player, bag, slot));
+        ROWOW->SendCardSlotsToClient(player, ROWOWMod::GetItemByClientPosition(player, bag, slot, true)); // Worn or not
         return true;
     }
 
@@ -3246,7 +3263,7 @@ public:
         if (player == nullptr || ROWOW->IsInROForm(player) == false)
             return false;
         Item* card = ROWOWMod::GetItemByClientPosition(player, cardBag, cardSlot);
-        Item* equipment = ROWOWMod::GetItemByClientPosition(player, bag, slot);
+        Item* equipment = ROWOWMod::GetItemByClientPosition(player, bag, slot, true); // Worn or not
         if (card == nullptr || equipment == nullptr || ROWOW->InsertCardFreely(player, card, equipment) == false)
             handler->SendSysMessage("Compounding has failed."); // clif_insert_card's failure (msgstringtable 494)
         ROWOW->SendCardSlotsToClient(player, equipment);
@@ -3259,7 +3276,7 @@ public:
         Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
         if (player == nullptr || ROWOW->IsInROForm(player) == false)
             return false;
-        Item* equipment = ROWOWMod::GetItemByClientPosition(player, bag, slot);
+        Item* equipment = ROWOWMod::GetItemByClientPosition(player, bag, slot, true); // Worn or not
         if (equipment == nullptr || cardSlot < 1 || ROWOW->RemoveCardFreely(player, equipment, uint8(cardSlot - 1)) == false)
             handler->SendSysMessage("The card couldn't be removed.");
         ROWOW->SendCardSlotsToClient(player, equipment);
@@ -3623,6 +3640,10 @@ public:
         // Only the save slot in use is reset: the new identity keeps its slot, and what the slots share (the zeny, the head, the job history, which
         // keeps the reset one's jobs, and the job sprite picked)
         ROWOWIdentity* oldIdentity = ROWOW->GetIdentity(player);
+        // Its worn equipment goes with it, in the same save: the slot's set key outlives the reset (slot 1's is the character's GUID), so the new
+        // identity would put the old set on
+        player->DestroyWorldEquipmentSet(ROWOW_MAP_WORLD, oldIdentity->IdentityID);
+        oldIdentity->ItemGUIDsByEquipPosition.clear();
         CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
         player->SaveToDB(trans, false, false);
         ROWOW->DeleteIdentityRows(oldIdentity->IdentityID, trans);
@@ -3822,25 +3843,26 @@ public:
             if (cards[slot] != 0)
                 ROWOW->SetItemCard(player, item, slot, cards[slot]);
 
-        // Both accessory positions take the free one, or the left
+        // Worn by the player's own rules (PCEquipItem: the RO bags on, the job and level, what's displaced comes off); both accessory positions take
+        // the free one, or the right
+        // (The item can be used up by it: ammo joins the worn stack of its kind.  Only what's taken before is used after)
         ROWOWIdentity* identity = ROWOW->GetIdentity(player);
         uint32 equipPosition = position.value_or(0) != 0 ? *position : roItem.Locations;
-        if (equipPosition == (ROWOW_EQUIP_POSITION_ACC_L | ROWOW_EQUIP_POSITION_ACC_R))
-            equipPosition = ROWOW->GetIdentityEquippedItem(player, ROWOW_EQUIP_POSITION_ACC_L) == nullptr ? ROWOW_EQUIP_POSITION_ACC_L : ROWOW_EQUIP_POSITION_ACC_R;
-        for (auto itemGUIDIter = identity->ItemGUIDsByEquipPosition.begin(); itemGUIDIter != identity->ItemGUIDsByEquipPosition.end();)
+        std::string itemName = item->GetTemplate()->Name1;
+        ObjectGuid::LowType itemGUID = item->GetGUID().GetCounter();
+        InventoryResult result = EQUIP_ERR_OK;
+        if (ROWOW->PCEquipItem(player, item, int32(equipPosition), &result) == false)
         {
-            if ((itemGUIDIter->first & equipPosition) != 0)
-                itemGUIDIter = identity->ItemGUIDsByEquipPosition.erase(itemGUIDIter);
-            else
-                ++itemGUIDIter;
+            handler->PSendSysMessage("{} got {} x{} in the bags: it couldn't be worn there (InventoryResult {}).", player->GetName(), itemName, count, uint32(result));
+            return true;
         }
-        identity->ItemGUIDsByEquipPosition[equipPosition] = item->GetGUID().GetCounter();
-        identity->IsEquipmentChanged = true;
-        if (identity->IsInForm == true)
-            ROWOW->RefreshROForm(player);
-        else
+        if (identity->IsInForm == false)
             ROWOW->CalculateIdentityStatus(player, *identity);
-        handler->PSendSysMessage("{} now wears {} x{} (position {:#x}).", player->GetName(), item->GetTemplate()->Name1, count, equipPosition);
+        uint32 wornPosition = ROWOW->GetIdentityEquipPosition(*identity, itemGUID);
+        if (wornPosition != 0)
+            handler->PSendSysMessage("{} now wears {} x{} (position {:#x}).", player->GetName(), itemName, count, wornPosition);
+        else
+            handler->PSendSysMessage("{}'s worn {} took the {} more.", player->GetName(), itemName, count);
         return true;
     }
 

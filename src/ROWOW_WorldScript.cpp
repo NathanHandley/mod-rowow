@@ -38,9 +38,12 @@ public:
         }
         ROWOW->LoadConfigurationFile();
 
-        // The Ragnarok bank tab, known to the core before any session exists
+        // The Ragnarok bank tab and the RO equipment's world equipment (ROWOW_WorldEquipment.cpp), known to the core before any session exists
         if (ROWOW->IsEnabled == true)
+        {
             Player::SetWorldBankEnabled(WORLD_BANK_RAGNAROK, true);
+            ROWOW->RegisterWorldEquipment();
+        }
     }
 
     void OnStartup() override

@@ -363,7 +363,7 @@ void ROWOWMod::RefreshIllusionHeadgear(Player* player, ROWOWIllusion const* illu
                     continue;
                 if (isCostume == true && isNoCostume == true)
                     continue;
-                Item* item = player->GetItemByGuid(ObjectGuid::Create<HighGuid::Item>(itemGUIDByEquipPosition.second));
+                Item* item = GetWornItem(player, itemGUIDByEquipPosition.second);
                 if (item == nullptr)
                     continue;
                 if (isCostume == true)
@@ -406,7 +406,7 @@ void ROWOWMod::RefreshIllusionHeadgear(Player* player, ROWOWIllusion const* illu
                     : (ROWOW_EQUIP_POSITION_HEAD_TOP | ROWOW_EQUIP_POSITION_HEAD_MID | ROWOW_EQUIP_POSITION_HEAD_LOW);
                 if ((itemGUIDByEquipPosition.first & headgearPositions) == 0 || IsLookHidden(player, itemGUIDByEquipPosition.first) == true)
                     continue;
-                Item* item = player->GetItemByGuid(ObjectGuid::Create<HighGuid::Item>(itemGUIDByEquipPosition.second));
+                Item* item = GetWornItem(player, itemGUIDByEquipPosition.second); // World equipment's, which stays on the character
                 for (ROWOWStowedItem const& stowedItem : identity->StowedItems)
                     if (item == nullptr && stowedItem.StowedItem != nullptr && stowedItem.StowedItem->GetGUID().GetCounter() == itemGUIDByEquipPosition.second)
                         item = stowedItem.StowedItem;
@@ -531,7 +531,7 @@ void ROWOWMod::RefreshIllusionHatEffects(Player* player, ROWOWIllusion const* il
         {
             if (IsLookHidden(player, itemGUIDByEquipPosition.first) == true)
                 continue; // A hidden slot's item shows no hat effect either
-            ROWOWItem const* roItem = GetROItem(player->GetItemByGuid(ObjectGuid::Create<HighGuid::Item>(itemGUIDByEquipPosition.second)));
+            ROWOWItem const* roItem = GetROItem(GetWornItem(player, itemGUIDByEquipPosition.second));
             if (roItem == nullptr)
                 continue;
             for (std::string const& hatEffectName : roItem->HatEffectNames)

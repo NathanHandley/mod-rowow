@@ -112,27 +112,25 @@ uint32 ROWOWMod::MailRebirthBelongings(Player* player)
     CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
     std::vector<Item*> mailItems;
 
-    // The worn equipment, taken off (an item worn in more than one position is one item)
-    std::set<ObjectGuid::LowType> wornItemGUIDs;
+    // The worn equipment, taken off where it's worn (its unequip scripts run) and straight out of world equipment into the mail, in this transaction
+    // (an item worn in more than one position is one item)
+    std::set<uint8> wornSlots;
     for (auto const& wornItem : identity->ItemGUIDsByEquipPosition)
-        wornItemGUIDs.insert(wornItem.second);
+        wornSlots.insert(GetWornSlot(wornItem.first));
     while (identity->ItemGUIDsByEquipPosition.empty() == false)
     {
         uint32 equipPosition = identity->ItemGUIDsByEquipPosition.begin()->first;
-        if (equipPosition == 0 || PCUnequipItem(player, equipPosition, 1) == false)
+        if (equipPosition == 0 || PCUnequipItem(player, equipPosition, 1 | ROWOW_UNEQUIP_IN_PLACE) == false)
         {
             identity->ItemGUIDsByEquipPosition.erase(identity->ItemGUIDsByEquipPosition.begin());
             identity->IsEquipmentChanged = true;
         }
     }
-    for (ObjectGuid::LowType itemGUID : wornItemGUIDs)
+    for (uint8 wornSlot : wornSlots)
     {
-        Item* item = player->GetItemByGuid(ObjectGuid::Create<HighGuid::Item>(itemGUID));
+        Item* item = wornSlot < ROWOW_WORN_SLOT_COUNT ? player->RemoveWorldEquipmentItem(ROWOW_MAP_WORLD, wornSlot, trans) : nullptr;
         if (item == nullptr)
             continue;
-        // As a mail sent from the bags (WorldSession::HandleSendMail)
-        player->MoveItemFromInventory(item->GetBagSlot(), item->GetSlot(), true);
-        item->DeleteFromInventoryDB(trans);
         if (item->GetState() == ITEM_UNCHANGED)
             item->FSetState(ITEM_CHANGED);
         item->SaveToDB(trans);

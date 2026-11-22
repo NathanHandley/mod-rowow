@@ -41,7 +41,20 @@ public:
 
     void OnPlayerUpdate(Player* player, uint32 p_time) override
     {
-        if (ROWOW->IsEnabled == false || ROWOW->IsInROForm(player) == false)
+        if (ROWOW->IsEnabled == false)
+            return;
+        // An identity loaded before the core's world equipment was: its set goes in use here, on the player's own update, never from another
+        // player's thread that looked it up (ActivateIdentityEquipment)
+        ROWOWIdentity* loadedIdentity = player->CustomData.Get<ROWOWIdentity>("ROWOWIdentity");
+        if (loadedIdentity != nullptr && loadedIdentity->IsWorldEquipmentActivationPending == true && player->IsWorldEquipmentLoaded() == true)
+        {
+            ROWOW->ActivateIdentityEquipment(player, *loadedIdentity);
+            if (ROWOW->IsInROForm(player) == true)
+                ROWOW->RefreshROForm(player); // With what it wears now
+            else
+                ROWOW->SendEquipmentToClient(player, *loadedIdentity, true);
+        }
+        if (ROWOW->IsInROForm(player) == false)
             return;
         ROWOWIdentity* identity = ROWOW->GetIdentity(player);
         identity->EquipmentCheckTimer += p_time;

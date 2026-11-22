@@ -577,7 +577,8 @@ void ROWOWMod::LoadItemScriptData()
         auto itemTemplateIDIter = ItemTemplateIDsByItemID.find(GetScriptItemID(arguments[0]));
         if (itemTemplateIDIter == ItemTemplateIDsByItemID.end())
             return ROWOWScriptValue::FromNumber(0);
-        return ROWOWScriptValue::FromNumber(int64(context.AttachedPlayer->GetItemCount(itemTemplateIDIter->second)));
+        // rAthena's inventory holds the worn items too: they're counted with the bags'
+        return ROWOWScriptValue::FromNumber(int64(context.AttachedPlayer->GetItemCount(itemTemplateIDIter->second) + GetWornItemCount(context.AttachedPlayer, itemTemplateIDIter->second)));
     });
     ROWOWSCRIPT->RegisterCommand("delitem", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
     {
@@ -585,14 +586,19 @@ void ROWOWMod::LoadItemScriptData()
             return ROWOWScriptValue::FromNumber(0);
         auto itemTemplateIDIter = ItemTemplateIDsByItemID.find(GetScriptItemID(arguments[0]));
         uint32 amount = uint32(std::max(1, GetArgumentNumber(arguments, 1, 1)));
-        if (itemTemplateIDIter == ItemTemplateIDsByItemID.end() || context.AttachedPlayer->GetItemCount(itemTemplateIDIter->second) < amount)
+        uint32 carriedCount = itemTemplateIDIter != ItemTemplateIDsByItemID.end() ? context.AttachedPlayer->GetItemCount(itemTemplateIDIter->second) : 0;
+        if (itemTemplateIDIter == ItemTemplateIDsByItemID.end() || carriedCount + GetWornItemCount(context.AttachedPlayer, itemTemplateIDIter->second) < amount)
         {
             // rAthena stops the script when there aren't enough
             context.Error = "not enough items to delete";
             context.IsStopped = true;
             return ROWOWScriptValue::FromNumber(0);
         }
-        context.AttachedPlayer->DestroyItemCount(itemTemplateIDIter->second, amount, true);
+        // The bags' first, then what's worn, taken off in place and used up
+        uint32 fromBags = std::min(carriedCount, amount);
+        if (fromBags > 0)
+            context.AttachedPlayer->DestroyItemCount(itemTemplateIDIter->second, fromBags, true);
+        DestroyWornItemCount(context.AttachedPlayer, itemTemplateIDIter->second, amount - fromBags);
         return ROWOWScriptValue::FromNumber(0);
     });
     ROWOWSCRIPT->RegisterCommand("getskilllv", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
@@ -813,14 +819,21 @@ int32 ROWOWMod::PCEquipPoint(Player* player, ROWOWIdentity const& identity, ROWO
     return equipPosition;
 }
 
-bool ROWOWMod::PCEquipItem(Player* player, Item* item, int32 reqPos)
+bool ROWOWMod::PCEquipItem(Player* player, Item* item, int32 reqPos, InventoryResult* resultOut)
 {
     // pc_equipitem.  Out of the form, on the character window's Ragnarok page, the item is only put in its place: its scripts, its status and the
-    // statuses it needs wait for the RO world, where the form's status is worked out with what it wears (RefreshROForm)
+    // statuses it needs wait for the RO world, where the form's status is worked out with what it wears (RefreshROForm).  The item leaves the bags
+    // for its equipment slot (ROWOW_WorldEquipment.cpp); resultOut says why it didn't (EQUIP_ERR_NONE when a message said so)
+    auto refuse = [resultOut](InventoryResult result)
+    {
+        if (resultOut != nullptr)
+            *resultOut = result;
+        return false;
+    };
     ROWOWIdentity* identity = GetIdentity(player);
     ROWOWItem const* roItem = GetROItem(item);
     if (IsROSetCarried(player) == false || roItem == nullptr || (identity->IsInForm == true && PCCantAct(player) == true)) // clif_parse_EquipItem's pc_cant_act2
-        return false;
+        return refuse(EQUIP_ERR_CANT_DO_RIGHT_NOW);
     int32 pos = PCEquipPoint(player, *identity, *roItem);
     uint8 result = PCIsEquip(player, *identity, item);
     if (result != ROWOW_EQUIP_ACK_OK)
@@ -829,14 +842,16 @@ bool ROWOWMod::PCEquipItem(Player* player, Item* item, int32 reqPos)
             SendItemMessage(player, roItem->AmmoType == ROWOW_AMMO_TYPE_ARROW ? "You need a bow equipped to equip arrows." : "This ammunition doesn't fit the weapon equipped.");
         else
             SendItemMessage(player, result == ROWOW_EQUIP_ACK_FAIL_LEVEL ? "You can't equip this item at your current level." : "You can't put this item on.");
-        return false;
+        return refuse(EQUIP_ERR_NONE);
     }
-    if ((pos & reqPos) == 0 || GetIdentityEquipPosition(*identity, item->GetGUID().GetCounter()) != 0)
-        return false;
+    if ((pos & reqPos) == 0)
+        return refuse(EQUIP_ERR_ITEM_DOESNT_GO_TO_SLOT);
+    if (GetIdentityEquipPosition(*identity, item->GetGUID().GetCounter()) != 0)
+        return refuse(EQUIP_ERR_NONE);
     if (identity->CanEquipTick > GetTick())
     {
         SendItemMessage(player, "You can't put this item on.");
-        return false;
+        return refuse(EQUIP_ERR_NONE);
     }
 
     // pc_isequip's statuses: a stripped place can't be dressed again until its strip ends.  (Not in PCIsEquip, which PCCheckItem asks too:
@@ -849,7 +864,7 @@ bool ROWOWMod::PCEquipItem(Player* player, Item* item, int32 reqPos)
             ((roItem->Locations & ROWOW_EQUIP_POSITION_HEAD_TOP) != 0 && sc->HasSCE(ROWOW_SC_STRIPHELM) == true))
         {
             SendItemMessage(player, "You can't put this item on.");
-            return false;
+            return refuse(EQUIP_ERR_NONE);
         }
     }
 
@@ -867,23 +882,63 @@ bool ROWOWMod::PCEquipItem(Player* player, Item* item, int32 reqPos)
             pos = GetIdentityEquippedItem(player, ROWOW_EQUIP_POSITION_HAND_R) != nullptr ? ROWOW_EQUIP_POSITION_HAND_L : ROWOW_EQUIP_POSITION_HAND_R;
     }
 
-    // Take off what's worn there (keeping the ammo, which is checked against the new weapon below), then wear it
+    // Ammo of the worn stack's kind joins it instead (D6)
+    if ((pos & ROWOW_EQUIP_POSITION_AMMO) != 0)
+    {
+        Item* wornAmmo = GetIdentityEquippedItem(player, ROWOW_EQUIP_POSITION_AMMO);
+        if (wornAmmo != nullptr && wornAmmo->GetEntry() == item->GetEntry())
+        {
+            if (TopUpWornAmmo(player, item) == false)
+            {
+                SendItemMessage(player, "The ammunition worn is a full stack already.");
+                return refuse(EQUIP_ERR_NONE);
+            }
+            identity->IsEquipmentChanged = true;
+            SendEquipmentToClient(player, *identity, false);
+            return true;
+        }
+    }
+
+    // What's worn there comes off, and ammo a new weapon doesn't shoot (ammo_unequip).  The item's place in the bags frees one, so they take one
+    // fewer than come off: decided before anything moves
     std::vector<uint32> equipPositionsToClear;
+    std::set<ObjectGuid::LowType> displacedItemGUIDs;
     for (auto const& itemGUIDByEquipPosition : identity->ItemGUIDsByEquipPosition)
-        if ((itemGUIDByEquipPosition.first & uint32(pos)) != 0)
-            equipPositionsToClear.push_back(itemGUIDByEquipPosition.first);
+    {
+        if ((itemGUIDByEquipPosition.first & uint32(pos)) == 0)
+            continue;
+        equipPositionsToClear.push_back(itemGUIDByEquipPosition.first);
+        displacedItemGUIDs.insert(itemGUIDByEquipPosition.second);
+    }
+    bool isAmmoTakenOff = false;
+    if (BattleConfig.AmmoUnequip != 0 && (pos & ROWOW_EQUIP_POSITION_ARMS) != 0 && roItem->IsWeapon == true)
+    {
+        ROWOWItem const* ammoItem = GetROItem(GetIdentityEquippedItem(player, ROWOW_EQUIP_POSITION_AMMO));
+        isAmmoTakenOff = ammoItem != nullptr && IsAmmoForWeaponType(ammoItem->AmmoType, roItem->WeaponType) == false;
+    }
+    uint32 placesNeeded = uint32(displacedItemGUIDs.size()) + (isAmmoTakenOff == true ? 1 : 0);
+    if (placesNeeded > 1 && GetFreeCarriedPlaces(player) < placesNeeded - 1)
+    {
+        SendItemMessage(player, "There's no room in your bags for what you're wearing there.");
+        return refuse(EQUIP_ERR_INVENTORY_FULL);
+    }
+
+    // Into its slot, changing places with what's in it (that goes where the item was), then the rest comes off (keeping the ammo, checked below)
+    uint8 slot = GetWornSlot(uint32(pos));
+    InventoryResult moveResult = player->GetWorldEquipmentItem(ROWOW_MAP_WORLD, slot) != nullptr ? player->SwapWorldEquipmentItem(ROWOW_MAP_WORLD, slot, item)
+        : player->WearWorldEquipmentItem(ROWOW_MAP_WORLD, slot, item);
+    if (moveResult != EQUIP_ERR_OK)
+    {
+        LOG_DEBUG("module.ROWOW", "PCEquipItem: {} couldn't wear item {} in slot {} ({})", player->GetName(), item->GetGUID().GetCounter(), slot, uint32(moveResult));
+        SendItemMessage(player, "You can't put this item on.");
+        return refuse(moveResult);
+    }
     for (uint32 equipPositionToClear : equipPositionsToClear)
         PCUnequipItem(player, equipPositionToClear, 2 | 4);
     identity->ItemGUIDsByEquipPosition[uint32(pos)] = item->GetGUID().GetCounter();
     identity->IsEquipmentChanged = true;
-
-    // A new weapon takes off ammo it doesn't shoot (ammo_unequip)
-    if (BattleConfig.AmmoUnequip != 0 && (pos & ROWOW_EQUIP_POSITION_ARMS) != 0 && roItem->IsWeapon == true)
-    {
-        ROWOWItem const* ammoItem = GetROItem(GetIdentityEquippedItem(player, ROWOW_EQUIP_POSITION_AMMO));
-        if (ammoItem != nullptr && IsAmmoForWeaponType(ammoItem->AmmoType, roItem->WeaponType) == false)
-            PCUnequipItem(player, ROWOW_EQUIP_POSITION_AMMO, 2 | 4);
-    }
+    if (isAmmoTakenOff == true)
+        PCUnequipItem(player, ROWOW_EQUIP_POSITION_AMMO, 2 | 4);
 
     if (identity->IsInForm == false)
     {
@@ -894,47 +949,33 @@ bool ROWOWMod::PCEquipItem(Player* player, Item* item, int32 reqPos)
     PCCheckAllowSkill(player); // Check if status changes should be halted (with the new weapon's status)
 
     // The item's EquipScript, then its cards'
-    RunItemScript(player, roItem->EquipScript.get(), item);
-    for (uint8 slot = 0; slot < ROWOW_MAX_SLOTS; slot++)
-    {
-        auto cardTemplateIDIter = ItemTemplateIDsByItemID.find(GetItemCard(item, slot));
-        auto cardIter = cardTemplateIDIter != ItemTemplateIDsByItemID.end() ? ItemsByItemTemplateID.find(cardTemplateIDIter->second) : ItemsByItemTemplateID.end();
-        if (cardIter != ItemsByItemTemplateID.end())
-            RunItemScript(player, cardIter->second.EquipScript.get(), item);
-    }
+    RunWornItemScripts(player, item, true);
     return true;
 }
 
-bool ROWOWMod::PCUnequipItem(Player* player, uint32 equipPosition, int32 flag)
+bool ROWOWMod::PCUnequipItem(Player* player, uint32 equipPosition, int32 flag, uint8 bag, uint8 bagSlot, InventoryResult* resultOut)
 {
-    // pc_unequipitem: flag 1 recalculates the status after, 4 keeps the ammo (that's checked by the caller)
+    // pc_unequipitem: flag 1 recalculates the status after, 2 sends nothing (the caller does), 4 keeps the ammo (that's checked by the caller),
+    // ROWOW_UNEQUIP_ASKED and ROWOW_UNEQUIP_IN_PLACE (ROWOW.h).  The item comes off to the RO bags (bag, bagSlot, or anywhere), or when it's
+    // forced and there's no room, by mail (MoveWornItemOff)
     ROWOWIdentity* identity = GetIdentity(player);
     auto itemGUIDIter = identity->ItemGUIDsByEquipPosition.begin();
     for (; itemGUIDIter != identity->ItemGUIDsByEquipPosition.end(); ++itemGUIDIter)
         if ((itemGUIDIter->first & equipPosition) != 0)
             break;
     if (itemGUIDIter == identity->ItemGUIDsByEquipPosition.end())
-        return false;
-    uint32 pos = itemGUIDIter->first;
-    Item* item = player->GetItemByGuid(ObjectGuid::Create<HighGuid::Item>(itemGUIDIter->second));
-    ROWOWItem const* roItem = GetROItem(item);
-    identity->ItemGUIDsByEquipPosition.erase(itemGUIDIter);
-    identity->IsEquipmentChanged = true;
-
-    // pc_unequipitem_sub: the item's UnEquipScript, and its cards' (in the form: on the Ragnarok page nothing ran when it was put on)
-    if (roItem != nullptr && identity->IsInForm == true)
     {
-        RunItemScript(player, roItem->UnEquipScript.get(), item);
-        for (uint8 slot = 0; slot < ROWOW_MAX_SLOTS; slot++)
-        {
-            auto cardTemplateIDIter = ItemTemplateIDsByItemID.find(GetItemCard(item, slot));
-            auto cardIter = cardTemplateIDIter != ItemTemplateIDsByItemID.end() ? ItemsByItemTemplateID.find(cardTemplateIDIter->second) : ItemsByItemTemplateID.end();
-            if (cardIter != ItemsByItemTemplateID.end())
-                RunItemScript(player, cardIter->second.UnEquipScript.get(), item);
-        }
+        if (resultOut != nullptr)
+            *resultOut = EQUIP_ERR_ITEM_NOT_FOUND;
+        return false;
     }
+    uint32 pos = itemGUIDIter->first;
+    ObjectGuid::LowType itemGUID = itemGUIDIter->second;
+    Item* item = GetWornOrCarriedItem(player, itemGUID); // An equip that exchanged it put it in the bags already
+    ROWOWItem const* roItem = GetROItem(item);
 
     // Taking off a bow or gun takes off its ammo (ammo_unequip)
+    bool isAmmoTakenOff = false;
     if ((pos & ROWOW_EQUIP_POSITION_ARMS) != 0 && roItem != nullptr && roItem->IsWeapon == true && BattleConfig.AmmoUnequip != 0 && (flag & 4) == 0)
     {
         switch (roItem->WeaponType)
@@ -947,10 +988,42 @@ bool ROWOWMod::PCUnequipItem(Player* player, uint32 equipPosition, int32 flag)
             case ROWOW_WEAPON_TYPE_GATLING:
             case ROWOW_WEAPON_TYPE_SHOTGUN:
             case ROWOW_WEAPON_TYPE_GRENADE:
-                identity->ItemGUIDsByEquipPosition.erase(ROWOW_EQUIP_POSITION_AMMO);
+                isAmmoTakenOff = identity->ItemGUIDsByEquipPosition.find(ROWOW_EQUIP_POSITION_AMMO) != identity->ItemGUIDsByEquipPosition.end();
                 break;
         }
     }
+
+    // Asked for (.ro takeoff, a drag): refused with no room (D4), before anything changes, and moved first.  Forced: moved after its scripts, to the
+    // bags or the mail, which can't fail
+    bool isToMove = (flag & ROWOW_UNEQUIP_IN_PLACE) == 0 && GetWornItem(player, itemGUID) != nullptr;
+    if (isToMove == true && (flag & ROWOW_UNEQUIP_ASKED) != 0)
+    {
+        if (GetFreeCarriedPlaces(player) < (bag == NULL_BAG ? 1u : 0u) + (isAmmoTakenOff == true ? 1u : 0u))
+        {
+            SendItemMessage(player, "There's no room in your bags to take it off.");
+            if (resultOut != nullptr)
+                *resultOut = EQUIP_ERR_NONE;
+            return false;
+        }
+        InventoryResult result = MoveWornItemOff(player, GetWornSlot(pos), true, bag, bagSlot);
+        if (result != EQUIP_ERR_OK)
+        {
+            if (resultOut != nullptr)
+                *resultOut = result;
+            return false;
+        }
+        isToMove = false;
+    }
+    identity->ItemGUIDsByEquipPosition.erase(pos);
+    identity->IsEquipmentChanged = true;
+
+    // pc_unequipitem_sub: the item's UnEquipScript, and its cards' (in the form: on the Ragnarok page nothing ran when it was put on)
+    if (roItem != nullptr && identity->IsInForm == true)
+        RunWornItemScripts(player, item, false);
+    if (isToMove == true)
+        MoveWornItemOff(player, GetWornSlot(pos), false);
+    if (isAmmoTakenOff == true)
+        PCUnequipItem(player, ROWOW_EQUIP_POSITION_AMMO, 2 | 4);
     // Taking off the weapon ends Enchant Deadly Poison (switch_remove_edp&1, pre-renewal's bit)
     if ((pos & ROWOW_EQUIP_POSITION_HAND_R) != 0 && (BattleConfig.SwitchRemoveEdp & 1) != 0 && identity->IsInForm == true)
         StatusChangeEnd(player, ROWOW_SC_EDP);
@@ -1004,16 +1077,21 @@ void ROWOWMod::PCCheckAllowSkill(Player* player)
 
 bool ROWOWMod::PCCheckItem(Player* player, ROWOWIdentity& identity)
 {
-    // pc_checkitem: what can no longer be worn (a lower level, another job) comes off, as does an item no longer in the bags
+    // pc_checkitem: what can no longer be worn (a lower level, another job) comes off, to the bags or by mail; an item no longer worn (used up)
+    // leaves the index.  Not before the identity's set is in use (ActivateIdentityEquipment), when nothing it wears would be found
+    if (identity.IsWorldEquipmentActivationPending == true || player->IsWorldEquipmentLoaded() == false)
+        return false;
     bool isChanged = false;
     for (auto itemGUIDIter = identity.ItemGUIDsByEquipPosition.begin(); itemGUIDIter != identity.ItemGUIDsByEquipPosition.end();)
     {
-        Item* item = player->GetItemByGuid(ObjectGuid::Create<HighGuid::Item>(itemGUIDIter->second));
-        if (item != nullptr && Player::IsInventoryPos(item->GetPos()) == true && PCIsEquip(player, identity, item) == ROWOW_EQUIP_ACK_OK)
+        Item* item = GetWornItem(player, itemGUIDIter->second);
+        if (item != nullptr && PCIsEquip(player, identity, item) == ROWOW_EQUIP_ACK_OK)
         {
             ++itemGUIDIter;
             continue;
         }
+        if (item != nullptr)
+            MoveWornItemOff(player, GetWornSlot(itemGUIDIter->first), false);
         itemGUIDIter = identity.ItemGUIDsByEquipPosition.erase(itemGUIDIter);
         isChanged = true;
     }
@@ -1612,9 +1690,19 @@ void ROWOWMod::TeleportToSavePoint(Player* player)
 
 bool ROWOWMod::GetClientItemPosition(Item const* item, uint32& bagOut, uint32& slotOut)
 {
-    // The client numbers the backpack 0 and the bags 1-4, and their slots from 1
+    // The client numbers the backpack 0 and the bags 1-4, and their slots from 1; the worn items' container is ROWOW_CLIENT_BAG_WORN
     uint8 bag = item->GetBagSlot();
     uint8 slot = item->GetSlot();
+    uint8 block = 0;
+    uint8 world = 0;
+    if (Player::GetWorldContainerOfAddress(bag, block, world) == true)
+    {
+        if (block != WORLD_CONTAINER_EQUIPMENT || world != ROWOW_MAP_WORLD)
+            return false;
+        bagOut = ROWOW_CLIENT_BAG_WORN;
+        slotOut = uint32(slot) + 1;
+        return true;
+    }
     if (bag == INVENTORY_SLOT_BAG_0 && slot >= INVENTORY_SLOT_ITEM_START && slot < INVENTORY_SLOT_ITEM_END)
     {
         bagOut = 0;
@@ -1630,10 +1718,12 @@ bool ROWOWMod::GetClientItemPosition(Item const* item, uint32& bagOut, uint32& s
     return false;
 }
 
-Item* ROWOWMod::GetItemByClientPosition(Player* player, uint32 bag, uint32 slot)
+Item* ROWOWMod::GetItemByClientPosition(Player* player, uint32 bag, uint32 slot, bool isWornAllowed)
 {
     if (slot == 0)
         return nullptr;
+    if (bag == ROWOW_CLIENT_BAG_WORN) // Only for what may act on a worn item (the card windows); not wearing, appraising, the cart
+        return isWornAllowed == true && slot <= ROWOW_WORN_SLOT_COUNT ? player->GetWorldEquipmentItem(ROWOW_MAP_WORLD, uint8(slot - 1)) : nullptr;
     if (bag == 0)
     {
         if (slot > uint32(INVENTORY_SLOT_ITEM_END - INVENTORY_SLOT_ITEM_START))
@@ -1647,6 +1737,9 @@ Item* ROWOWMod::GetItemByClientPosition(Player* player, uint32 bag, uint32 slot)
 
 void ROWOWMod::UpdateIdentityEquipment(Player* player, ROWOWIdentity& identity)
 {
+    // The worn ammo stack takes more of its kind from the bags (D6)
+    if (TopUpWornAmmo(player, nullptr) == true)
+        identity.IsEquipmentChanged = true;
     if (PCCheckItem(player, identity) == true)
         RefreshROForm(player);
     else
@@ -1661,7 +1754,7 @@ void ROWOWMod::SendEquipmentToClient(Player* player, ROWOWIdentity& identity, bo
     bool isFirst = true;
     for (auto const& itemGUIDByEquipPosition : identity.ItemGUIDsByEquipPosition)
     {
-        Item* item = player->GetItemByGuid(ObjectGuid::Create<HighGuid::Item>(itemGUIDByEquipPosition.second));
+        Item* item = GetWornItem(player, itemGUIDByEquipPosition.second);
         uint32 bag = 0;
         uint32 slot = 0;
         if (item == nullptr || GetClientItemPosition(item, bag, slot) == false)

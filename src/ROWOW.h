@@ -438,6 +438,14 @@ struct ROWOWDataTable
 #define ROWOW_EQUIP_POSITION_ARMS                   (ROWOW_EQUIP_POSITION_HAND_R | ROWOW_EQUIP_POSITION_HAND_L)
 #define ROWOW_EQUIP_POSITION_ACC                    (ROWOW_EQUIP_POSITION_ACC_L | ROWOW_EQUIP_POSITION_ACC_R)
 #define ROWOW_EQUIP_POSITION_COSTUME                (ROWOW_EQUIP_POSITION_COSTUME_HEAD_TOP | ROWOW_EQUIP_POSITION_COSTUME_HEAD_MID | ROWOW_EQUIP_POSITION_COSTUME_HEAD_LOW | ROWOW_EQUIP_POSITION_COSTUME_GARMENT)
+// The worn items' slots in world ROWOW_MAP_WORLD's equipment (ROWOW_WorldEquipment.cpp): slot n is position bit n
+#define ROWOW_WORN_SLOT_COUNT                       16
+// The client's container id for it (FrameXML WORLD_EQUIPMENT_CONTAINER_FIRST + world - 1), as the ROWOW* addon messages name a bag
+#define ROWOW_CLIENT_BAG_WORN                       61
+// PCUnequipItem's flags past rAthena's (1 recalculates the status, 2 sends nothing, 4 keeps the ammo): 8 the player asked (refused when the bags
+// have no room, never mailed), 16 the item stays in its slot for the caller (who destroys, mails or changes it)
+#define ROWOW_UNEQUIP_ASKED                         8
+#define ROWOW_UNEQUIP_IN_PLACE                      16
 
 // The visual slots the equipment window can hide (ROWOWIdentity::HiddenLookMask, Nathan 2026-11-18): each is one slot's own, so a hidden costume shows
 // the item under it, and a hidden item still shows its costume
@@ -2192,8 +2200,11 @@ struct ROWOWIdentity : public DataMap::Base
     uint8 HiddenLookMask = 0; // The visual slots whose items aren't drawn on the sprite (the equipment window's hide buttons, .ro hidelook; ROWOW_HIDDEN_LOOK_*)
     std::map<uint8, uint32> ActionsByButton; // The RO form's own action bars (packed action and type, as SMSG_ACTION_BUTTONS sends them)
     bool AreActionsChanged = false;
-    std::map<uint32, ObjectGuid::LowType> ItemGUIDsByEquipPosition; // The RO equipment worn (in the bags, as RO's inventory holds it)
+    std::map<uint32, ObjectGuid::LowType> ItemGUIDsByEquipPosition; // The RO equipment worn, in world equipment's container (ROWOW_WorldEquipment.cpp): its index
     bool IsEquipmentChanged = false;
+    std::map<uint32, ObjectGuid::LowType> LegacyEquipmentRows; // mod_rowow_identity_equipment's, from before world equipment: moved in once (ActivateIdentityEquipment)
+    bool IsLegacyEquipmentDeletePending = false; // Those rows go with the next save of the inventory, in which the moved items' rows are written
+    bool IsWorldEquipmentActivationPending = false; // Loaded before the core's world equipment: put in use by the player's own update (ROWOW_ItemScripts.cpp)
     std::string SentEquipmentMessage; // What the client's RO interface was last told of the equipment
     std::string SentCardsMessage; // ... and of the cards in the bags' items
     uint32 EquipmentCheckTimer = 0;
@@ -2852,8 +2863,30 @@ public:
     // The RO item worn in an RO equipment position, or null
     Item* GetIdentityEquippedItem(Player* player, uint32 equipPosition) const;
 
-    // RO items (ROWOW_Items.cpp): the port of rAthena's equipment and item use (pc.cpp), and the item's own state.  Worn items stay in the
-    // bags, as RO's inventory holds them, and the identity remembers where each is worn
+    // Where the RO equipment worn is (ROWOW_WorldEquipment.cpp): world ROWOW_MAP_WORLD's equipment, a slot per position bit, a set per identity
+    void RegisterWorldEquipment(); // At startup
+    static uint8 GetWornSlot(uint32 equipPosition); // The lowest position bit's number (ROWOW_WORN_SLOT_COUNT for none)
+    static uint32 GetWornEquipPosition(uint8 slot, ROWOWItem const* roItem); // The positions an item in a slot is worn in
+    uint32 GetWornEquipPositionOfSlot(ROWOWIdentity const& identity, uint8 slot) const; // The index entry whose item is in a slot, 0 for none
+    Item* GetWornItem(Player* player, ObjectGuid::LowType itemGUID) const; // An item worn now, or null
+    Item* GetWornOrCarriedItem(Player* player, ObjectGuid::LowType itemGUID) const;
+    uint32 GetFreeCarriedPlaces(Player* player) const;
+    void RebuildWornEquipment(Player* player, ROWOWIdentity& identity) const; // The index, from the container
+    void ActivateIdentityEquipment(Player* player, ROWOWIdentity& identity); // The identity's set in use, the old rows moved in
+    void MailWornItem(Player* player, uint8 slot);
+    // Off to the RO bags (a place, a bag, or anywhere), or when forced and there's no room, by mail.  The index isn't changed
+    InventoryResult MoveWornItemOff(Player* player, uint8 slot, bool isAsked, uint8 bag = 0 /*NULL_BAG*/, uint8 bagSlot = 255 /*NULL_SLOT*/);
+    void RunWornItemScripts(Player* player, Item* item, bool isEquip); // Its EquipScript or UnEquipScript and its cards'
+    bool TopUpWornAmmo(Player* player, Item* ammo); // The worn ammo stack takes more of its kind: from ammo, or from the bags when null
+    uint32 GetWornItemCount(Player* player, uint32 itemTemplateID) const; // Scripts count worn items with the bags' (D5)
+    void DestroyWornItemCount(Player* player, uint32 itemTemplateID, uint32 count);
+    // The client's drags (ROWOWWorldEquipmentHandler)
+    InventoryResult WearWornSlotFromClient(Player* player, Item* item, uint8 slot);
+    InventoryResult TakeOffWornSlotFromClient(Player* player, uint8 slot, uint8 bag, uint8 bagSlot);
+    InventoryResult MoveWornSlotFromClient(Player* player, uint8 fromSlot, uint8 toSlot);
+
+    // RO items (ROWOW_Items.cpp): the port of rAthena's equipment and item use (pc.cpp), and the item's own state.  Worn items are in world
+    // equipment's container (ROWOW_WorldEquipment.cpp), and the identity remembers where each is worn
     void LoadItemScriptData(); // Registers the script engine's commands and compiles the usable items' scripts
     static uint32 GetItemRefine(Item const* item);
     static bool IsItemBroken(Item const* item);
@@ -2863,8 +2896,10 @@ public:
     uint32 GetIdentityEquipPosition(ROWOWIdentity const& identity, ObjectGuid::LowType itemGUID) const; // Where an item is worn, 0 for not
     uint8 PCIsEquip(Player* player, ROWOWIdentity const& identity, Item const* item) const; // pc_isequip
     int32 PCEquipPoint(Player* player, ROWOWIdentity const& identity, ROWOWItem const& roItem) const; // pc_equippoint
-    bool PCEquipItem(Player* player, Item* item, int32 reqPos); // pc_equipitem
-    bool PCUnequipItem(Player* player, uint32 equipPosition, int32 flag); // pc_unequipitem, by a position the item is worn in
+    // pc_equipitem (resultOut: why not).  True can mean the item is gone (ammo that joined the worn stack of its kind): don't use it after
+    bool PCEquipItem(Player* player, Item* item, int32 reqPos, InventoryResult* resultOut = nullptr);
+    // pc_unequipitem, by a position the item is worn in: off to a place in the bags (bag, bagSlot), or anywhere (ROWOW_UNEQUIP_* for the flags)
+    bool PCUnequipItem(Player* player, uint32 equipPosition, int32 flag, uint8 bag = 0 /*NULL_BAG*/, uint8 bagSlot = 255 /*NULL_SLOT*/, InventoryResult* resultOut = nullptr);
     bool PCCheckItem(Player* player, ROWOWIdentity& identity); // pc_checkitem: takes off what can no longer be worn, true when anything was
     bool PCIsUseItem(Player* player, Item const* item, bool isReporting); // pc_isUseitem
     void PCUseItem(Player* player, ObjectGuid itemGUID); // pc_useitem, after the use item spell
@@ -2978,8 +3013,8 @@ public:
     // where each worn item is, under the ROWOWEQUIP prefix, when that changes
     void UpdateIdentityEquipment(Player* player, ROWOWIdentity& identity);
     void SendEquipmentToClient(Player* player, ROWOWIdentity& identity, bool isForced);
-    static bool GetClientItemPosition(Item const* item, uint32& bagOut, uint32& slotOut); // The client's bag (0-4) and slot (from 1)
-    static Item* GetItemByClientPosition(Player* player, uint32 bag, uint32 slot);
+    static bool GetClientItemPosition(Item const* item, uint32& bagOut, uint32& slotOut); // The client's bag (0-4, ROWOW_CLIENT_BAG_WORN) and slot (from 1)
+    static Item* GetItemByClientPosition(Player* player, uint32 bag, uint32 slot, bool isWornAllowed = false); // Worn items only when allowed
 
     // RO skills (ROWOW_Skills.cpp): the port of rAthena's skill tree and skill learning (pc.cpp).  The identity's learned skills are
     // known as their WoW spells while in the form, granted for the form only (never saved with the character's own spells)

@@ -2256,6 +2256,27 @@ void ROWOWMod::RegisterNpcScriptCommands()
                 count++;
             }
         }
+        // rAthena's inventory holds what's worn too: after the bags, from world equipment's slots
+        for (uint8 wornSlot = 0; wornSlot < ROWOW_WORN_SLOT_COUNT; wornSlot++)
+        {
+            Item* item = player->GetWorldEquipmentItem(ROWOW_MAP_WORLD, wornSlot);
+            ROWOWItem const* roItem = GetROItem(item);
+            if (roItem == nullptr)
+                continue;
+            setListValue("id", roItem->ItemID);
+            setListValue("idx", count);
+            setListValue("amount", item->GetCount());
+            setListValue("equip", int64(GetIdentityEquipPosition(*identity, item->GetGUID().GetCounter())));
+            setListValue("refine", GetItemRefine(item));
+            setListValue("identify", IsItemIdentified(item) == true ? 1 : 0);
+            setListValue("attribute", IsItemBroken(item) == true ? 1 : 0);
+            for (uint8 cardSlot = 0; cardSlot < 4; cardSlot++)
+                setListValue(fmt::format("card{}", cardSlot + 1), GetItemCard(item, cardSlot));
+            setListValue("expire", 0);
+            setListValue("bound", 0);
+            setListValue("tradable", 1);
+            count++;
+        }
         ROWOWSCRIPT->SetVariable(context, "@inventorylist_count", 0, ROWOWScriptValue::FromNumber(count));
         return ROWOWScriptValue::FromNumber(0);
     });

@@ -1300,7 +1300,7 @@ ROWOWIdentity* ROWOWMod::GetIdentity(Player* player)
 {
     ROWOWIdentity* identity = player->CustomData.GetDefault<ROWOWIdentity>("ROWOWIdentity");
     if (identity->IsLoaded == true)
-        return identity;
+        return identity; // One loaded before the core's world equipment has its set put in use by its own update (ROWOW_ItemScripts.cpp)
     identity->IsLoaded = true;
     identity->CharacterGUID = player->GetGUID().GetCounter();
     LoadIdentitySlots(player, *identity);
@@ -1821,6 +1821,7 @@ void ROWOWMod::LoadIdentityRows(Player* player, ROWOWIdentity& slotIdentity)
     {
         // A new identity shares its account's variables: a # variable set before its first save must not rewrite them from an empty set
         LoadIdentityScriptVariables(player, *identity);
+        ActivateIdentityEquipment(player, *identity); // None worn: a slot's before it is put away
         return;
     }
     Field* fields = result->Fetch();
@@ -1863,12 +1864,13 @@ void ROWOWMod::LoadIdentityRows(Player* player, ROWOWIdentity& slotIdentity)
             identity->ActionsByButton[actionFields[0].Get<uint8>()] = actionFields[1].Get<uint32>();
         } while (actionResult->NextRow());
     }
+    // What was worn before world equipment (the item was in the bags or the put away set): moved into the identity's set once it's in use, below
     if (QueryResult equipmentResult = CharacterDatabase.Query("SELECT `equip_position`, `item_guid` FROM `mod_rowow_identity_equipment` WHERE `guid` = {}", guid))
     {
         do
         {
             Field* equipmentFields = equipmentResult->Fetch();
-            identity->ItemGUIDsByEquipPosition[equipmentFields[0].Get<uint32>()] = equipmentFields[1].Get<uint32>();
+            identity->LegacyEquipmentRows[equipmentFields[0].Get<uint32>()] = equipmentFields[1].Get<uint32>();
         } while (equipmentResult->NextRow());
     }
     if (QueryResult skillResult = CharacterDatabase.Query("SELECT `skill_id`, `level` FROM `mod_rowow_identity_skill` WHERE `guid` = {}", guid))
@@ -1904,6 +1906,9 @@ void ROWOWMod::LoadIdentityRows(Player* player, ROWOWIdentity& slotIdentity)
     LoadIdentityQuests(player, *identity);
     LoadIdentityPet(player, *identity);
     LoadIdentityFollowers(player, *identity);
+    // Its worn equipment: its world equipment set in use (the slot's before it put away), after the put away carried set, which the old rows' items
+    // may be in (ROWOW_WorldEquipment.cpp)
+    ActivateIdentityEquipment(player, *identity);
     PCCalcSkillTree(*identity);
 }
 
@@ -2000,13 +2005,13 @@ void ROWOWMod::SaveIdentity(Player* player, CharacterDatabaseTransaction trans, 
             trans->Append("INSERT INTO `mod_rowow_identity_action` (`guid`, `button`, `action`) VALUES ({}, {}, {})", guid, actionByButton.first, actionByButton.second);
         identity->AreActionsChanged = false;
     }
-    if (identity->IsEquipmentChanged == true)
+    // What's worn is world equipment, saved by the core with the inventory (character_world_item).  The rows from before it go once their items
+    // were moved in, with the save of the inventory that writes where those are now
+    identity->IsEquipmentChanged = false;
+    if (identity->IsLegacyEquipmentDeletePending == true && isInventorySaved == true)
     {
         trans->Append("DELETE FROM `mod_rowow_identity_equipment` WHERE `guid` = {}", guid);
-        for (auto const& itemGUIDByEquipPosition : identity->ItemGUIDsByEquipPosition)
-            trans->Append("INSERT INTO `mod_rowow_identity_equipment` (`guid`, `equip_position`, `item_guid`) VALUES ({}, {}, {})", guid, itemGUIDByEquipPosition.first,
-                itemGUIDByEquipPosition.second);
-        identity->IsEquipmentChanged = false;
+        identity->IsLegacyEquipmentDeletePending = false;
     }
     if (identity->AreSkillsChanged == true)
     {
@@ -2416,12 +2421,21 @@ void ROWOWMod::GiveNewIdentityStartItems(Player* player, ROWOWIdentity& identity
     if (identity.IsNewIdentityPending == false || IsROSetCarried(player) == false)
         return;
     GiveStartBags(player);
+    // The new identity's own world equipment set, for what it starts wearing (an empty one: a reset destroyed the old)
+    ActivateIdentityEquipment(player, identity);
     for (ROWOWStartItem const& startItem : StartItems)
     {
         Item* item = nullptr;
         GiveStartItemOrMail(player, startItem.ItemTemplateID, startItem.Amount, &item);
-        if (item != nullptr && startItem.EquipPosition != 0) // One sent by mail isn't worn
+        if (item == nullptr || startItem.EquipPosition == 0) // One sent by mail isn't worn
+            continue;
+        uint8 slot = GetWornSlot(startItem.EquipPosition);
+        InventoryResult result = player->WearWorldEquipmentItem(ROWOW_MAP_WORLD, slot, item);
+        if (result == EQUIP_ERR_OK)
             identity.ItemGUIDsByEquipPosition[startItem.EquipPosition] = item->GetGUID().GetCounter();
+        else
+            LOG_ERROR("module.ROWOW", "GiveNewIdentityStartItems: {}'s start item {} couldn't be worn in slot {} ({}): it stays in the bags", player->GetName(),
+                item->GetEntry(), slot, uint32(result));
     }
     identity.IsEquipmentChanged = true;
     identity.IsNewIdentityPending = false;
@@ -3399,6 +3413,6 @@ Item* ROWOWMod::GetIdentityEquippedItem(Player* player, uint32 equipPosition) co
     // An item worn in several positions (a two-handed weapon, a headgear covering two) is kept under all of them together
     for (auto const& itemGUIDByEquipPosition : identity->ItemGUIDsByEquipPosition)
         if ((itemGUIDByEquipPosition.first & equipPosition) == equipPosition)
-            return player->GetItemByGuid(ObjectGuid::Create<HighGuid::Item>(itemGUIDByEquipPosition.second));
+            return GetWornItem(player, itemGUIDByEquipPosition.second);
     return nullptr;
 }

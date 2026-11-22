@@ -233,7 +233,7 @@ bool ROWOWMod::IsWearingWeddingRing(Player* player)
     ROWOWIdentity* identity = GetIdentity(player);
     for (auto const& itemGUIDByEquipPosition : identity->ItemGUIDsByEquipPosition)
     {
-        ROWOWItem const* roItem = GetROItem(player->GetItemByGuid(ObjectGuid::Create<HighGuid::Item>(itemGUIDByEquipPosition.second)));
+        ROWOWItem const* roItem = GetROItem(GetWornItem(player, itemGUIDByEquipPosition.second));
         if (roItem != nullptr && (roItem->ItemID == ROWOW_ITEM_WEDDING_RING_M || roItem->ItemID == ROWOW_ITEM_WEDDING_RING_F))
             return true;
     }
@@ -247,12 +247,21 @@ void ROWOWMod::RemoveWeddingRings(Player* player)
     std::vector<uint32> wornPositions;
     for (auto const& itemGUIDByEquipPosition : identity->ItemGUIDsByEquipPosition)
     {
-        ROWOWItem const* roItem = GetROItem(player->GetItemByGuid(ObjectGuid::Create<HighGuid::Item>(itemGUIDByEquipPosition.second)));
+        ROWOWItem const* roItem = GetROItem(GetWornItem(player, itemGUIDByEquipPosition.second));
         if (roItem != nullptr && (roItem->ItemID == ROWOW_ITEM_WEDDING_RING_M || roItem->ItemID == ROWOW_ITEM_WEDDING_RING_F))
             wornPositions.push_back(itemGUIDByEquipPosition.first);
     }
+    // A worn ring is taken off where it's worn and destroyed there (the RO bags needn't be on the character: the partner can cause this)
     for (uint32 position : wornPositions)
-        PCUnequipItem(player, position, 1);
+    {
+        Item* ring = player->GetWorldEquipmentItem(ROWOW_MAP_WORLD, GetWornSlot(position));
+        PCUnequipItem(player, position, 1 | ROWOW_UNEQUIP_IN_PLACE);
+        if (ring != nullptr)
+        {
+            uint32 count = ring->GetCount();
+            player->DestroyItemCount(ring, count, true);
+        }
+    }
     for (uint32 ringItemID : { ROWOW_ITEM_WEDDING_RING_M, ROWOW_ITEM_WEDDING_RING_F })
     {
         auto itemTemplateIDIter = ItemTemplateIDsByItemID.find(ringItemID);
