@@ -329,6 +329,13 @@ void ROWOWMod::RefreshIllusionDisplay(Player* player)
         player->SetDisplayId(displayID);
 }
 
+// The headgear spots (bit 0 upper, 1 middle, 2 lower) the costume positions given cover
+static uint8 GetCostumeHeadgearSpots(uint32 equipPositions)
+{
+    return ((equipPositions & ROWOW_EQUIP_POSITION_COSTUME_HEAD_TOP) != 0 ? 0x1 : 0) | ((equipPositions & ROWOW_EQUIP_POSITION_COSTUME_HEAD_MID) != 0 ? 0x2 : 0)
+        | ((equipPositions & ROWOW_EQUIP_POSITION_COSTUME_HEAD_LOW) != 0 ? 0x4 : 0);
+}
+
 void ROWOWMod::RefreshIllusionHeadgear(Player* player, ROWOWIllusion const* illusion)
 {
     if (HeadgearSpellIDs.empty() == true)
@@ -341,55 +348,92 @@ void ROWOWMod::RefreshIllusionHeadgear(Player* player, ROWOWIllusion const* illu
     if (illusion != nullptr && IsInROForm(player) == true)
     {
         ROWOWIdentity* identity = GetIdentity(player);
+        // The costumes are kept apart and then shown over every spot they cover (rAthena's pc_equipitem: a costume sets the look of each
+        // spot it covers, the lower spots of one covering several to none), so the normal headgear under any of their spots doesn't show
+        uint32 costumeSpellIDs[3] = { 0, 0, 0 };
+        uint8 costumeSpots = 0;
+        bool isNoCostume = HasMapFlag(player, "nocostume"); // A map that shows no costumes (rAthena's mapflag nocostume)
         for (bool isCostume : { false, true })
         {
             for (auto const& itemGUIDByEquipPosition : identity->ItemGUIDsByEquipPosition)
             {
                 uint32 headgearPositions = isCostume == true ? (ROWOW_EQUIP_POSITION_COSTUME_HEAD_TOP | ROWOW_EQUIP_POSITION_COSTUME_HEAD_MID | ROWOW_EQUIP_POSITION_COSTUME_HEAD_LOW)
                     : (ROWOW_EQUIP_POSITION_HEAD_TOP | ROWOW_EQUIP_POSITION_HEAD_MID | ROWOW_EQUIP_POSITION_HEAD_LOW);
-                if ((itemGUIDByEquipPosition.first & headgearPositions) == 0)
+                if ((itemGUIDByEquipPosition.first & headgearPositions) == 0 || IsLookHidden(player, itemGUIDByEquipPosition.first) == true)
                     continue;
-                Item* item = player->GetItemByGuid(ObjectGuid::Create<HighGuid::Item>(itemGUIDByEquipPosition.second));
+                if (isCostume == true && isNoCostume == true)
+                    continue;
+                Item* item = GetWornItem(player, itemGUIDByEquipPosition.second);
                 if (item == nullptr)
                     continue;
+                if (isCostume == true)
+                    costumeSpots |= GetCostumeHeadgearSpots(itemGUIDByEquipPosition.first);
                 auto itemVisualIter = ItemVisualsByItemID.find(item->GetEntry());
                 if (itemVisualIter == ItemVisualsByItemID.end() || itemVisualIter->second.VisualType < ROWOW_ITEM_VISUAL_TYPE_HEADGEAR_TOP
                     || itemVisualIter->second.VisualType > ROWOW_ITEM_VISUAL_TYPE_HEADGEAR_LOW)
                     continue;
                 auto spellIter = HeadgearSpellIDsByKey.find(GetHeadgearKey(itemVisualIter->second.ViewID, itemVisualIter->second.VisualType, illusion->IsMale));
-                if (spellIter != HeadgearSpellIDsByKey.end())
-                    wantedSpellIDs[itemVisualIter->second.VisualType - ROWOW_ITEM_VISUAL_TYPE_HEADGEAR_TOP] = spellIter->second;
+                if (spellIter == HeadgearSpellIDsByKey.end())
+                    continue;
+                uint8 spotIndex = itemVisualIter->second.VisualType - ROWOW_ITEM_VISUAL_TYPE_HEADGEAR_TOP;
+                if (isCostume == true)
+                {
+                    costumeSpellIDs[spotIndex] = spellIter->second;
+                    costumeSpots |= 1 << spotIndex;
+                }
+                else
+                    wantedSpellIDs[spotIndex] = spellIter->second;
             }
         }
+        for (uint8 i = 0; i < 3; ++i)
+            if ((costumeSpots & (1 << i)) != 0)
+                wantedSpellIDs[i] = costumeSpellIDs[i];
     }
     else if (illusion != nullptr && (IsWorldIdentityLookAura(player, illusion->SpellID) == true || GetWorldIdentityState(player)->LookSpellIDBeingAdded == illusion->SpellID))
     {
         // The Ragnarok identity shown out of the RO world (Nathan 2026-11-09): its Ragnarok Online character's headgear, as the form shows it.  Its
         // items are put away with the form's carried set (or on the character while the Ragnarok page shows them)
         ROWOWIdentity* identity = GetIdentity(player);
+        // The costumes are kept apart and then shown over every spot they cover (rAthena's pc_equipitem: a costume sets the look of each
+        // spot it covers, the lower spots of one covering several to none), so the normal headgear under any of their spots doesn't show
+        uint32 costumeSpellIDs[3] = { 0, 0, 0 };
+        uint8 costumeSpots = 0;
         for (bool isCostume : { false, true })
         {
             for (auto const& itemGUIDByEquipPosition : identity->ItemGUIDsByEquipPosition)
             {
                 uint32 headgearPositions = isCostume == true ? (ROWOW_EQUIP_POSITION_COSTUME_HEAD_TOP | ROWOW_EQUIP_POSITION_COSTUME_HEAD_MID | ROWOW_EQUIP_POSITION_COSTUME_HEAD_LOW)
                     : (ROWOW_EQUIP_POSITION_HEAD_TOP | ROWOW_EQUIP_POSITION_HEAD_MID | ROWOW_EQUIP_POSITION_HEAD_LOW);
-                if ((itemGUIDByEquipPosition.first & headgearPositions) == 0)
+                if ((itemGUIDByEquipPosition.first & headgearPositions) == 0 || IsLookHidden(player, itemGUIDByEquipPosition.first) == true)
                     continue;
-                Item* item = player->GetItemByGuid(ObjectGuid::Create<HighGuid::Item>(itemGUIDByEquipPosition.second));
+                Item* item = GetWornItem(player, itemGUIDByEquipPosition.second); // World equipment's, which stays on the character
                 for (ROWOWStowedItem const& stowedItem : identity->StowedItems)
                     if (item == nullptr && stowedItem.StowedItem != nullptr && stowedItem.StowedItem->GetGUID().GetCounter() == itemGUIDByEquipPosition.second)
                         item = stowedItem.StowedItem;
                 if (item == nullptr)
                     continue;
+                if (isCostume == true)
+                    costumeSpots |= GetCostumeHeadgearSpots(itemGUIDByEquipPosition.first);
                 auto itemVisualIter = ItemVisualsByItemID.find(item->GetEntry());
                 if (itemVisualIter == ItemVisualsByItemID.end() || itemVisualIter->second.VisualType < ROWOW_ITEM_VISUAL_TYPE_HEADGEAR_TOP
                     || itemVisualIter->second.VisualType > ROWOW_ITEM_VISUAL_TYPE_HEADGEAR_LOW)
                     continue;
                 auto spellIter = HeadgearSpellIDsByKey.find(GetHeadgearKey(itemVisualIter->second.ViewID, itemVisualIter->second.VisualType, illusion->IsMale));
-                if (spellIter != HeadgearSpellIDsByKey.end())
-                    wantedSpellIDs[itemVisualIter->second.VisualType - ROWOW_ITEM_VISUAL_TYPE_HEADGEAR_TOP] = spellIter->second;
+                if (spellIter == HeadgearSpellIDsByKey.end())
+                    continue;
+                uint8 spotIndex = itemVisualIter->second.VisualType - ROWOW_ITEM_VISUAL_TYPE_HEADGEAR_TOP;
+                if (isCostume == true)
+                {
+                    costumeSpellIDs[spotIndex] = spellIter->second;
+                    costumeSpots |= 1 << spotIndex;
+                }
+                else
+                    wantedSpellIDs[spotIndex] = spellIter->second;
             }
         }
+        for (uint8 i = 0; i < 3; ++i)
+            if ((costumeSpots & (1 << i)) != 0)
+                wantedSpellIDs[i] = costumeSpellIDs[i];
     }
     else if (illusion != nullptr)
     {
@@ -442,8 +486,10 @@ void ROWOWMod::RefreshIllusionGarment(Player* player, ROWOWIllusion const* illus
         for (uint32 garmentPosition : { ROWOW_EQUIP_POSITION_COSTUME_GARMENT, ROWOW_EQUIP_POSITION_GARMENT })
         {
             Item* item = GetIdentityEquippedItem(player, garmentPosition);
-            if (item == nullptr)
+            if (item == nullptr || IsLookHidden(player, garmentPosition) == true)
                 continue;
+            if (garmentPosition == ROWOW_EQUIP_POSITION_COSTUME_GARMENT && HasMapFlag(player, "nocostume") == true)
+                continue; // A map that shows no costumes (rAthena's mapflag nocostume)
             auto itemVisualIter = ItemVisualsByItemID.find(item->GetEntry());
             if (itemVisualIter == ItemVisualsByItemID.end() || itemVisualIter->second.VisualType != ROWOW_ITEM_VISUAL_TYPE_GARMENT)
                 continue;
@@ -483,7 +529,9 @@ void ROWOWMod::RefreshIllusionHatEffects(Player* player, ROWOWIllusion const* il
         ROWOWIdentity* identity = GetIdentity(player);
         for (auto const& itemGUIDByEquipPosition : identity->ItemGUIDsByEquipPosition)
         {
-            ROWOWItem const* roItem = GetROItem(player->GetItemByGuid(ObjectGuid::Create<HighGuid::Item>(itemGUIDByEquipPosition.second)));
+            if (IsLookHidden(player, itemGUIDByEquipPosition.first) == true)
+                continue; // A hidden slot's item shows no hat effect either
+            ROWOWItem const* roItem = GetROItem(GetWornItem(player, itemGUIDByEquipPosition.second));
             if (roItem == nullptr)
                 continue;
             for (std::string const& hatEffectName : roItem->HatEffectNames)

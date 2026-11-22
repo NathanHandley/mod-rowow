@@ -1834,6 +1834,14 @@ void ROWOWMod::RegisterNpcScriptCommands()
             PCSetFalcon(player, GetArgument(arguments, 0, 1) != 0);
         return ROWOWScriptValue::FromNumber(0);
     });
+    engine->RegisterCommand("rebirthprep", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const&)
+    {
+        // rebirthprep(): MergedWorlds' own, for the Valkyrie (valkyrie.txt), which asks only for the levels: the worn equipment and the cart's items
+        // go to the mailbox and the falcon, Peco and cart are let go of.  Returns how many items were mailed
+        if (Player* player = GetAttachedPlayer(context, "rebirthprep"))
+            return ROWOWScriptValue::FromNumber(int64(MailRebirthBelongings(player)));
+        return ROWOWScriptValue::FromNumber(0);
+    });
     for (char const* noMountCommandName : { "ismounting", "checkwug", "checkdragon", "checkmadogear" })
     {
         // The renewal and third job mounts (and the cash mount) don't exist in pre-renewal
@@ -2247,6 +2255,27 @@ void ROWOWMod::RegisterNpcScriptCommands()
                 setListValue("tradable", 1);
                 count++;
             }
+        }
+        // rAthena's inventory holds what's worn too: after the bags, from world equipment's slots
+        for (uint8 wornSlot = 0; wornSlot < ROWOW_WORN_SLOT_COUNT; wornSlot++)
+        {
+            Item* item = player->GetWorldEquipmentItem(ROWOW_MAP_WORLD, wornSlot);
+            ROWOWItem const* roItem = GetROItem(item);
+            if (roItem == nullptr)
+                continue;
+            setListValue("id", roItem->ItemID);
+            setListValue("idx", count);
+            setListValue("amount", item->GetCount());
+            setListValue("equip", int64(GetIdentityEquipPosition(*identity, item->GetGUID().GetCounter())));
+            setListValue("refine", GetItemRefine(item));
+            setListValue("identify", IsItemIdentified(item) == true ? 1 : 0);
+            setListValue("attribute", IsItemBroken(item) == true ? 1 : 0);
+            for (uint8 cardSlot = 0; cardSlot < 4; cardSlot++)
+                setListValue(fmt::format("card{}", cardSlot + 1), GetItemCard(item, cardSlot));
+            setListValue("expire", 0);
+            setListValue("bound", 0);
+            setListValue("tradable", 1);
+            count++;
         }
         ROWOWSCRIPT->SetVariable(context, "@inventorylist_count", 0, ROWOWScriptValue::FromNumber(count));
         return ROWOWScriptValue::FromNumber(0);

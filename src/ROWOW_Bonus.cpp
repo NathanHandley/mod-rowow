@@ -603,11 +603,18 @@ void ROWOWMod::LoadBonusData()
     };
     auto takeOffAndEmptyCardSlots = [this, getEquipIndexItem](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
     {
+        // Taken off in place (its unequip scripts run with its cards), its slots emptied while it's still the player's, then off to the bags or
+        // by mail
         Item* item = getEquipIndexItem(context, arguments);
-        PCUnequipItem(context.AttachedPlayer, EquipIndexes[arguments[0].GetNumber()].second, 1);
+        if (item == nullptr)
+            return;
+        uint8 wornSlot = GetWornSlot(GetIdentityEquipPosition(*context.Identity, item->GetGUID().GetCounter()));
+        PCUnequipItem(context.AttachedPlayer, EquipIndexes[arguments[0].GetNumber()].second, 1 | ROWOW_UNEQUIP_IN_PLACE);
         for (uint8 slot = 0; slot < ROWOW_MAX_SLOTS; slot++)
             if (GetItemCard(item, slot) != 0)
                 SetItemCard(context.AttachedPlayer, item, slot, 0);
+        if (wornSlot < ROWOW_WORN_SLOT_COUNT)
+            MoveWornItemOff(context.AttachedPlayer, wornSlot, false);
     };
     ROWOWSCRIPT->RegisterCommand("getequipcardcnt", [getEquipIndexCards](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const& arguments)
     {
@@ -640,7 +647,7 @@ void ROWOWMod::LoadBonusData()
         Item* item = getEquipIndexItem(context, arguments);
         if (failType == 0 || failType == 2)
         {
-            PCUnequipItem(context.AttachedPlayer, EquipIndexes[arguments[0].GetNumber()].second, 1);
+            PCUnequipItem(context.AttachedPlayer, EquipIndexes[arguments[0].GetNumber()].second, 1 | ROWOW_UNEQUIP_IN_PLACE); // Destroyed where it's worn
             uint32 count = 1;
             context.AttachedPlayer->DestroyItemCount(item, count, true);
             if (failType == 2)
@@ -663,7 +670,7 @@ void ROWOWMod::LoadBonusData()
             bool isWorn = false;
             for (auto const& itemGUIDByEquipPosition : context.Identity->ItemGUIDsByEquipPosition)
             {
-                ROWOWItem const* roItem = GetROItem(context.AttachedPlayer->GetItemByGuid(ObjectGuid::Create<HighGuid::Item>(itemGUIDByEquipPosition.second)));
+                ROWOWItem const* roItem = GetROItem(GetWornItem(context.AttachedPlayer, itemGUIDByEquipPosition.second));
                 if (roItem != nullptr && int64(roItem->ItemID) == argument.GetNumber())
                     isWorn = true;
             }
@@ -1219,7 +1226,7 @@ void ROWOWMod::StatusCalcPCItems(Player* player, ROWOWIdentity const& identity, 
             continue;
         if (countedItemGUIDs.insert(itemGUIDByEquipPosition.second).second == false)
             continue;
-        Item const* item = player->GetItemByGuid(ObjectGuid::Create<HighGuid::Item>(itemGUIDByEquipPosition.second));
+        Item const* item = GetWornItem(player, itemGUIDByEquipPosition.second);
         ROWOWItem const* roItem = GetROItem(item);
         if (roItem == nullptr)
             continue;
@@ -1332,6 +1339,13 @@ void ROWOWMod::StatusCalcPCItems(Player* player, ROWOWIdentity const& identity, 
             wornCountsByItemID[cardItemID]++;
             wornPositionsByItemID[cardItemID] |= wornItem.Positions;
         }
+    }
+    // The ammo counts too (pc_checkcombo looks at every equip index, EQI_AMMO among them): the bow and arrow sets, like Orc Archer Bow
+    // with Steel Arrows, need it
+    if (ROWOWItem const* roAmmo = GetROItem(ammoItem))
+    {
+        wornCountsByItemID[roAmmo->ItemID]++;
+        wornPositionsByItemID[roAmmo->ItemID] |= ROWOW_EQUIP_POSITION_AMMO;
     }
     std::unordered_set<size_t> ranComboIndexes;
     for (auto const& wornCountByItemID : wornCountsByItemID)
@@ -1533,8 +1547,8 @@ void ROWOWMod::SendCardSlotsToClient(Player* player, Item* equipment)
 
 bool ROWOWMod::InsertCardFreely(Player* player, Item* card, Item* equipment)
 {
-    // pc_insert_card, worn or not: a worn item comes off first (its equip scripts and bonuses go), and goes back on in the same positions with the
-    // card in it (its scripts run again, the card's with them)
+    // pc_insert_card, worn or not: a worn item stays in its slot (no room in the bags needed), its unequip scripts run before the card goes in and
+    // its equip scripts after (the card's with them)
     ROWOWItem const* roEquipment = GetROItem(equipment);
     ROWOWItem const* roCard = GetROItem(card);
     if (roEquipment == nullptr || roCard == nullptr || IsCardFitFor(*roCard, equipment, *roEquipment) == false || PCCantAct(player) == true)
@@ -1544,19 +1558,29 @@ bool ROWOWMod::InsertCardFreely(Player* player, Item* card, Item* equipment)
         freeSlot++;
     if (freeSlot >= roEquipment->Slots)
         return false;
-    uint32 wornPositions = uint32(GetIdentityEquipPosition(*GetIdentity(player), equipment->GetGUID().GetCounter()));
-    if (wornPositions != 0 && PCUnequipItem(player, wornPositions & (~wornPositions + 1), 1) == false)
-        return false;
+    // pc_insert_card wants it unequipped: out of the worn index for the change only (it stays in its slot), then back in the same positions
+    ROWOWIdentity* identity = GetIdentity(player);
+    uint32 wornPosition = GetIdentityEquipPosition(*identity, equipment->GetGUID().GetCounter());
+    if (wornPosition != 0)
+    {
+        RunWornItemScripts(player, equipment, false);
+        identity->ItemGUIDsByEquipPosition.erase(wornPosition);
+    }
     bool isInserted = PCInsertCard(player, card, equipment);
-    if (wornPositions != 0)
-        PCEquipItem(player, equipment, int32(wornPositions));
+    if (wornPosition != 0)
+    {
+        identity->ItemGUIDsByEquipPosition[wornPosition] = equipment->GetGUID().GetCounter();
+        RunWornItemScripts(player, equipment, true);
+        RefreshROForm(player);
+        PCCheckAllowSkill(player);
+    }
     return isInserted;
 }
 
 bool ROWOWMod::RemoveCardFreely(Player* player, Item* equipment, uint8 cardSlot)
 {
     // The card in a slot back into the bags (refused when it wouldn't fit there, rather than landing at the player's feet), worn or not: a worn item
-    // comes off first and goes back on in the same positions without it
+    // stays in its slot, its unequip scripts run before and its equip scripts after
     ROWOWItem const* roEquipment = GetROItem(equipment);
     int32 starCrumbs = 0, forgeElement = 0;
     if (roEquipment == nullptr || (roEquipment->Type != ROWOW_ITEM_TYPE_WEAPON && roEquipment->Type != ROWOW_ITEM_TYPE_ARMOR) || cardSlot >= std::min<uint8>(roEquipment->Slots, ROWOW_MAX_SLOTS)
@@ -1572,13 +1596,17 @@ bool ROWOWMod::RemoveCardFreely(Player* player, Item* equipment, uint8 cardSlot)
         ChatHandler(player->GetSession()).SendSysMessage("There's no room in your bags for the card.");
         return false;
     }
-    uint32 wornPositions = uint32(GetIdentityEquipPosition(*GetIdentity(player), equipment->GetGUID().GetCounter()));
-    if (wornPositions != 0 && PCUnequipItem(player, wornPositions & (~wornPositions + 1), 1) == false)
-        return false;
+    bool isWorn = GetIdentityEquipPosition(*GetIdentity(player), equipment->GetGUID().GetCounter()) != 0;
+    if (isWorn == true)
+        RunWornItemScripts(player, equipment, false);
     SetItemCard(player, equipment, cardSlot, 0);
     GiveROItem(player, cardItemID, 1, true);
-    if (wornPositions != 0)
-        PCEquipItem(player, equipment, int32(wornPositions));
+    if (isWorn == true)
+    {
+        RunWornItemScripts(player, equipment, true);
+        RefreshROForm(player);
+        PCCheckAllowSkill(player);
+    }
     ChatHandler(player->GetSession()).SendSysMessage("The card was removed.");
     SendItemCardsToClient(player, *GetIdentity(player), true);
     return true;
@@ -1594,11 +1622,11 @@ void ROWOWMod::SendCardTargetsToClient(Player* player, Item* card)
     if (roCard == nullptr || roCard->Type != ROWOW_ITEM_TYPE_CARD || GetClientItemPosition(card, cardBag, cardSlot) == false)
         return;
     std::string positions;
-    for (uint8 bag = 0; bag <= 4; bag++)
+    for (uint32 bag : { 0u, 1u, 2u, 3u, 4u, uint32(ROWOW_CLIENT_BAG_WORN) })
     {
         for (uint32 slot = 1; slot <= MAX_BAG_SIZE; slot++)
         {
-            Item* item = GetItemByClientPosition(player, bag, slot);
+            Item* item = GetItemByClientPosition(player, bag, slot, true);
             ROWOWItem const* roItem = GetROItem(item);
             if (roItem == nullptr || IsCardFitFor(*roCard, item, *roItem) == false)
                 continue;
@@ -1620,11 +1648,11 @@ void ROWOWMod::SendItemCardsToClient(Player* player, ROWOWIdentity& identity, bo
     // ROWOWCARDS: the cards (item template IDs) in each item of the bags that has any, "<bag>:<slot>:<card>:<card>:<card>:<card>,..."
     std::string message = "ROWOWCARDS\t";
     bool isFirst = true;
-    for (uint8 bag = 0; bag <= 4; bag++)
+    for (uint32 bag : { 0u, 1u, 2u, 3u, 4u, uint32(ROWOW_CLIENT_BAG_WORN) })
     {
         for (uint32 slot = 1; slot <= MAX_BAG_SIZE; slot++)
         {
-            Item* item = GetItemByClientPosition(player, bag, slot);
+            Item* item = GetItemByClientPosition(player, bag, slot, true);
             if (item == nullptr || GetROItem(item) == nullptr)
                 continue;
             uint32 cardTemplateIDs[ROWOW_MAX_SLOTS] = { };

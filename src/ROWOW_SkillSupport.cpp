@@ -299,7 +299,7 @@ int32 ROWOWMod::SkillBreakEquip(Unit* src, Unit* bl, uint32 where, int32 rate, i
         std::vector<std::pair<uint32, ObjectGuid::LowType>> wornItems(identity->ItemGUIDsByEquipPosition.begin(), identity->ItemGUIDsByEquipPosition.end());
         for (auto const& wornItem : wornItems)
         {
-            Item* item = sd->GetItemByGuid(ObjectGuid::Create<HighGuid::Item>(wornItem.second));
+            Item* item = GetWornItem(sd, wornItem.second);
             ROWOWItem const* roItem = GetROItem(item);
             if (roItem == nullptr || IsItemBroken(item) == true || (wornItem.first & ROWOW_EQUIP_POSITION_COSTUME) != 0 || wornItem.first == ROWOW_EQUIP_POSITION_AMMO)
                 continue;

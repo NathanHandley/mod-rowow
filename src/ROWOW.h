@@ -21,6 +21,7 @@
 #include "DatabaseEnvFwd.h"
 #include "MoveSplineInitArgs.h"
 #include "ObjectGuid.h"
+#include "Optional.h"
 #include "SharedDefines.h"
 
 #include "DataMap.h"
@@ -437,6 +438,25 @@ struct ROWOWDataTable
 #define ROWOW_EQUIP_POSITION_ARMS                   (ROWOW_EQUIP_POSITION_HAND_R | ROWOW_EQUIP_POSITION_HAND_L)
 #define ROWOW_EQUIP_POSITION_ACC                    (ROWOW_EQUIP_POSITION_ACC_L | ROWOW_EQUIP_POSITION_ACC_R)
 #define ROWOW_EQUIP_POSITION_COSTUME                (ROWOW_EQUIP_POSITION_COSTUME_HEAD_TOP | ROWOW_EQUIP_POSITION_COSTUME_HEAD_MID | ROWOW_EQUIP_POSITION_COSTUME_HEAD_LOW | ROWOW_EQUIP_POSITION_COSTUME_GARMENT)
+// The worn items' slots in world ROWOW_MAP_WORLD's equipment (ROWOW_WorldEquipment.cpp): slot n is position bit n
+#define ROWOW_WORN_SLOT_COUNT                       16
+// The client's container id for it (FrameXML WORLD_EQUIPMENT_CONTAINER_FIRST + world - 1), as the ROWOW* addon messages name a bag
+#define ROWOW_CLIENT_BAG_WORN                       61
+// PCUnequipItem's flags past rAthena's (1 recalculates the status, 2 sends nothing, 4 keeps the ammo): 8 the player asked (refused when the bags
+// have no room, never mailed), 16 the item stays in its slot for the caller (who destroys, mails or changes it)
+#define ROWOW_UNEQUIP_ASKED                         8
+#define ROWOW_UNEQUIP_IN_PLACE                      16
+
+// The visual slots the equipment window can hide (ROWOWIdentity::HiddenLookMask, Nathan 2026-11-18): each is one slot's own, so a hidden costume shows
+// the item under it, and a hidden item still shows its costume
+#define ROWOW_HIDDEN_LOOK_HEAD_TOP                  0x01
+#define ROWOW_HIDDEN_LOOK_HEAD_MID                  0x02
+#define ROWOW_HIDDEN_LOOK_HEAD_LOW                  0x04
+#define ROWOW_HIDDEN_LOOK_GARMENT                   0x08
+#define ROWOW_HIDDEN_LOOK_COSTUME_HEAD_TOP          0x10
+#define ROWOW_HIDDEN_LOOK_COSTUME_HEAD_MID          0x20
+#define ROWOW_HIDDEN_LOOK_COSTUME_HEAD_LOW          0x40
+#define ROWOW_HIDDEN_LOOK_COSTUME_GARMENT           0x80
 
 // What pc_isequip says of equipping an item (e_ITEM_EQUIP_ACK)
 #define ROWOW_EQUIP_ACK_OK                          0
@@ -2175,10 +2195,16 @@ struct ROWOWIdentity : public DataMap::Base
     int32 SpriteJobID = -1; // The job whose sprite is shown (Options > Interface > Ragnarok, .ro spritejob): -1 the job of the slot in use
     bool IsPecoMountLookEnabled = true; // Out of Midgard, on a ground mount, a Peco rider's sprite shows its Peco in the mount's place (Options > Interface > Ragnarok, .ro pecomount; IsPecoShownForMount)
     bool IsAutolootEnabled = false; // A monster's drops the character has the loot priority on go into its bags when they fit (Options > Interface > Ragnarok, .ro autoloot; MobDropAutoloot)
+    bool IsWarcraftHPRegen = true; // HP Regen Type (Options > Interface > Ragnarok, .ro hpregen; UpdateNaturalRegen): Warcraft's out of combat regen, or RO's natural regen
+    bool IsFiveSecondRuleSPRegen = true; // The five second rule SP regen on top of RO's (Options > Interface > Ragnarok, .ro spregen; UpdateNaturalRegen)
+    uint8 HiddenLookMask = 0; // The visual slots whose items aren't drawn on the sprite (the equipment window's hide buttons, .ro hidelook; ROWOW_HIDDEN_LOOK_*)
     std::map<uint8, uint32> ActionsByButton; // The RO form's own action bars (packed action and type, as SMSG_ACTION_BUTTONS sends them)
     bool AreActionsChanged = false;
-    std::map<uint32, ObjectGuid::LowType> ItemGUIDsByEquipPosition; // The RO equipment worn (in the bags, as RO's inventory holds it)
+    std::map<uint32, ObjectGuid::LowType> ItemGUIDsByEquipPosition; // The RO equipment worn, in world equipment's container (ROWOW_WorldEquipment.cpp): its index
     bool IsEquipmentChanged = false;
+    std::map<uint32, ObjectGuid::LowType> LegacyEquipmentRows; // mod_rowow_identity_equipment's, from before world equipment: moved in once (ActivateIdentityEquipment)
+    bool IsLegacyEquipmentDeletePending = false; // Those rows go with the next save of the inventory, in which the moved items' rows are written
+    bool IsWorldEquipmentActivationPending = false; // Loaded before the core's world equipment: put in use by the player's own update (ROWOW_ItemScripts.cpp)
     std::string SentEquipmentMessage; // What the client's RO interface was last told of the equipment
     std::string SentCardsMessage; // ... and of the cards in the bags' items
     uint32 EquipmentCheckTimer = 0;
@@ -2289,6 +2315,13 @@ struct ROWOWIdentity : public DataMap::Base
     uint32 SkillRegenSPTimer = 0;
     uint32 SitSkillRegenHPTimer = 0;
     uint32 SitSkillRegenSPTimer = 0;
+    uint32 RestingHPTimer = 0; // Resting Restoration (HP) and (SP): time sat still out of combat with Basic Skill 8, scaled by the regen rate (UpdateRestingRestoration)
+    uint32 RestingSPTimer = 0;
+    uint32 SinceSPUseTime = 5000; // The five second rule SP regen (IsFiveSecondRuleSPRegen): time since a skill last spent SP, up to 5000 ms
+    float MergedSPRegenRemainder = 0.f; // ... the SP owed but not yet given (under a point)
+    std::string SentSkillSPCosts; // The skills' SP costs as last sent (ROWOWSPCOST, UpdateSkillSPCosts), and the time since they were last worked out
+    bool IsSkillSPCostsSent = false;
+    uint32 SkillSPCostTimer = 0;
 
     // A form change made before the character was in the world (arriving on a map), finished once it's in the world
     bool IsFormArrivalPending = false;
@@ -2512,6 +2545,10 @@ public:
     bool SetSpriteJob(Player* player, int32 jobID); // .ro spritejob: -1 for the job of the slot in use; false when it isn't one to pick
     bool SetPecoMountLook(Player* player, bool isEnabled); // .ro pecomount: the Peco shown in a ground mount's place out of Midgard, or the mount as it is
     bool SetAutoloot(Player* player, bool isEnabled); // .ro autoloot: a monster's drops straight into the bags, or on the ground
+    bool SetHiddenLooks(Player* player, uint8 hiddenLookMask); // .ro hidelook: the visual slots whose items aren't drawn
+    bool IsLookHidden(Player* player, uint32 equipPositions); // An item worn at these positions isn't drawn (a visual slot it takes is hidden)
+    void SendHiddenLooksToClient(Player* player); // ROWOWLOOKHIDE
+    bool SetRegenOptions(Player* player, Optional<bool> isWarcraftHPRegen, Optional<bool> isFiveSecondRuleSPRegen); // .ro hpregen and .ro spregen
     void SendSpriteJobsToClient(Player* player);
 
     // R9.6: the post-renewal looks' garments (robes, wings) and hat effects in the RO form, each a hidden aura (the garment's model attached
@@ -2557,6 +2594,7 @@ public:
     // RO identity: one per character, which the character turns into in the RO world (its job's look, level, HP/SP, zeny, spells and
     // action bars) and back out of when leaving it.  The character row keeps the character's own values throughout
     static uint64 GetIllusionJobKey(std::string const& jobKey, bool isMale);
+    bool HasIllusionJobKey(std::string const& jobKey) const; // An illusion of the job key in either gender
     static std::string GetJobNameKey(std::string const& jobName); // A job name as rAthena matches it (Super_Novice is also Supernovice)
     ROWOWJob const* GetJob(uint16 jobID) const;
     uint16 GetNonBabyJobID(uint16 jobID) const; // The job less JOBL_BABY (Baby_Monk's Monk, the job itself for the others)
@@ -2764,6 +2802,11 @@ public:
 
     // RO natural HP and SP regen (status_natural_heal), in place of WoW's while in the form
     void UpdateNaturalRegen(Player* player, uint32 diff);
+    void UpdateRestingRestoration(Player* player, uint32 diff); // MergedWorlds' Basic Skill 8 sitting regen, in place of RO's doubled sitting regen
+    void ClearClientManaRegen(Player* player); // The form's mana bar shows the server's SP only: no regen rate for the client to fill it by
+    void UpdateSkillSPCosts(Player* player, uint32 diff); // ROWOWSPCOST: the skills' SP costs now, for the client to grey out what the SP can't pay
+    void MarkSPUse(Unit* unit); // A player's skill spent its SP: the five second rule starts over
+    void UpdateRestingRestorationPart(Player* player, uint32 diff, bool isResting, int32 rate, uint32& timer, uint32 spellID, bool isSP);
 
     // RO battle (ROWOW_Battle.cpp): the port of rAthena's pre-renewal battle code (battle.cpp) for combat between RO combatants: the normal
     // attack and the weapon, magic and misc attacks of skills.  Statuses (R6.4) and the skill cases of rAthena's switches (R6.5) plug into
@@ -2820,8 +2863,30 @@ public:
     // The RO item worn in an RO equipment position, or null
     Item* GetIdentityEquippedItem(Player* player, uint32 equipPosition) const;
 
-    // RO items (ROWOW_Items.cpp): the port of rAthena's equipment and item use (pc.cpp), and the item's own state.  Worn items stay in the
-    // bags, as RO's inventory holds them, and the identity remembers where each is worn
+    // Where the RO equipment worn is (ROWOW_WorldEquipment.cpp): world ROWOW_MAP_WORLD's equipment, a slot per position bit, a set per identity
+    void RegisterWorldEquipment(); // At startup
+    static uint8 GetWornSlot(uint32 equipPosition); // The lowest position bit's number (ROWOW_WORN_SLOT_COUNT for none)
+    static uint32 GetWornEquipPosition(uint8 slot, ROWOWItem const* roItem); // The positions an item in a slot is worn in
+    uint32 GetWornEquipPositionOfSlot(ROWOWIdentity const& identity, uint8 slot) const; // The index entry whose item is in a slot, 0 for none
+    Item* GetWornItem(Player* player, ObjectGuid::LowType itemGUID) const; // An item worn now, or null
+    Item* GetWornOrCarriedItem(Player* player, ObjectGuid::LowType itemGUID) const;
+    uint32 GetFreeCarriedPlaces(Player* player) const;
+    void RebuildWornEquipment(Player* player, ROWOWIdentity& identity) const; // The index, from the container
+    void ActivateIdentityEquipment(Player* player, ROWOWIdentity& identity); // The identity's set in use, the old rows moved in
+    void MailWornItem(Player* player, uint8 slot);
+    // Off to the RO bags (a place, a bag, or anywhere), or when forced and there's no room, by mail.  The index isn't changed
+    InventoryResult MoveWornItemOff(Player* player, uint8 slot, bool isAsked, uint8 bag = 0 /*NULL_BAG*/, uint8 bagSlot = 255 /*NULL_SLOT*/);
+    void RunWornItemScripts(Player* player, Item* item, bool isEquip); // Its EquipScript or UnEquipScript and its cards'
+    bool TopUpWornAmmo(Player* player, Item* ammo); // The worn ammo stack takes more of its kind: from ammo, or from the bags when null
+    uint32 GetWornItemCount(Player* player, uint32 itemTemplateID) const; // Scripts count worn items with the bags' (D5)
+    void DestroyWornItemCount(Player* player, uint32 itemTemplateID, uint32 count);
+    // The client's drags (ROWOWWorldEquipmentHandler)
+    InventoryResult WearWornSlotFromClient(Player* player, Item* item, uint8 slot);
+    InventoryResult TakeOffWornSlotFromClient(Player* player, uint8 slot, uint8 bag, uint8 bagSlot);
+    InventoryResult MoveWornSlotFromClient(Player* player, uint8 fromSlot, uint8 toSlot);
+
+    // RO items (ROWOW_Items.cpp): the port of rAthena's equipment and item use (pc.cpp), and the item's own state.  Worn items are in world
+    // equipment's container (ROWOW_WorldEquipment.cpp), and the identity remembers where each is worn
     void LoadItemScriptData(); // Registers the script engine's commands and compiles the usable items' scripts
     static uint32 GetItemRefine(Item const* item);
     static bool IsItemBroken(Item const* item);
@@ -2831,8 +2896,10 @@ public:
     uint32 GetIdentityEquipPosition(ROWOWIdentity const& identity, ObjectGuid::LowType itemGUID) const; // Where an item is worn, 0 for not
     uint8 PCIsEquip(Player* player, ROWOWIdentity const& identity, Item const* item) const; // pc_isequip
     int32 PCEquipPoint(Player* player, ROWOWIdentity const& identity, ROWOWItem const& roItem) const; // pc_equippoint
-    bool PCEquipItem(Player* player, Item* item, int32 reqPos); // pc_equipitem
-    bool PCUnequipItem(Player* player, uint32 equipPosition, int32 flag); // pc_unequipitem, by a position the item is worn in
+    // pc_equipitem (resultOut: why not).  True can mean the item is gone (ammo that joined the worn stack of its kind): don't use it after
+    bool PCEquipItem(Player* player, Item* item, int32 reqPos, InventoryResult* resultOut = nullptr);
+    // pc_unequipitem, by a position the item is worn in: off to a place in the bags (bag, bagSlot), or anywhere (ROWOW_UNEQUIP_* for the flags)
+    bool PCUnequipItem(Player* player, uint32 equipPosition, int32 flag, uint8 bag = 0 /*NULL_BAG*/, uint8 bagSlot = 255 /*NULL_SLOT*/, InventoryResult* resultOut = nullptr);
     bool PCCheckItem(Player* player, ROWOWIdentity& identity); // pc_checkitem: takes off what can no longer be worn, true when anything was
     bool PCIsUseItem(Player* player, Item const* item, bool isReporting); // pc_isUseitem
     void PCUseItem(Player* player, ObjectGuid itemGUID); // pc_useitem, after the use item spell
@@ -2868,6 +2935,8 @@ public:
     // a teleport to it leaves a 30 minute return tether aura that, clicked off, goes back to where it was used.  Its 30 minutes are the save slot's and
     // count down only while that slot is played in the RO world (Nathan 2026-11-11)
     uint32 ReturnTetherSpellID = 0; // mod_rowow_status_spell's Special_ReturnTether (0: no tether)
+    uint32 RestingRestorationHPSpellID = 0; // mod_rowow_status_spell's Special_RestingRestorationHP and _SP (0: no icon)
+    uint32 RestingRestorationSPSpellID = 0;
     bool IsReturnToSaveDataLoaded = false;
     std::string ReturnToSaveItemTemplateIDsText; // The items whose use goes to the save point (a Butterfly Wing), as the ROWOWSAVE list
     std::string ReturnToSaveSpellIDsText; // AL_TELEPORT's spells of level 2 and up
@@ -2944,8 +3013,8 @@ public:
     // where each worn item is, under the ROWOWEQUIP prefix, when that changes
     void UpdateIdentityEquipment(Player* player, ROWOWIdentity& identity);
     void SendEquipmentToClient(Player* player, ROWOWIdentity& identity, bool isForced);
-    static bool GetClientItemPosition(Item const* item, uint32& bagOut, uint32& slotOut); // The client's bag (0-4) and slot (from 1)
-    static Item* GetItemByClientPosition(Player* player, uint32 bag, uint32 slot);
+    static bool GetClientItemPosition(Item const* item, uint32& bagOut, uint32& slotOut); // The client's bag (0-4, ROWOW_CLIENT_BAG_WORN) and slot (from 1)
+    static Item* GetItemByClientPosition(Player* player, uint32 bag, uint32 slot, bool isWornAllowed = false); // Worn items only when allowed
 
     // RO skills (ROWOW_Skills.cpp): the port of rAthena's skill tree and skill learning (pc.cpp).  The identity's learned skills are
     // known as their WoW spells while in the form, granted for the form only (never saved with the character's own spells)
@@ -3216,6 +3285,7 @@ public:
     // are kept as their templates and enchantments in mod_rowow_identity_cart, and only touched in the player's own thread
     bool PCIsCartOn(Unit const* unit) const; // pc_iscarton
     bool PCSetCart(Player* player, int32 type); // pc_setcart
+    uint32 MailRebirthBelongings(Player* player); // The Valkyrie's rebirthprep: the worn equipment and cart items mailed, the falcon, Peco and cart let go of
     void StatusCalcCartWeight(Player* player, ROWOWIdentity& identity) const; // status_calc_cart_weight
     int32 PCCartAddItem(Player* player, ROWOWIdentity& identity, ROWOWCartItem const& item, int32 amount); // pc_cart_additem (e_additem_result)
     void PCCartDelItem(Player* player, ROWOWIdentity& identity, int32 slot, int32 amount); // pc_cart_delitem

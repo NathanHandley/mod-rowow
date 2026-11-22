@@ -622,6 +622,7 @@ namespace
                 return;
             }
             ROWOW->StatusZap(src, 0, uint32(ROWOW->GetSkill(SkillID)->SPCost[ROWOWSkill::GetLevelIndex(skillLevel)])); // Consume SP only on success.
+            ROWOW->MarkSPUse(src);
             int32 card = SkillTarotCard(src, target, skillLevel, tick); // Actual effect is executed here.
             if (sd != nullptr)
                 ChatHandler(sd->GetSession()).PSendSysMessage("Tarot Card of Fate: {}", CardNames[std::clamp(card, 1, 14) - 1]); // clif_specialeffect's card

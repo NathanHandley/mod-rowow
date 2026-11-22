@@ -362,8 +362,13 @@ void ROWOWMod::LoadIdentityData()
                 job.ItemJobIndex = itemJobIndex;
         job.NormalJobID = job.JobID;
         job.IllusionJobKey = ToLower(job.Name);
-        if (job.IllusionJobKey.size() > 5 && job.IllusionJobKey.compare(job.IllusionJobKey.size() - 5, 5, "_high") == 0)
-            job.IllusionJobKey.resize(job.IllusionJobKey.size() - 5); // Transcendent first jobs look like the first job
+        if (job.IllusionJobKey.size() > 5 && job.IllusionJobKey.compare(job.IllusionJobKey.size() - 5, 5, "_high") == 0
+            && HasIllusionJobKey(job.IllusionJobKey) == false)
+        {
+            // Transcendent first jobs are their first job's body in cloth palette 1 (the converter's novice_high and others, as the client draws
+            // them); a world database built before those were has only the first job's look
+            job.IllusionJobKey.resize(job.IllusionJobKey.size() - 5);
+        }
         jobIDsByName[GetJobNameKey(job.Name)] = job.JobID;
     }
     for (auto const& secondJobFirstJobID : SecondJobFirstJobIDs)
@@ -628,6 +633,12 @@ void ROWOWMod::LoadIdentityData()
         MapIDsByMapName.size(), ItemTemplateIDs.size(), StartItems.size(), StartMapID, StartCellX, StartCellY, StartBagItemTemplateID);
     MoveSavedSpotsOffStitchedMaps();
     MoveSavedSpotsOnMovedParts();
+}
+
+bool ROWOWMod::HasIllusionJobKey(std::string const& jobKey) const
+{
+    return IllusionSpellIDsByJobKey.find(GetIllusionJobKey(jobKey, true)) != IllusionSpellIDsByJobKey.end()
+        || IllusionSpellIDsByJobKey.find(GetIllusionJobKey(jobKey, false)) != IllusionSpellIDsByJobKey.end();
 }
 
 uint64 ROWOWMod::GetIllusionJobKey(std::string const& jobKey, bool isMale)
@@ -1289,7 +1300,7 @@ ROWOWIdentity* ROWOWMod::GetIdentity(Player* player)
 {
     ROWOWIdentity* identity = player->CustomData.GetDefault<ROWOWIdentity>("ROWOWIdentity");
     if (identity->IsLoaded == true)
-        return identity;
+        return identity; // One loaded before the core's world equipment has its set put in use by its own update (ROWOW_ItemScripts.cpp)
     identity->IsLoaded = true;
     identity->CharacterGUID = player->GetGUID().GetCounter();
     LoadIdentitySlots(player, *identity);
@@ -1433,7 +1444,10 @@ void ROWOWMod::LoadIdentitySlots(Player* player, ROWOWIdentity& identity)
     identity.SpriteJobID = -1;
     identity.IsPecoMountLookEnabled = true;
     identity.IsAutolootEnabled = false;
-    if (QueryResult result = CharacterDatabase.Query("SELECT `slot`, `zeny`, `hair_style`, `hair_color`, `sprite_job`, `peco_mount_look`, `autoloot` FROM `mod_rowow_identity_character` WHERE `guid` = {}", guid))
+    identity.IsWarcraftHPRegen = true;
+    identity.IsFiveSecondRuleSPRegen = true;
+    identity.HiddenLookMask = 0;
+    if (QueryResult result = CharacterDatabase.Query("SELECT `slot`, `zeny`, `hair_style`, `hair_color`, `sprite_job`, `peco_mount_look`, `autoloot`, `hp_regen_type`, `sp_regen_rule`, `hidden_looks` FROM `mod_rowow_identity_character` WHERE `guid` = {}", guid))
     {
         Field* fields = result->Fetch();
         identity.Slot = uint8(std::clamp<uint32>(fields[0].Get<uint8>(), 1, ROWOW_IDENTITY_SLOT_COUNT));
@@ -1449,6 +1463,9 @@ void ROWOWMod::LoadIdentitySlots(Player* player, ROWOWIdentity& identity)
         identity.SpriteJobID = fields[4].Get<int16>();
         identity.IsPecoMountLookEnabled = fields[5].Get<uint8>() != 0;
         identity.IsAutolootEnabled = fields[6].Get<uint8>() != 0;
+        identity.IsWarcraftHPRegen = fields[7].Get<uint8>() == 0;
+        identity.IsFiveSecondRuleSPRegen = fields[8].Get<uint8>() != 0;
+        identity.HiddenLookMask = fields[9].Get<uint8>();
     }
     if (QueryResult result = CharacterDatabase.Query("SELECT `slot`, `identity`, `name` FROM `mod_rowow_identity_slot` WHERE `guid` = {}", guid))
     {
@@ -1603,8 +1620,8 @@ uint32 ROWOWMod::GetIdentityLookHeadSpellID(Player* player)
 
 std::vector<uint16> ROWOWMod::GetSpriteJobIDs(Player* player)
 {
-    // One job for each sprite the history's jobs have in the character's gender, lowest job ID first: a Novice High and a Baby look as the Novice does,
-    // so the three are one entry (named by the lowest, the normal job when it's there)
+    // One job for each sprite the history's jobs have in the character's gender, lowest job ID first: a Baby looks as its normal job does, so the two
+    // are one entry (named by the lowest, the normal job when it's there).  A transcendent first job has its own colors, so its own entry
     ROWOWIdentity* identity = GetIdentity(player);
     bool isMale = player->getGender() == GENDER_MALE;
     std::vector<uint16> spriteJobIDs;
@@ -1689,10 +1706,86 @@ bool ROWOWMod::SetAutoloot(Player* player, bool isEnabled)
     return true;
 }
 
+bool ROWOWMod::SetRegenOptions(Player* player, Optional<bool> isWarcraftHPRegen, Optional<bool> isFiveSecondRuleSPRegen)
+{
+    // Options > Interface > Ragnarok (.ro hpregen, .ro spregen, Nathan 2026-11-17): the HP Regen Type, Warcraft's out of combat regen or RO's
+    // natural regen, and the five second rule SP regen on top of RO's (UpdateNaturalRegen).  The character's own choices, shared by its save
+    // slots as autoloot is
+    ROWOWIdentity* identity = GetIdentity(player);
+    if (IsEnabled == false || HasAnyIdentity(*identity) == false)
+        return false;
+    bool isChanged = false;
+    if (isWarcraftHPRegen.has_value() == true && *isWarcraftHPRegen != identity->IsWarcraftHPRegen)
+    {
+        identity->IsWarcraftHPRegen = *isWarcraftHPRegen;
+        identity->RegenHPTimer = 0;
+        isChanged = true;
+    }
+    if (isFiveSecondRuleSPRegen.has_value() == true && *isFiveSecondRuleSPRegen != identity->IsFiveSecondRuleSPRegen)
+    {
+        identity->IsFiveSecondRuleSPRegen = *isFiveSecondRuleSPRegen;
+        isChanged = true;
+    }
+    // Its row is there once a slot has had an identity (every save writes it too)
+    if (isChanged == true)
+        CharacterDatabase.Execute("UPDATE `mod_rowow_identity_character` SET `hp_regen_type` = {}, `sp_regen_rule` = {} WHERE `guid` = {}",
+            identity->IsWarcraftHPRegen == true ? 0 : 1, identity->IsFiveSecondRuleSPRegen == true ? 1 : 0, identity->CharacterGUID);
+    SendSpriteJobsToClient(player);
+    return true;
+}
+
+bool ROWOWMod::SetHiddenLooks(Player* player, uint8 hiddenLookMask)
+{
+    // The equipment window's hide buttons (.ro hidelook, Nathan 2026-11-18): the visual slots whose items aren't drawn on the sprite, as WoW's Show Helm
+    // hides a helm (RefreshIllusionHeadgear, RefreshIllusionGarment, RefreshIllusionHatEffects), for everyone.  The character's own choice, shared by
+    // its save slots as autoloot is
+    ROWOWIdentity* identity = GetIdentity(player);
+    if (IsEnabled == false || HasAnyIdentity(*identity) == false)
+        return false;
+    if (hiddenLookMask != identity->HiddenLookMask)
+    {
+        identity->HiddenLookMask = hiddenLookMask;
+        // Its row is there once a slot has had an identity (every save writes it too)
+        CharacterDatabase.Execute("UPDATE `mod_rowow_identity_character` SET `hidden_looks` = {} WHERE `guid` = {}", hiddenLookMask, identity->CharacterGUID);
+        RefreshIllusionDisplay(player);
+    }
+    SendHiddenLooksToClient(player);
+    return true;
+}
+
+bool ROWOWMod::IsLookHidden(Player* player, uint32 equipPositions)
+{
+    static std::pair<uint32, uint8> const HiddenLookBitsByPosition[] =
+    {
+        { ROWOW_EQUIP_POSITION_HEAD_TOP, ROWOW_HIDDEN_LOOK_HEAD_TOP }, { ROWOW_EQUIP_POSITION_HEAD_MID, ROWOW_HIDDEN_LOOK_HEAD_MID },
+        { ROWOW_EQUIP_POSITION_HEAD_LOW, ROWOW_HIDDEN_LOOK_HEAD_LOW }, { ROWOW_EQUIP_POSITION_GARMENT, ROWOW_HIDDEN_LOOK_GARMENT },
+        { ROWOW_EQUIP_POSITION_COSTUME_HEAD_TOP, ROWOW_HIDDEN_LOOK_COSTUME_HEAD_TOP }, { ROWOW_EQUIP_POSITION_COSTUME_HEAD_MID, ROWOW_HIDDEN_LOOK_COSTUME_HEAD_MID },
+        { ROWOW_EQUIP_POSITION_COSTUME_HEAD_LOW, ROWOW_HIDDEN_LOOK_COSTUME_HEAD_LOW }, { ROWOW_EQUIP_POSITION_COSTUME_GARMENT, ROWOW_HIDDEN_LOOK_COSTUME_GARMENT },
+    };
+    uint8 hiddenLookMask = GetIdentity(player)->HiddenLookMask;
+    if (hiddenLookMask == 0)
+        return false;
+    // An item taking several slots (a helm over the upper and middle headgear) is hidden by any of them, as the window shows it in each
+    for (auto const& [position, hiddenLookBit] : HiddenLookBitsByPosition)
+        if ((equipPositions & position) != 0 && (hiddenLookMask & hiddenLookBit) != 0)
+            return true;
+    return false;
+}
+
+void ROWOWMod::SendHiddenLooksToClient(Player* player)
+{
+    // ROWOWLOOKHIDE: "<the hidden visual slots, ROWOW_HIDDEN_LOOK_* bits>", for the equipment window's hide buttons.  Sent with ROWOWSPRITE, and
+    // whenever it changes
+    WorldPacket data;
+    ChatHandler::BuildChatPacket(data, CHAT_MSG_SYSTEM, LANG_ADDON, nullptr, nullptr, fmt::format("ROWOWLOOKHIDE\t{}", GetIdentity(player)->HiddenLookMask));
+    player->SendDirectMessage(&data);
+}
+
 void ROWOWMod::SendSpriteJobsToClient(Player* player)
 {
     // ROWOWSPRITE: "<1 with an identity in any save slot, else 0><tab><the job picked, -1 for the job of the slot in use><tab><1 while the Peco is
-    // shown in a ground mount's place out of Midgard, 0 with the mount shown as it is><tab><1 with autoloot on, else 0>", then for each job that may be picked "<tab><job ID>:<job
+    // shown in a ground mount's place out of Midgard, 0 with the mount shown as it is><tab><1 with autoloot on, else 0><tab><HP Regen Type, 0 Warcraft or 1
+    // Ragnarok><tab><1 with the five second rule SP regen on, else 0>", then for each job that may be picked "<tab><job ID>:<job
     // name>" (the name with spaces for rAthena's underscores).  A job picked that can't be shown now is told as -1.  Sent when asked for (.ro
     // spritejob), each time the client's interface has loaded (ROWOW_IdentityServerScript), on every arrival (CompleteROFormChange) and whenever
     // it changes
@@ -1702,8 +1795,8 @@ void ROWOWMod::SendSpriteJobsToClient(Player* player)
     for (uint16 jobID : spriteJobIDs)
         if (int32(jobID) == identity->SpriteJobID)
             spriteJobID = identity->SpriteJobID;
-    std::string addonMessage = fmt::format("ROWOWSPRITE\t{}\t{}\t{}\t{}", HasAnyIdentity(*identity) == true ? 1 : 0, spriteJobID, identity->IsPecoMountLookEnabled == true ? 1 : 0,
-        identity->IsAutolootEnabled == true ? 1 : 0);
+    std::string addonMessage = fmt::format("ROWOWSPRITE\t{}\t{}\t{}\t{}\t{}\t{}", HasAnyIdentity(*identity) == true ? 1 : 0, spriteJobID, identity->IsPecoMountLookEnabled == true ? 1 : 0,
+        identity->IsAutolootEnabled == true ? 1 : 0, identity->IsWarcraftHPRegen == true ? 0 : 1, identity->IsFiveSecondRuleSPRegen == true ? 1 : 0);
     for (uint16 jobID : spriteJobIDs)
     {
         std::string jobName = GetJob(jobID)->Name;
@@ -1713,6 +1806,7 @@ void ROWOWMod::SendSpriteJobsToClient(Player* player)
     WorldPacket data;
     ChatHandler::BuildChatPacket(data, CHAT_MSG_SYSTEM, LANG_ADDON, nullptr, nullptr, addonMessage);
     player->SendDirectMessage(&data);
+    SendHiddenLooksToClient(player);
 }
 
 void ROWOWMod::LoadIdentityRows(Player* player, ROWOWIdentity& slotIdentity)
@@ -1727,6 +1821,7 @@ void ROWOWMod::LoadIdentityRows(Player* player, ROWOWIdentity& slotIdentity)
     {
         // A new identity shares its account's variables: a # variable set before its first save must not rewrite them from an empty set
         LoadIdentityScriptVariables(player, *identity);
+        ActivateIdentityEquipment(player, *identity); // None worn: a slot's before it is put away
         return;
     }
     Field* fields = result->Fetch();
@@ -1769,12 +1864,13 @@ void ROWOWMod::LoadIdentityRows(Player* player, ROWOWIdentity& slotIdentity)
             identity->ActionsByButton[actionFields[0].Get<uint8>()] = actionFields[1].Get<uint32>();
         } while (actionResult->NextRow());
     }
+    // What was worn before world equipment (the item was in the bags or the put away set): moved into the identity's set once it's in use, below
     if (QueryResult equipmentResult = CharacterDatabase.Query("SELECT `equip_position`, `item_guid` FROM `mod_rowow_identity_equipment` WHERE `guid` = {}", guid))
     {
         do
         {
             Field* equipmentFields = equipmentResult->Fetch();
-            identity->ItemGUIDsByEquipPosition[equipmentFields[0].Get<uint32>()] = equipmentFields[1].Get<uint32>();
+            identity->LegacyEquipmentRows[equipmentFields[0].Get<uint32>()] = equipmentFields[1].Get<uint32>();
         } while (equipmentResult->NextRow());
     }
     if (QueryResult skillResult = CharacterDatabase.Query("SELECT `skill_id`, `level` FROM `mod_rowow_identity_skill` WHERE `guid` = {}", guid))
@@ -1810,6 +1906,9 @@ void ROWOWMod::LoadIdentityRows(Player* player, ROWOWIdentity& slotIdentity)
     LoadIdentityQuests(player, *identity);
     LoadIdentityPet(player, *identity);
     LoadIdentityFollowers(player, *identity);
+    // Its worn equipment: its world equipment set in use (the slot's before it put away), after the put away carried set, which the old rows' items
+    // may be in (ROWOW_WorldEquipment.cpp)
+    ActivateIdentityEquipment(player, *identity);
     PCCalcSkillTree(*identity);
 }
 
@@ -1880,9 +1979,9 @@ void ROWOWMod::SaveIdentity(Player* player, CharacterDatabaseTransaction trans, 
     // The identity's rows are its slot's; the slot picked and the zeny go to the character's row, which the other slots share
     uint32 guid = identity->IdentityID;
     // ... with the head and the job sprite picked, which they share too
-    trans->Append("REPLACE INTO `mod_rowow_identity_character` (`guid`, `slot`, `zeny`, `hair_style`, `hair_color`, `sprite_job`, `peco_mount_look`, `autoloot`) VALUES ({}, {}, {}, {}, {}, {}, {}, {})",
+    trans->Append("REPLACE INTO `mod_rowow_identity_character` (`guid`, `slot`, `zeny`, `hair_style`, `hair_color`, `sprite_job`, `peco_mount_look`, `autoloot`, `hp_regen_type`, `sp_regen_rule`, `hidden_looks`) VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
         player->GetGUID().GetCounter(), identity->Slot, identity->Zeny, identity->HairStyle, identity->HairColor, identity->SpriteJobID, identity->IsPecoMountLookEnabled == true ? 1 : 0,
-        identity->IsAutolootEnabled == true ? 1 : 0);
+        identity->IsAutolootEnabled == true ? 1 : 0, identity->IsWarcraftHPRegen == true ? 0 : 1, identity->IsFiveSecondRuleSPRegen == true ? 1 : 0, identity->HiddenLookMask);
     identity->IsZenyShared = true;
     identity->IsHairShared = identity->HairStyle != 0;
     ROWOWPosition const& savePoint = identity->SavePoint;
@@ -1906,13 +2005,13 @@ void ROWOWMod::SaveIdentity(Player* player, CharacterDatabaseTransaction trans, 
             trans->Append("INSERT INTO `mod_rowow_identity_action` (`guid`, `button`, `action`) VALUES ({}, {}, {})", guid, actionByButton.first, actionByButton.second);
         identity->AreActionsChanged = false;
     }
-    if (identity->IsEquipmentChanged == true)
+    // What's worn is world equipment, saved by the core with the inventory (character_world_item).  The rows from before it go once their items
+    // were moved in, with the save of the inventory that writes where those are now
+    identity->IsEquipmentChanged = false;
+    if (identity->IsLegacyEquipmentDeletePending == true && isInventorySaved == true)
     {
         trans->Append("DELETE FROM `mod_rowow_identity_equipment` WHERE `guid` = {}", guid);
-        for (auto const& itemGUIDByEquipPosition : identity->ItemGUIDsByEquipPosition)
-            trans->Append("INSERT INTO `mod_rowow_identity_equipment` (`guid`, `equip_position`, `item_guid`) VALUES ({}, {}, {})", guid, itemGUIDByEquipPosition.first,
-                itemGUIDByEquipPosition.second);
-        identity->IsEquipmentChanged = false;
+        identity->IsLegacyEquipmentDeletePending = false;
     }
     if (identity->AreSkillsChanged == true)
     {
@@ -2322,12 +2421,21 @@ void ROWOWMod::GiveNewIdentityStartItems(Player* player, ROWOWIdentity& identity
     if (identity.IsNewIdentityPending == false || IsROSetCarried(player) == false)
         return;
     GiveStartBags(player);
+    // The new identity's own world equipment set, for what it starts wearing (an empty one: a reset destroyed the old)
+    ActivateIdentityEquipment(player, identity);
     for (ROWOWStartItem const& startItem : StartItems)
     {
         Item* item = nullptr;
         GiveStartItemOrMail(player, startItem.ItemTemplateID, startItem.Amount, &item);
-        if (item != nullptr && startItem.EquipPosition != 0) // One sent by mail isn't worn
+        if (item == nullptr || startItem.EquipPosition == 0) // One sent by mail isn't worn
+            continue;
+        uint8 slot = GetWornSlot(startItem.EquipPosition);
+        InventoryResult result = player->WearWorldEquipmentItem(ROWOW_MAP_WORLD, slot, item);
+        if (result == EQUIP_ERR_OK)
             identity.ItemGUIDsByEquipPosition[startItem.EquipPosition] = item->GetGUID().GetCounter();
+        else
+            LOG_ERROR("module.ROWOW", "GiveNewIdentityStartItems: {}'s start item {} couldn't be worn in slot {} ({}): it stays in the bags", player->GetName(),
+                item->GetEntry(), slot, uint32(result));
     }
     identity.IsEquipmentChanged = true;
     identity.IsNewIdentityPending = false;
@@ -2699,9 +2807,9 @@ bool ROWOWMod::SelectIdentitySlot(Player* player, uint8 slot)
     bool isHairShared = identity->IsHairShared == true || (identity->Exists == true && identity->HairStyle != 0);
     uint8 hairStyle = identity->HairStyle;
     uint8 hairColor = identity->HairColor;
-    trans->Append("REPLACE INTO `mod_rowow_identity_character` (`guid`, `slot`, `zeny`, `hair_style`, `hair_color`, `sprite_job`, `peco_mount_look`, `autoloot`) VALUES ({}, {}, {}, {}, {}, {}, {}, {})",
+    trans->Append("REPLACE INTO `mod_rowow_identity_character` (`guid`, `slot`, `zeny`, `hair_style`, `hair_color`, `sprite_job`, `peco_mount_look`, `autoloot`, `hp_regen_type`, `sp_regen_rule`, `hidden_looks`) VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
         guid, slot, identity->Zeny, isHairShared == true ? hairStyle : 0, isHairShared == true ? hairColor : 0, identity->SpriteJobID, identity->IsPecoMountLookEnabled == true ? 1 : 0,
-        identity->IsAutolootEnabled == true ? 1 : 0);
+        identity->IsAutolootEnabled == true ? 1 : 0, identity->IsWarcraftHPRegen == true ? 0 : 1, identity->IsFiveSecondRuleSPRegen == true ? 1 : 0, identity->HiddenLookMask);
     CharacterDatabase.CommitTransaction(trans);
 
     // The slot's identity in this one's place
@@ -2713,6 +2821,9 @@ bool ROWOWMod::SelectIdentitySlot(Player* player, uint8 slot)
     int32 spriteJobID = identity->SpriteJobID;
     bool isPecoMountLookEnabled = identity->IsPecoMountLookEnabled;
     bool isAutolootEnabled = identity->IsAutolootEnabled;
+    bool isWarcraftHPRegen = identity->IsWarcraftHPRegen;
+    bool isFiveSecondRuleSPRegen = identity->IsFiveSecondRuleSPRegen;
+    uint8 hiddenLookMask = identity->HiddenLookMask;
     player->CustomData.Erase("ROWOWIdentity");
     identity = player->CustomData.GetDefault<ROWOWIdentity>("ROWOWIdentity");
     identity->IsLoaded = true;
@@ -2734,6 +2845,9 @@ bool ROWOWMod::SelectIdentitySlot(Player* player, uint8 slot)
     identity->SpriteJobID = spriteJobID;
     identity->IsPecoMountLookEnabled = isPecoMountLookEnabled;
     identity->IsAutolootEnabled = isAutolootEnabled;
+    identity->IsWarcraftHPRegen = isWarcraftHPRegen;
+    identity->IsFiveSecondRuleSPRegen = isFiveSecondRuleSPRegen;
+    identity->HiddenLookMask = hiddenLookMask;
     LoadIdentityRows(player, *identity);
     identity->AccountVariables = accountVariables; // Its rows may not have the save above yet
     LOG_INFO("module.ROWOW", "{} changed Ragnarok Online save slot {} for {} ({}, identity {})", player->GetName(), oldSlot, slot,
@@ -3299,6 +3413,6 @@ Item* ROWOWMod::GetIdentityEquippedItem(Player* player, uint32 equipPosition) co
     // An item worn in several positions (a two-handed weapon, a headgear covering two) is kept under all of them together
     for (auto const& itemGUIDByEquipPosition : identity->ItemGUIDsByEquipPosition)
         if ((itemGUIDByEquipPosition.first & equipPosition) == equipPosition)
-            return player->GetItemByGuid(ObjectGuid::Create<HighGuid::Item>(itemGUIDByEquipPosition.second));
+            return GetWornItem(player, itemGUIDByEquipPosition.second);
     return nullptr;
 }

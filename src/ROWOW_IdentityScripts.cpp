@@ -290,6 +290,23 @@ namespace
         ROWOWItemMove move;
         if (ReadItemMove(player, packet, move) == false)
             return false;
+        // A drag on the RO equipment slots (world equipment's container) goes to the core, which hands it to ROWOWWorldEquipmentHandler; any other
+        // packet naming one the core refuses itself
+        if ((packet.GetOpcode() == CMSG_SWAP_ITEM || packet.GetOpcode() == CMSG_AUTOSTORE_BAG_ITEM) &&
+            (Player::IsWorldContainerAddress(move.SourceBag) == true || (move.DestinationBag != NULL_BAG && Player::IsWorldContainerAddress(move.DestinationBag) == true)))
+            return false;
+        // WoW's own equip of RO equipment (a macro's /equip or /equipslot, which RO_Identity's EquipItemByName hook wears with .ro wear): WoW can't
+        // wear it, so the packet is let go quietly (the item unlocked, no "This item cannot be equipped.")
+        if (packet.GetOpcode() == CMSG_AUTOEQUIP_ITEM || packet.GetOpcode() == CMSG_AUTOEQUIP_ITEM_SLOT)
+        {
+            Item* item = player->GetItemByPos(move.SourceBag, move.SourceSlot);
+            ROWOWItem const* roItem = ROWOW->GetROItem(item);
+            if (roItem != nullptr && roItem->Locations != 0)
+            {
+                player->SendEquipError(EQUIP_ERR_NONE, item, nullptr);
+                return true;
+            }
+        }
         uint8 sourceBag = move.SourceBag;
         uint8 sourceSlot = move.SourceSlot;
         bool isSourceAllowed = IsCarriedSetPosition(sourceBag, sourceSlot) == true || ROWOW->StorageIsRagnarokTabPosition(player, sourceBag, sourceSlot) == true;
@@ -435,6 +452,8 @@ public:
             player->SaveToDB(false, false);
 
         ROWOW->UpdateNaturalRegen(player, p_time);
+        ROWOW->UpdateRestingRestoration(player, p_time);
+        ROWOW->UpdateSkillSPCosts(player, p_time);
         ROWOW->UpdateStatusChanges(player);
         ROWOW->UpdateWorldIdentity(player, p_time); // In every world: the look of the character's identity for it
         ROWOW->UpdateJobField(player); // In every world: the RO job other clients' tooltips name (0 out of the form)
@@ -926,12 +945,19 @@ public:
                 uint32 standState = 0;
                 packetCopy >> standState;
                 ROWOWStatusChangeEntry const* gravitation = ROWOW->GetSCE(player, ROWOW_SC_GRAVITATION);
-                if (standState == UNIT_STAND_STATE_SIT && (ROWOW->GetSCE(player, ROWOW_SC_DANCING) != nullptr || (gravitation != nullptr && gravitation->Val3 == ROWOW_BCT_SELF)))
+                // A refused sit sends the stand state back: the client has already sat the character down (its model and RO sprite) and
+                // otherwise shows it seated while the server has it standing
+                auto refuseSit = [player]()
+                {
+                    player->SetStandState(player->getStandState());
                     return false;
+                };
+                if (standState == UNIT_STAND_STATE_SIT && (ROWOW->GetSCE(player, ROWOW_SC_DANCING) != nullptr || (gravitation != nullptr && gravitation->Val3 == ROWOW_BCT_SELF)))
+                    return refuseSit();
                 if (standState != UNIT_STAND_STATE_SIT || ROWOW->BattleConfig.BasicSkillCheck == 0 || ROWOW->PCCheckSkill(player, ROWOW_SKILL_NV_BASIC) >= 3)
                     return true;
                 ChatHandler(session).SendNotification("You need Basic Skill level 3 to sit.");
-                return false;
+                return refuseSit();
             }
             case CMSG_OPEN_ITEM:
             {
@@ -1240,6 +1266,9 @@ public:
             { "spritejob", HandleROSpriteJobCommand, SEC_PLAYER, Console::No },
             { "pecomount", HandleROPecoMountCommand, SEC_PLAYER, Console::No },
             { "autoloot", HandleROAutolootCommand, SEC_PLAYER, Console::No },
+            { "hpregen",  HandleROHPRegenCommand, SEC_PLAYER,    Console::No },
+            { "spregen",  HandleROSPRegenCommand, SEC_PLAYER,    Console::No },
+            { "hidelook", HandleROHideLookCommand, SEC_PLAYER,   Console::No },
             { "enter",    HandleROEnterCommand,  SEC_PLAYER,     Console::No },
             { "content",  HandleROContentCommand, SEC_GAMEMASTER, Console::Yes },
             { "slot",     HandleROSlotCommand,   SEC_PLAYER,     Console::No },
@@ -1382,6 +1411,8 @@ public:
         ROWOW->SendReturnTetherToClient(player, true); // ... and the return tether's place, on its aura's tooltip
         ROWOW->SendFamilyToClient(player); // The Ragnarok page's family (ROWOW_Family.cpp)
         ROWOW->SendJobNamesToClient(player); // The jobs' names, for the unit tooltip (ROWOW_WorldIdentity.cpp)
+        if (ROWOWIdentity* spCostIdentity = player->CustomData.Get<ROWOWIdentity>("ROWOWIdentity"))
+            spCostIdentity->IsSkillSPCostsSent = false; // The skills' SP costs again, at the next update (UpdateSkillSPCosts)
         if (ROWOW->IsInROForm(player) == true)
         {
             ROWOW->SendEquipmentToClient(player, *ROWOW->GetIdentity(player), true);
@@ -3187,7 +3218,7 @@ public:
             handler->SendSysMessage("You can't take this item off.");
             return true;
         }
-        ROWOW->PCUnequipItem(player, equipPosition, 1);
+        ROWOW->PCUnequipItem(player, equipPosition, 1 | ROWOW_UNEQUIP_ASKED); // Refused with no room in the bags (D4)
         return true;
     }
 
@@ -3208,7 +3239,7 @@ public:
         if (player == nullptr || ROWOW->IsInROForm(player) == false)
             return false;
         Item* card = ROWOWMod::GetItemByClientPosition(player, cardBag, cardSlot);
-        Item* equipment = ROWOWMod::GetItemByClientPosition(player, bag, slot);
+        Item* equipment = ROWOWMod::GetItemByClientPosition(player, bag, slot, true); // Worn or not
         if (card == nullptr || equipment == nullptr || ROWOW->InsertCardFreely(player, card, equipment) == false)
             handler->SendSysMessage("Compounding has failed."); // clif_insert_card's failure (msgstringtable 494)
         return true;
@@ -3221,7 +3252,7 @@ public:
         Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
         if (player == nullptr || ROWOW->IsInROForm(player) == false)
             return false;
-        ROWOW->SendCardSlotsToClient(player, ROWOWMod::GetItemByClientPosition(player, bag, slot));
+        ROWOW->SendCardSlotsToClient(player, ROWOWMod::GetItemByClientPosition(player, bag, slot, true)); // Worn or not
         return true;
     }
 
@@ -3232,7 +3263,7 @@ public:
         if (player == nullptr || ROWOW->IsInROForm(player) == false)
             return false;
         Item* card = ROWOWMod::GetItemByClientPosition(player, cardBag, cardSlot);
-        Item* equipment = ROWOWMod::GetItemByClientPosition(player, bag, slot);
+        Item* equipment = ROWOWMod::GetItemByClientPosition(player, bag, slot, true); // Worn or not
         if (card == nullptr || equipment == nullptr || ROWOW->InsertCardFreely(player, card, equipment) == false)
             handler->SendSysMessage("Compounding has failed."); // clif_insert_card's failure (msgstringtable 494)
         ROWOW->SendCardSlotsToClient(player, equipment);
@@ -3245,7 +3276,7 @@ public:
         Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
         if (player == nullptr || ROWOW->IsInROForm(player) == false)
             return false;
-        Item* equipment = ROWOWMod::GetItemByClientPosition(player, bag, slot);
+        Item* equipment = ROWOWMod::GetItemByClientPosition(player, bag, slot, true); // Worn or not
         if (equipment == nullptr || cardSlot < 1 || ROWOW->RemoveCardFreely(player, equipment, uint8(cardSlot - 1)) == false)
             handler->SendSysMessage("The card couldn't be removed.");
         ROWOW->SendCardSlotsToClient(player, equipment);
@@ -3365,6 +3396,57 @@ public:
             return true;
         }
         if (ROWOW->SetAutoloot(player, *isEnabled != 0) == false)
+        {
+            handler->SendSysMessage("You have no Ragnarok Online character yet.");
+            ROWOW->SendSpriteJobsToClient(player); // The page shows what's kept again
+        }
+        return true; // Answered above (false would add the command's usage lines)
+    }
+
+    // Options > Interface > Ragnarok's "HP Regen Type" (Nathan 2026-11-17): ".ro hpregen 0" (the default) Warcraft's, 1% of the max HP every 2 seconds
+    // out of combat (2% sitting), ".ro hpregen 1" RO's natural regen.  The answer is the ROWOWSPRITE message, which carries the choice
+    static bool HandleROHPRegenCommand(ChatHandler* handler, Optional<uint32> regenType)
+    {
+        return HandleRORegenOption(handler, regenType.has_value() == true ? Optional<bool>(*regenType == 0) : Optional<bool>(), Optional<bool>());
+    }
+
+    // ... "Enable WoW-like 5-second rule SP regen": ".ro spregen 1" (the default) on, ".ro spregen 0" off
+    static bool HandleROSPRegenCommand(ChatHandler* handler, Optional<uint32> isEnabled)
+    {
+        return HandleRORegenOption(handler, Optional<bool>(), isEnabled.has_value() == true ? Optional<bool>(*isEnabled != 0) : Optional<bool>());
+    }
+
+    // The equipment window's hide buttons (Nathan 2026-11-18): ".ro hidelook <mask>" hides the visual slots of its ROWOW_HIDDEN_LOOK_* bits (0, the
+    // default, shows them all).  The answer is the ROWOWLOOKHIDE message
+    static bool HandleROHideLookCommand(ChatHandler* handler, Optional<uint32> hiddenLookMask)
+    {
+        Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
+        if (player == nullptr)
+            return false;
+        if (hiddenLookMask.has_value() == false)
+        {
+            ROWOW->SendHiddenLooksToClient(player);
+            return true;
+        }
+        if (ROWOW->SetHiddenLooks(player, uint8(*hiddenLookMask & 0xFF)) == false)
+        {
+            handler->SendSysMessage("You have no Ragnarok Online character yet.");
+            ROWOW->SendHiddenLooksToClient(player); // The window shows what's kept again
+        }
+        return true; // Answered above (false would add the command's usage lines)
+    }
+
+    static bool HandleRORegenOption(ChatHandler* handler, Optional<bool> isWarcraftHPRegen, Optional<bool> isFiveSecondRuleSPRegen)
+    {
+        Player* player = handler->GetSession() != nullptr ? handler->GetSession()->GetPlayer() : nullptr;
+        if (player == nullptr)
+            return false;
+        if (isWarcraftHPRegen.has_value() == false && isFiveSecondRuleSPRegen.has_value() == false)
+        {
+            ROWOW->SendSpriteJobsToClient(player);
+            return true;
+        }
+        if (ROWOW->SetRegenOptions(player, isWarcraftHPRegen, isFiveSecondRuleSPRegen) == false)
         {
             handler->SendSysMessage("You have no Ragnarok Online character yet.");
             ROWOW->SendSpriteJobsToClient(player); // The page shows what's kept again
@@ -3558,6 +3640,10 @@ public:
         // Only the save slot in use is reset: the new identity keeps its slot, and what the slots share (the zeny, the head, the job history, which
         // keeps the reset one's jobs, and the job sprite picked)
         ROWOWIdentity* oldIdentity = ROWOW->GetIdentity(player);
+        // Its worn equipment goes with it, in the same save: the slot's set key outlives the reset (slot 1's is the character's GUID), so the new
+        // identity would put the old set on
+        player->DestroyWorldEquipmentSet(ROWOW_MAP_WORLD, oldIdentity->IdentityID);
+        oldIdentity->ItemGUIDsByEquipPosition.clear();
         CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
         player->SaveToDB(trans, false, false);
         ROWOW->DeleteIdentityRows(oldIdentity->IdentityID, trans);
@@ -3575,6 +3661,9 @@ public:
         int32 spriteJobID = oldIdentity->SpriteJobID;
         bool isPecoMountLookEnabled = oldIdentity->IsPecoMountLookEnabled;
         bool isAutolootEnabled = oldIdentity->IsAutolootEnabled;
+        bool isWarcraftHPRegen = oldIdentity->IsWarcraftHPRegen;
+        bool isFiveSecondRuleSPRegen = oldIdentity->IsFiveSecondRuleSPRegen;
+        uint8 hiddenLookMask = oldIdentity->HiddenLookMask;
         slots[slot - 1].Exists = false;
         slots[slot - 1].HasRiding = false;
         player->CustomData.Erase("ROWOWIdentity");
@@ -3593,6 +3682,9 @@ public:
         identity->SpriteJobID = spriteJobID;
         identity->IsPecoMountLookEnabled = isPecoMountLookEnabled;
         identity->IsAutolootEnabled = isAutolootEnabled;
+        identity->IsWarcraftHPRegen = isWarcraftHPRegen;
+        identity->IsFiveSecondRuleSPRegen = isFiveSecondRuleSPRegen;
+        identity->HiddenLookMask = hiddenLookMask;
         identity->AccountVariables = accountVariables;
         if (wasInForm == true)
             ROWOW->EnterROForm(player);
@@ -3751,25 +3843,26 @@ public:
             if (cards[slot] != 0)
                 ROWOW->SetItemCard(player, item, slot, cards[slot]);
 
-        // Both accessory positions take the free one, or the left
+        // Worn by the player's own rules (PCEquipItem: the RO bags on, the job and level, what's displaced comes off); both accessory positions take
+        // the free one, or the right
+        // (The item can be used up by it: ammo joins the worn stack of its kind.  Only what's taken before is used after)
         ROWOWIdentity* identity = ROWOW->GetIdentity(player);
         uint32 equipPosition = position.value_or(0) != 0 ? *position : roItem.Locations;
-        if (equipPosition == (ROWOW_EQUIP_POSITION_ACC_L | ROWOW_EQUIP_POSITION_ACC_R))
-            equipPosition = ROWOW->GetIdentityEquippedItem(player, ROWOW_EQUIP_POSITION_ACC_L) == nullptr ? ROWOW_EQUIP_POSITION_ACC_L : ROWOW_EQUIP_POSITION_ACC_R;
-        for (auto itemGUIDIter = identity->ItemGUIDsByEquipPosition.begin(); itemGUIDIter != identity->ItemGUIDsByEquipPosition.end();)
+        std::string itemName = item->GetTemplate()->Name1;
+        ObjectGuid::LowType itemGUID = item->GetGUID().GetCounter();
+        InventoryResult result = EQUIP_ERR_OK;
+        if (ROWOW->PCEquipItem(player, item, int32(equipPosition), &result) == false)
         {
-            if ((itemGUIDIter->first & equipPosition) != 0)
-                itemGUIDIter = identity->ItemGUIDsByEquipPosition.erase(itemGUIDIter);
-            else
-                ++itemGUIDIter;
+            handler->PSendSysMessage("{} got {} x{} in the bags: it couldn't be worn there (InventoryResult {}).", player->GetName(), itemName, count, uint32(result));
+            return true;
         }
-        identity->ItemGUIDsByEquipPosition[equipPosition] = item->GetGUID().GetCounter();
-        identity->IsEquipmentChanged = true;
-        if (identity->IsInForm == true)
-            ROWOW->RefreshROForm(player);
-        else
+        if (identity->IsInForm == false)
             ROWOW->CalculateIdentityStatus(player, *identity);
-        handler->PSendSysMessage("{} now wears {} x{} (position {:#x}).", player->GetName(), item->GetTemplate()->Name1, count, equipPosition);
+        uint32 wornPosition = ROWOW->GetIdentityEquipPosition(*identity, itemGUID);
+        if (wornPosition != 0)
+            handler->PSendSysMessage("{} now wears {} x{} (position {:#x}).", player->GetName(), itemName, count, wornPosition);
+        else
+            handler->PSendSysMessage("{}'s worn {} took the {} more.", player->GetName(), itemName, count);
         return true;
     }
 
