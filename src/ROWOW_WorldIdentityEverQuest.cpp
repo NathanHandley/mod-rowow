@@ -45,18 +45,15 @@ uint32 ROWOWMod::GetEverQuestIdentityLookSpellID(Player* player) const
 {
     // THE SEAM FOR THE EQWOW-SoL MERGE: "which EverQuest look does this character have", as the spell whose aura shows it (an EverQuest illusion form
     // spell, which mod-everquest dresses as it dresses any: its aura hooks do the rest).  0 for none.
-    // Today a character has no EverQuest character of its own, so its racial guise stands in: the guise item mod-everquest hands its race and class
-    // (mod_everquest_playercreateinfo.illusionitem) teaches a spell whose form spells (male and female) are the look.  SoL binds an EverQuest
-    // character to the Warcraft one at creation (EverQuestMod::GetPlayerOriginState: eqRace and its looks): once that is merged, return the form
-    // spell of that origin's race here instead, and nothing else in mod-rowow changes
+    // The racial guise of the character's EverQuest race is the look: its item teaches a spell whose form spells (male and female) are the look.  The race
+    // is the one picked on the EverQuest page of character creation (EverQuestMod::GetPlayerCreateInfoForPlayer goes by its eqRace start), and a character
+    // from before that page goes by the guise its WoW race and class are given (mod_everquest_playercreateinfo.illusionitem)
 #if ROWOW_HAS_MOD_EVERQUEST
     if (player == nullptr || EverQuest->IsEnabled == false)
         return 0;
-    uint8 raceID = player->getRace(true);
-    uint8 classID = player->getClass();
-    if (EverQuest->HasCreatePlayerData(raceID, classID) == false)
+    if (EverQuest->HasCreatePlayerData(player->getRace(true), player->getClass()) == false)
         return 0;
-    ItemTemplate const* guiseItemTemplate = sObjectMgr->GetItemTemplate(EverQuest->GetPlayerCreateInfo(raceID, classID).IllusionItemID);
+    ItemTemplate const* guiseItemTemplate = sObjectMgr->GetItemTemplate(EverQuest->GetPlayerCreateInfoForPlayer(player).IllusionItemID);
     if (guiseItemTemplate == nullptr)
         return 0;
     for (uint8 spellIndex = 0; spellIndex < MAX_ITEM_PROTO_SPELLS; spellIndex++)
