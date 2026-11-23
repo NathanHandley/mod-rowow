@@ -917,6 +917,10 @@ std::shared_ptr<ROWOWSkillUnitGroup> ROWOWMod::SkillUnitSetting(Unit* src, uint1
         {
             // An Ice Wall cell shows for as long as its HP lasts (it loses 50 a second), its limit being renewed each second
             int64 visualLimit = skillID == ROWOW_SKILL_WZ_ICEWALL ? int64(unit->Val1 / 50 + 1) * std::max(1, interval) : unit->Limit;
+            // MergedWorlds (Nathan 2026-11-22): a Warp Portal opens (UNT_WARP_ACTIVE, 2 s), then waits out the skill's time.  Its look outlasts
+            // the opening, as the map expires dynamic objects before the unit timer's morph could renew it (the morph then sets the time left)
+            if (group->UnitID == ROWOW_UNT_WARP_ACTIVE)
+                visualLimit += SkillGetTime(group->SkillID, group->SkillLevel) + ROWOW_SKILLUNITTIMER_INTERVAL;
             unit->VisualGUID = CreateSkillUnitVisual(src, skill->UnitSpellIDsByLevel[levelIndex], cellX, cellY, cellZ, (GetMapGrid(map->GetId()) != nullptr ?
                 GetMapGrid(map->GetId())->CellSize : CellSize) * 0.5f, visualLimit);
         }

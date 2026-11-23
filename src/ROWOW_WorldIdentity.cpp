@@ -248,7 +248,7 @@ uint32 ROWOWMod::GetWorldIdentityRagnarokLookSpellID(Player* player)
     uint32 spellID = GetIdentityLookIllusionSpellID(player, IsPecoShownForMount(player, GetIdentityLookJob(player)));
     if (spellID != 0)
         return spellID;
-    bool isMale = player->getGender() == GENDER_MALE;
+    bool isMale = ROWOWGetOwnGender(player) == GENDER_MALE;
     for (ROWOWIdentitySlot const& identitySlot : identity->Slots)
     {
         ROWOWJob const* job = identitySlot.Exists == true ? GetJob(identitySlot.JobID) : nullptr;
@@ -295,7 +295,7 @@ std::string ROWOWMod::GetOutfitIllusionJobKey(Player* player)
     uint32 option = GetOutfitOption(player);
     if (option == 0)
         return std::string();
-    bool isMale = player->getGender() == GENDER_MALE;
+    bool isMale = ROWOWGetOwnGender(player) == GENDER_MALE;
     std::pair<uint32, char const*> const outfitJobKeys[] = { { ROWOW_OPTION_WEDDING, "wedding" }, { ROWOW_OPTION_XMAS, "xmas" }, { ROWOW_OPTION_SUMMER, "summer" } };
     for (auto const& outfitJobKey : outfitJobKeys)
         if ((option & outfitJobKey.first) != 0 && IllusionSpellIDsByJobKey.find(GetIllusionJobKey(outfitJobKey.second, isMale)) != IllusionSpellIDsByJobKey.end())
@@ -308,7 +308,7 @@ uint32 ROWOWMod::GetOutfitIllusionSpellID(Player* player)
     std::string jobKey = GetOutfitIllusionJobKey(player);
     if (jobKey.empty() == true)
         return 0;
-    auto illusionSpellIDIter = IllusionSpellIDsByJobKey.find(GetIllusionJobKey(jobKey, player->getGender() == GENDER_MALE));
+    auto illusionSpellIDIter = IllusionSpellIDsByJobKey.find(GetIllusionJobKey(jobKey, ROWOWGetOwnGender(player) == GENDER_MALE));
     return illusionSpellIDIter != IllusionSpellIDsByJobKey.end() ? illusionSpellIDIter->second : 0;
 }
 
@@ -359,7 +359,7 @@ bool ROWOWMod::IsPecoShownForMount(Player* player, ROWOWJob const* shownJob)
         return false;
     if (GetIdentity(player)->IsPecoMountLookEnabled == false)
         return false;
-    if (IllusionSpellIDsByJobKey.find(GetIllusionJobKey(shownJob->IllusionJobKey + "_riding", player->getGender() == GENDER_MALE)) == IllusionSpellIDsByJobKey.end())
+    if (IllusionSpellIDsByJobKey.find(GetIllusionJobKey(shownJob->IllusionJobKey + "_riding", ROWOWGetOwnGender(player) == GENDER_MALE)) == IllusionSpellIDsByJobKey.end())
         return false;
     Unit::AuraEffectList const& mountAuras = player->GetAuraEffectsByType(SPELL_AURA_MOUNTED);
     if (mountAuras.empty() == true)

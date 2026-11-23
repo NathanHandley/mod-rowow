@@ -781,7 +781,7 @@ bool ROWOWMod::SetIdentityHair(Player* player, uint32 style, uint32 color)
 {
     // The character's one head, every save slot's (Nathan 2026-11-09): kept with the character (at once when it has an identity, else with its first
     // one), shown at once on the illusion, and told to the addon's options
-    if (HeadSpellIDsByKey.find(GetHeadKey(style, color, player->getGender() == GENDER_MALE)) == HeadSpellIDsByKey.end())
+    if (HeadSpellIDsByKey.find(GetHeadKey(style, color, ROWOWGetOwnGender(player) == GENDER_MALE)) == HeadSpellIDsByKey.end())
         return false;
     ROWOWIdentity* identity = GetIdentity(player);
     // Written only when it changed (or was never the shared head): the hair windows send it for every look tried

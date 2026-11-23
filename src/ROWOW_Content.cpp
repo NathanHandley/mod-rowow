@@ -614,7 +614,7 @@ private:
         if (nativeDisplayID != 0 && ROWOW->IsRagnarokDisplay(nativeDisplayID) == false)
             return nativeDisplayID;
         if (PlayerInfo const* info = sObjectMgr->GetPlayerInfo(player->getRace(true), player->getClass()))
-            return player->getGender() == GENDER_FEMALE ? info->displayId_f : info->displayId_m;
+            return ROWOWGetOwnGender(player) == GENDER_FEMALE ? info->displayId_f : info->displayId_m;
         return CreatureModel::DefaultInvisibleModel.CreatureDisplayID;
     }
 

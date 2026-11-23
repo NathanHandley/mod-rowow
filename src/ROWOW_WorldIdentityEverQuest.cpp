@@ -62,7 +62,7 @@ uint32 ROWOWMod::GetEverQuestIdentityLookSpellID(Player* player) const
         if (guiseSpellID <= 0 || EverQuest->IsSpellAnEQSpell(uint32(guiseSpellID)) == false)
             continue;
         EverQuestSpell const& guiseSpell = EverQuest->GetSpellDataForSpellID(uint32(guiseSpellID));
-        uint32 formSpellID = player->getGender() == GENDER_MALE ? guiseSpell.MaleFormSpellID : guiseSpell.FemaleFormSpellID;
+        uint32 formSpellID = ROWOWGetOwnGender(player) == GENDER_MALE ? guiseSpell.MaleFormSpellID : guiseSpell.FemaleFormSpellID;
         if (formSpellID != 0)
             return formSpellID;
     }
