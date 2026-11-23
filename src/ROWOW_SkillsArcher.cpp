@@ -533,7 +533,7 @@ namespace
         {
             Player* sd = src->ToPlayer();
             Player* dstsd = target->ToPlayer();
-            if ((sd != nullptr && dstsd != nullptr && ROWOW->PCIsBardDancer(dstsd) == true && dstsd->getGender() == sd->getGender()) ||
+            if ((sd != nullptr && dstsd != nullptr && ROWOW->PCIsBardDancer(dstsd) == true && ROWOWGetOwnGender(dstsd) == ROWOWGetOwnGender(sd)) ||
                 ROWOW->GetSCE(target, ROWOW_SC_CURSE) != nullptr || ROWOW->GetSCE(target, ROWOW_SC_QUAGMIRE) != nullptr)
             {
                 // Cannot cast on another bard/dancer-type class of the same gender as caster, or targets under Curse/Quagmire

@@ -286,7 +286,7 @@ bool ROWOWMod::PCMarriage(Player* sd, Player* dstsd)
     ROWOWJob const* job = GetJob(identity->JobID);
     ROWOWJob const* dstJob = GetJob(dstIdentity->JobID);
     if (identity->Exists == false || dstIdentity->Exists == false || (job != nullptr && job->IsBaby == true) || (dstJob != nullptr && dstJob->IsBaby == true) ||
-        sd->getGender() == dstsd->getGender())
+        ROWOWGetOwnGender(sd) == ROWOWGetOwnGender(dstsd))
         return false;
     {
         std::lock_guard<std::mutex> lock(FamilyMutex);
@@ -507,7 +507,7 @@ bool ROWOWMod::PCAdoption(Player* p1, Player* p2, Player* baby)
     }
     ROWOWIdentity* babyIdentity = GetIdentity(baby);
     int64 jobClass = PCJobIDToMapID(int32(babyIdentity->JobID));
-    int32 babyJobID = jobClass >= 0 ? PCMapIDToJobID(uint64(jobClass) | ROWOW_JOBL_BABY, baby->getGender() == GENDER_MALE) : -1;
+    int32 babyJobID = jobClass >= 0 ? PCMapIDToJobID(uint64(jobClass) | ROWOW_JOBL_BABY, ROWOWGetOwnGender(baby) == GENDER_MALE) : -1;
     if (babyJobID < 0 || GetJob(uint16(babyJobID)) == nullptr)
     {
         SendText(p1, "The adoption failed: " + baby->GetName() + "'s job has no Baby job.");
@@ -527,7 +527,7 @@ bool ROWOWMod::PCAdoption(Player* p1, Player* p2, Player* baby)
     babyIdentity->JobLevel = jobLevel;
     babyIdentity->JobExp = jobExp;
 
-    Player* father = p1->getGender() == GENDER_MALE ? p1 : p2;
+    Player* father = ROWOWGetOwnGender(p1) == GENDER_MALE ? p1 : p2;
     Player* mother = father == p1 ? p2 : p1;
     ROWOWIdentity* fatherIdentity = GetIdentity(father);
     ROWOWIdentity* motherIdentity = GetIdentity(mother);

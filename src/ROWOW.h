@@ -17,6 +17,12 @@
 #ifndef ROWOW_H
 #define ROWOW_H
 
+// MergedWorlds (Nathan 2026-11-22): a unit's own sex: a player's character sex (Player::GetNativeGender), never the sex of the look it
+// shows.  getGender() follows the shown display, so an opposite sex look flipped every look picked after it (a sprite flipping back and
+// forth, a job change or a guise coming back as the other sex), and RO's Sex, job change and partner checks read the look's
+class Unit;
+unsigned char ROWOWGetOwnGender(Unit const* unit);
+
 #include "Common.h"
 #include "DatabaseEnvFwd.h"
 #include "MoveSplineInitArgs.h"

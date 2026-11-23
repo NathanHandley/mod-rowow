@@ -729,7 +729,7 @@ void ROWOWMod::RegisterNpcScriptCommands()
             case 2: jobClass |= ROWOW_JOBL_BABY; break;
             default: break;
         }
-        int32 newJobID = PCMapIDToJobID(uint64(jobClass), player->getGender() == GENDER_MALE);
+        int32 newJobID = PCMapIDToJobID(uint64(jobClass), ROWOWGetOwnGender(player) == GENDER_MALE);
         if (newJobID >= 0)
             PCJobChange(player, uint16(newJobID));
         return ROWOWScriptValue::FromNumber(0);
@@ -2148,7 +2148,7 @@ void ROWOWMod::RegisterNpcScriptCommands()
         if (arguments.size() > 1)
             isMale = arguments[1].GetNumber() == 1;
         else if (context.AttachedPlayer != nullptr)
-            isMale = context.AttachedPlayer->getGender() == GENDER_MALE;
+            isMale = ROWOWGetOwnGender(context.AttachedPlayer) == GENDER_MALE;
         return ROWOWScriptValue::FromNumber(PCMapIDToJobID(uint64(GetArgument(arguments, 0, 0)), isMale));
     });
     engine->RegisterCommand("resetskill", [this](ROWOWScriptContext& context, std::vector<ROWOWScriptValue> const&)

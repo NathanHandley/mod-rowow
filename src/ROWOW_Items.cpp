@@ -307,7 +307,7 @@ void ROWOWMod::LoadItemScriptData()
         ROWOWJob const* job = GetJob(identity.JobID);
         return int64(job == nullptr ? 0 : (job->IsUpper == true ? 1 : (job->IsBaby == true ? 2 : 0)));
     });
-    registerParameter("Sex", [](Player* player, ROWOWIdentity&) { return int64(player->getGender() == GENDER_MALE ? ROWOW_GENDER_MALE : ROWOW_GENDER_FEMALE); });
+    registerParameter("Sex", [](Player* player, ROWOWIdentity&) { return int64(ROWOWGetOwnGender(player) == GENDER_MALE ? ROWOW_GENDER_MALE : ROWOW_GENDER_FEMALE); });
     registerParameter("Zeny", [](Player* player, ROWOWIdentity&) { return int64(player->GetMoney()); });
     registerParameter("Hp", [](Player* player, ROWOWIdentity&) { return int64(player->GetHealth()); });
     registerParameter("MaxHp", [](Player* player, ROWOWIdentity&) { return int64(player->GetMaxHealth()); });
@@ -778,7 +778,7 @@ uint8 ROWOWMod::PCIsEquip(Player* player, ROWOWIdentity const& identity, Item co
         return ROWOW_EQUIP_ACK_FAIL_LEVEL;
     if (roItem->EquipLevelMax != 0 && identity.BaseLevel > roItem->EquipLevelMax)
         return ROWOW_EQUIP_ACK_FAIL_LEVEL;
-    uint8 gender = player->getGender() == GENDER_MALE ? ROWOW_GENDER_MALE : ROWOW_GENDER_FEMALE;
+    uint8 gender = ROWOWGetOwnGender(player) == GENDER_MALE ? ROWOW_GENDER_MALE : ROWOW_GENDER_FEMALE;
     if (roItem->Gender != ROWOW_GENDER_BOTH && roItem->Gender != gender)
         return ROWOW_EQUIP_ACK_FAIL;
 
@@ -1224,7 +1224,7 @@ bool ROWOWMod::PCIsUseItem(Player* player, Item const* item, bool isReporting)
     }
 
     // Gender, level, job and class
-    uint8 gender = player->getGender() == GENDER_MALE ? ROWOW_GENDER_MALE : ROWOW_GENDER_FEMALE;
+    uint8 gender = ROWOWGetOwnGender(player) == GENDER_MALE ? ROWOW_GENDER_MALE : ROWOW_GENDER_FEMALE;
     ROWOWJob const* job = GetJob(identity->JobID);
     if ((roItem->Gender != ROWOW_GENDER_BOTH && roItem->Gender != gender) || (roItem->EquipLevelMin != 0 && identity->BaseLevel < roItem->EquipLevelMin)
         || (roItem->EquipLevelMax != 0 && identity->BaseLevel > roItem->EquipLevelMax) || job == nullptr || job->ItemJobIndex < 0

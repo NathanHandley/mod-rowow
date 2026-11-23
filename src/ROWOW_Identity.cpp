@@ -1584,7 +1584,7 @@ ROWOWJob const* ROWOWMod::GetIdentityLookJob(Player* player)
     if (identity->SpriteJobID >= 0 && identity->JobHistoryJobIDs.find(uint16(identity->SpriteJobID)) != identity->JobHistoryJobIDs.end())
     {
         ROWOWJob const* spriteJob = GetJob(uint16(identity->SpriteJobID));
-        if (HasJobIllusion(spriteJob, player->getGender() == GENDER_MALE) == true)
+        if (HasJobIllusion(spriteJob, ROWOWGetOwnGender(player) == GENDER_MALE) == true)
             return spriteJob;
     }
     return identity->Exists == true ? GetJob(identity->JobID) : nullptr;
@@ -1603,7 +1603,7 @@ uint32 ROWOWMod::GetIdentityLookIllusionSpellID(Player* player, bool isRiding)
     ROWOWJob const* job = GetIdentityLookJob(player);
     if (job == nullptr)
         return 0;
-    bool isMale = player->getGender() == GENDER_MALE;
+    bool isMale = ROWOWGetOwnGender(player) == GENDER_MALE;
     auto illusionSpellIDIter = IllusionSpellIDsByJobKey.end();
     if (isRiding == true)
         illusionSpellIDIter = IllusionSpellIDsByJobKey.find(GetIllusionJobKey(job->IllusionJobKey + "_riding", isMale));
@@ -1615,7 +1615,7 @@ uint32 ROWOWMod::GetIdentityLookIllusionSpellID(Player* player, bool isRiding)
 uint32 ROWOWMod::GetIdentityLookHeadSpellID(Player* player)
 {
     ROWOWIdentity const* identity = GetIdentity(player);
-    return GetHeadSpellID(identity->HairStyle, identity->HairColor, player->getGender() == GENDER_MALE);
+    return GetHeadSpellID(identity->HairStyle, identity->HairColor, ROWOWGetOwnGender(player) == GENDER_MALE);
 }
 
 std::vector<uint16> ROWOWMod::GetSpriteJobIDs(Player* player)
@@ -1623,7 +1623,7 @@ std::vector<uint16> ROWOWMod::GetSpriteJobIDs(Player* player)
     // One job for each sprite the history's jobs have in the character's gender, lowest job ID first: a Baby looks as its normal job does, so the two
     // are one entry (named by the lowest, the normal job when it's there).  A transcendent first job has its own colors, so its own entry
     ROWOWIdentity* identity = GetIdentity(player);
-    bool isMale = player->getGender() == GENDER_MALE;
+    bool isMale = ROWOWGetOwnGender(player) == GENDER_MALE;
     std::vector<uint16> spriteJobIDs;
     std::unordered_set<std::string> jobKeys;
     for (uint16 jobID : identity->JobHistoryJobIDs)
@@ -2674,7 +2674,7 @@ bool ROWOWMod::CreateIdentity(Player* player, uint32 hairStyle, uint32 hairColor
         return false;
     // One head for every save slot (Nathan 2026-11-09): the hair is picked for the character's first identity only, and one made beside others has theirs
     bool isHairPicked = HasOtherIdentity(*identity) == false;
-    if (isHairPicked == true && HeadSpellIDsByKey.find(GetHeadKey(hairStyle, hairColor, player->getGender() == GENDER_MALE)) == HeadSpellIDsByKey.end())
+    if (isHairPicked == true && HeadSpellIDsByKey.find(GetHeadKey(hairStyle, hairColor, ROWOWGetOwnGender(player) == GENDER_MALE)) == HeadSpellIDsByKey.end())
         return false;
     if (player->IsInCombat() == true || player->IsAlive() == false || player->IsBeingTeleported() == true)
         return false;
@@ -3415,4 +3415,13 @@ Item* ROWOWMod::GetIdentityEquippedItem(Player* player, uint32 equipPosition) co
         if ((itemGUIDByEquipPosition.first & equipPosition) == equipPosition)
             return GetWornItem(player, itemGUIDByEquipPosition.second);
     return nullptr;
+}
+
+unsigned char ROWOWGetOwnGender(Unit const* unit)
+{
+    if (unit == nullptr)
+        return GENDER_NONE;
+    if (Player const* player = unit->ToPlayer())
+        return player->GetNativeGender();
+    return unit->getGender(); // a creature: its display's
 }

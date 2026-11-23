@@ -1228,7 +1228,7 @@ int32 ROWOWMod::SkillCheckPCPartner(Player* sd, uint16 skillID, uint16& skillLev
             return 0;
         ROWOWStatus const* tstatus = GetROStatus(tsd);
         int32 partnerSkillLevel = PCCheckSkill(tsd, skillID);
-        if (sd->getGender() != tsd->getGender() && PCIsBardDancer(tsd) == true && partnerSkillLevel > 0 && tstatus != nullptr &&
+        if (ROWOWGetOwnGender(sd) != ROWOWGetOwnGender(tsd) && PCIsBardDancer(tsd) == true && partnerSkillLevel > 0 && tstatus != nullptr &&
             (tstatus->WeaponType == ROWOW_WEAPON_TYPE_MUSICAL || tstatus->WeaponType == ROWOW_WEAPON_TYPE_WHIP) && sd->GetGroup() != nullptr &&
             sd->GetGroup() == tsd->GetGroup() && (tsc == nullptr || tsc->HasSCE(ROWOW_SC_DANCING) == false))
         {
